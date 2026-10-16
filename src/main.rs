@@ -19,7 +19,7 @@ fn main() {
     let cfg = config::Config::default();
 
     if args.first().map(String::as_str) == Some("--snapshot") {
-        let mut o = snapshot::Opts { png: None, cols: 100, rows: 30, wait: Duration::from_secs(5), cmd: Vec::new() };
+        let mut o = snapshot::Opts { png: None, cols: 100, rows: 30, wait: Duration::from_secs(5), cmd: Vec::new(), keys: None };
         let mut it = args.into_iter().skip(1);
         while let Some(a) = it.next() {
             match a.as_str() {
@@ -29,6 +29,7 @@ fn main() {
                         o.rows = r.parse().unwrap_or(30);
                     }
                 }
+                "--keys" => o.keys = it.next(),
                 "--wait" => o.wait = Duration::from_millis(it.next().and_then(|s| s.parse().ok()).unwrap_or(5000)),
                 "--" => {
                     o.cmd = it.by_ref().collect();

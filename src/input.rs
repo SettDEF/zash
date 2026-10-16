@@ -134,6 +134,57 @@ fn named(n: Named, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
     }
 }
 
+/// Keys in Vim-like notation (`echo hi<CR>`, `<C-a>`, `<Up>`, `<S-Tab>`,
+/// `<M-b>`), encoded exactly as the window would: for headless tests.
+pub fn encode_notation(s: &str, app_cursor: bool) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '<' {
+            if let Some(end) = chars[i + 1..].iter().position(|c| *c == '>') {
+                let name: String = chars[i + 1..i + 1 + end].iter().collect();
+                let (mods_s, base) = name.rsplit_once('-').map(|(m, b)| (m.to_string(), b.to_string())).unwrap_or_default();
+                let (mods_s, base) = if base.is_empty() { (String::new(), name.clone()) } else { (mods_s, base) };
+                let mods = Mods { ctrl: mods_s.contains('C'), alt: mods_s.contains('M') || mods_s.contains('A'), shift: mods_s.contains('S') };
+                let key = match base.to_ascii_lowercase().as_str() {
+                    "cr" | "enter" => Some(Key::Named(Named::Enter)),
+                    "tab" => Some(Key::Named(Named::Tab)),
+                    "bs" => Some(Key::Named(Named::Backspace)),
+                    "esc" => Some(Key::Named(Named::Escape)),
+                    "up" => Some(Key::Named(Named::Up)),
+                    "down" => Some(Key::Named(Named::Down)),
+                    "left" => Some(Key::Named(Named::Left)),
+                    "right" => Some(Key::Named(Named::Right)),
+                    "home" => Some(Key::Named(Named::Home)),
+                    "end" => Some(Key::Named(Named::End)),
+                    "del" => Some(Key::Named(Named::Delete)),
+                    "pageup" => Some(Key::Named(Named::PageUp)),
+                    "pagedown" => Some(Key::Named(Named::PageDown)),
+                    _ => None,
+                };
+                let bytes = match key {
+                    Some(k) => encode(&k, mods, app_cursor),
+                    None if base.chars().count() == 1 => {
+                        let b = base.clone();
+                        encode(&Key::Text(&b), mods, app_cursor)
+                    }
+                    None => None,
+                };
+                if let Some(b) = bytes {
+                    out.push(b);
+                    i += end + 2;
+                    continue;
+                }
+            }
+        }
+        let mut buf = [0u8; 4];
+        out.push(chars[i].encode_utf8(&mut buf).as_bytes().to_vec());
+        i += 1;
+    }
+    out
+}
+
 /// Pasted text: bracketed when the program asked for it (it then knows the
 /// text was pasted, not typed), with any embedded end-marker removed so a
 /// paste cannot break out of the brackets.

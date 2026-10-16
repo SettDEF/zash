@@ -18,6 +18,8 @@ pub struct Opts {
     pub rows: usize,
     pub wait: Duration,
     pub cmd: Vec<String>,
+    /// keys typed into the program once it has started (input::encode_notation)
+    pub keys: Option<String>,
 }
 
 /// Runs the command until it exits (or `wait` passes) and returns the screen.
@@ -25,6 +27,15 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
     let (tx, rx) = mpsc::channel();
     let grid = Grid { cols: o.cols, rows: o.rows, cell_w: 9.0, cell_h: 18.0 };
     let session = Session::spawn(Some(o.cmd.clone()), grid, cfg.scrollback, Sink::Channel(tx))?;
+    if let Some(keys) = &o.keys {
+        // give the program a moment to start, then type at a human-ish pace
+        std::thread::sleep(Duration::from_millis(400));
+        let app_cursor = session.term.lock().mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR);
+        for b in crate::input::encode_notation(keys, app_cursor) {
+            session.write(b);
+            std::thread::sleep(Duration::from_millis(8));
+        }
+    }
     let deadline = Instant::now() + o.wait;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
