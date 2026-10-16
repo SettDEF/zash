@@ -274,8 +274,12 @@ impl App {
         };
         let view = tex.texture.create_view(&Default::default());
         g.window.pre_present_notify();
-        g.renderer.render(&g.device, &g.queue, &view, g.config.width, g.config.height, &frame);
+        let animating = g.renderer.render(&g.device, &g.queue, &view, g.config.width, g.config.height, &frame);
         g.queue.present(tex);
+        // another frame only while the cursor is still gliding: idle stays idle
+        if animating {
+            g.window.request_redraw();
+        }
     }
 }
 

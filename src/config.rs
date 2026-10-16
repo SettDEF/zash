@@ -139,6 +139,9 @@ pub struct Config {
     pub features: Vec<(String, u32)>,
     pub padding: f32,
     pub scrollback: usize,
+    /// cursor glide time constant, ms (0: no animation)
+    pub cursor_ms: f32,
+    pub cursor_trail: bool,
     pub palette: Palette,
     /// the colour file followed live
     pub colors_file: PathBuf,
@@ -153,6 +156,8 @@ impl Default for Config {
             features: ["cv06", "cv14", "cv32", "ss04", "ss07", "ss09"].iter().map(|f| (f.to_string(), 1)).collect(),
             padding: 0.0,
             scrollback: 10_000,
+            cursor_ms: 90.0,
+            cursor_trail: true,
             palette: Palette::load(),
             colors_file: Palette::tinct_file(),
         }
@@ -206,6 +211,8 @@ struct File {
     features: Option<Vec<String>>,
     padding: Option<f32>,
     scrollback: Option<usize>,
+    cursor_animation: Option<f32>,
+    cursor_trail: Option<bool>,
     /// a tinct/WezTerm-style colour file to follow instead of the default
     colors: Option<String>,
 }
@@ -224,6 +231,9 @@ features = ["cv06", "cv14", "cv32", "ss04", "ss07", "ss09"]
 padding = 0
 # Lines kept for scrolling back.
 scrollback = 10000
+# The cursor glides to where it goes (milliseconds; 0 = it jumps), with a short smear.
+cursor_animation = 90
+cursor_trail = true
 # Colours: the file tinct writes for WezTerm, so zash follows the wallpaper.
 colors = "~/.config/wezterm/tinct_colors.lua"
 "#;
@@ -263,6 +273,8 @@ impl Config {
         if let Some(v) = f.features { c.features = v.into_iter().map(|t| (t, 1)).collect(); }
         if let Some(v) = f.padding { c.padding = v; }
         if let Some(v) = f.scrollback { c.scrollback = v; }
+        if let Some(v) = f.cursor_animation { c.cursor_ms = v.max(0.0); }
+        if let Some(v) = f.cursor_trail { c.cursor_trail = v; }
         if let Some(v) = f.colors {
             let home = std::env::var("HOME").unwrap_or_default();
             let p = PathBuf::from(v.replacen('~', &home, 1));

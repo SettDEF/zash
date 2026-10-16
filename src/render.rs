@@ -263,6 +263,19 @@ pub struct Renderer {
     pub cell_w: f32,
     pub cell_h: f32,
     pub pad: f32,
+    /// cursor animation: time constant in ms (0: jumps), and the trailing smear
+    pub cursor_ms: f32,
+    pub cursor_trail: bool,
+    anim: Option<CursorAnim>,
+}
+
+/// The drawn cursor chases its real position: the head quickly, the tail a
+/// little slower (the smear). Exponential, so it is the same at any frame rate.
+struct CursorAnim {
+    head: (f32, f32),
+    tail: (f32, f32),
+    target: (f32, f32),
+    last: std::time::Instant,
 }
 
 impl Renderer {
@@ -293,6 +306,9 @@ impl Renderer {
             cell_w: 0.0,
             cell_h: 0.0,
             pad: 0.0,
+            cursor_ms: cfg.cursor_ms,
+            cursor_trail: cfg.cursor_trail,
+            anim: None,
         };
         r.set_font(cfg.font_size_pt, cfg.line_height, cfg.padding, scale);
         r
@@ -375,7 +391,7 @@ impl Renderer {
         }
     }
 
-    fn rect_list(&self, frame: &Frame) -> Vec<Rect> {
+    fn rect_list(&self, frame: &Frame, cur: Option<((f32, f32), (f32, f32))>) -> Vec<Rect> {
         let (cw, ch, pad) = (self.cell_w, self.cell_h, self.pad);
         let mut out = Vec::new();
         for (r, row) in frame.rows.iter().enumerate() {
@@ -407,7 +423,16 @@ impl Renderer {
             }
         }
         if let Some((r, c, shape)) = frame.cursor {
-            let (x, y) = (pad + c as f32 * cw, pad + r as f32 * ch);
+            let (x, y) = cur.map(|c| c.0).unwrap_or((pad + c as f32 * cw, pad + r as f32 * ch));
+            // the smear: from the lagging tail to the head, along one line only
+            if let Some((_, (tx, ty))) = cur.filter(|_| self.cursor_trail) {
+                if (ty - y).abs() < 1.0 && (tx - x).abs() > 1.0 {
+                    let (a, b) = (tx.min(x), tx.max(x));
+                    let mut col = frame.cursor_color.f32();
+                    col[3] = 0.35;
+                    out.push(Rect { xywh: [a, y + ch * 0.15, b - a, ch * 0.7], color: col });
+                }
+            }
             let wide = frame.rows.get(r).and_then(|row| row.get(c)).is_some_and(|cell| cell.wide);
             let w = if wide { 2.0 * cw } else { cw };
             let col = frame.cursor_color.f32();
@@ -431,9 +456,11 @@ impl Renderer {
     }
 
     /// Draws a frame into `view` (a window surface or an offscreen texture).
-    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView, width: u32, height: u32, frame: &Frame) {
+    /// Returns true while something still animates (the caller asks for another frame).
+    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView, width: u32, height: u32, frame: &Frame) -> bool {
         self.shape_rows(frame, width as f32);
-        let rects = self.rect_list(frame);
+        let (cur, animating) = self.cursor_motion(frame);
+        let rects = self.rect_list(frame, cur);
         self.rects.upload(device, queue, &rects, width as f32, height as f32);
         self.viewport.update(queue, Resolution { width, height });
         let (pad, ch) = (self.pad, self.cell_h);
@@ -472,5 +499,38 @@ impl Renderer {
         }
         queue.submit(Some(enc.finish()));
         self.atlas.trim();
+        animating
+    }
+
+    fn cursor_motion(&mut self, frame: &Frame) -> (Option<((f32, f32), (f32, f32))>, bool) {
+        let target = frame.cursor.map(|(r, c, _)| (self.pad + c as f32 * self.cell_w, self.pad + r as f32 * self.cell_h));
+        let (Some(t), true) = (target, self.cursor_ms > 0.0) else {
+            self.anim = None;
+            return (None, false);
+        };
+        let now = std::time::Instant::now();
+        let a = self.anim.get_or_insert(CursorAnim { head: t, tail: t, target: t, last: now });
+        if a.target != t {
+            // a far jump (another screen, a distant line) snaps instead of flying across
+            if (t.1 - a.head.1).abs() > self.cell_h * 6.0 {
+                *a = CursorAnim { head: t, tail: t, target: t, last: now };
+            }
+            a.target = t;
+            // the first step of a move after a pause counts as one frame, not the whole pause
+            a.last = now - std::time::Duration::from_millis(16);
+        }
+        let dt = now.duration_since(a.last).as_secs_f32() * 1000.0;
+        a.last = now;
+        let k = |tau: f32| 1.0 - (-dt / tau.max(1.0)).exp();
+        let (kh, kt) = (k(self.cursor_ms / 3.0), k(self.cursor_ms / 1.5));
+        a.head.0 += (t.0 - a.head.0) * kh;
+        a.head.1 += (t.1 - a.head.1) * kh;
+        a.tail.0 += (t.0 - a.tail.0) * kt;
+        a.tail.1 += (t.1 - a.tail.1) * kt;
+        let near = |p: (f32, f32)| (p.0 - t.0).abs() + (p.1 - t.1).abs() < 0.5;
+        let mut moving = false;
+        if near(a.head) { a.head = t } else { moving = true }
+        if near(a.tail) { a.tail = t } else { moving = true }
+        (Some((a.head, a.tail)), moving)
     }
 }
