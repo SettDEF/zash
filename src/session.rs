@@ -65,20 +65,17 @@ pub struct Session {
 
 impl Session {
     /// Starts `cmd` (or the login shell) in a new pty.
-    pub fn spawn(cmd: Option<Vec<String>>, grid: Grid, scrollback: usize, sink: Sink) -> std::io::Result<Session> {
+    pub fn spawn(cmd: Option<Vec<String>>, workdir: Option<std::path::PathBuf>, grid: Grid, scrollback: usize, sink: Sink) -> std::io::Result<Session> {
         let config = term::Config { scrolling_history: scrollback, kitty_keyboard: false, ..Default::default() };
         let listener = Listener(sink);
         let term = Arc::new(FairMutex::new(Term::new(config, &grid.term_size(), listener.clone())));
 
-        let mut env = std::collections::HashMap::new();
-        env.insert("TERM".into(), "xterm-256color".into());
-        env.insert("COLORTERM".into(), "truecolor".into());
-        env.insert("TERM_PROGRAM".into(), "zash".into());
+        let env = program_env();
         let shell = cmd.and_then(|c| {
             let mut it = c.into_iter();
             it.next().map(|p| tty::Shell::new(p, it.collect()))
         });
-        let options = tty::Options { shell, working_directory: None, drain_on_exit: true, env };
+        let options = tty::Options { shell, working_directory: workdir, drain_on_exit: true, env };
         let pty = tty::new(&options, grid.window_size(), 0)?;
         let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
         let notifier = Notifier(event_loop.channel());
@@ -105,5 +102,57 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.notifier.0.send(Msg::Shutdown);
+    }
+}
+
+/// Variables other terminals and multiplexers set. A zash started from inside
+/// one of them must not pass them on: programs would think they run there
+/// (tmux-aware tools, image protocols, true-colour detection all go wrong).
+pub const FOREIGN: &[&str] = &[
+    "TMUX", "TMUX_PANE", "STY", "ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID",
+    "WEZTERM_PANE", "WEZTERM_UNIX_SOCKET", "WEZTERM_EXECUTABLE", "WEZTERM_EXECUTABLE_DIR", "WEZTERM_CONFIG_DIR", "WEZTERM_CONFIG_FILE",
+    "KITTY_WINDOW_ID", "KITTY_PID", "KITTY_PUBLIC_KEY", "KITTY_INSTALLATION_DIR", "KITTY_LISTEN_ON",
+    "ALACRITTY_WINDOW_ID", "ALACRITTY_SOCKET", "ALACRITTY_LOG",
+    "VTE_VERSION", "GNOME_TERMINAL_SCREEN", "GNOME_TERMINAL_SERVICE", "KONSOLE_VERSION", "KONSOLE_DBUS_SESSION", "KONSOLE_DBUS_SERVICE",
+    "ITERM_SESSION_ID", "TERMINAL_EMULATOR", "TERM_SESSION_ID", "WT_SESSION", "GHOSTTY_RESOURCES_DIR", "GHOSTTY_BIN_DIR",
+    "COLUMNS", "LINES",
+];
+
+/// What zash itself sets for the programs it runs (on top of the inherited
+/// environment, from which FOREIGN was removed at start-up).
+pub fn program_env() -> std::collections::HashMap<String, String> {
+    let mut env = std::collections::HashMap::new();
+    env.insert("TERM".into(), "xterm-256color".into());
+    env.insert("COLORTERM".into(), "truecolor".into());
+    env.insert("TERM_PROGRAM".into(), "zash".into());
+    env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").into());
+    env.insert("ZASH".into(), "1".into());
+    // a launcher can start zash without a locale; programs then fall back to ASCII
+    let has_utf8 = ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|k| std::env::var(k).is_ok_and(|v| v.to_uppercase().contains("UTF-8") || v.to_uppercase().contains("UTF8")));
+    if !has_utf8 {
+        env.insert("LANG".into(), "C.UTF-8".into());
+    }
+    env
+}
+
+/// Called once at start-up, before any thread exists.
+pub fn scrub_environment() {
+    for k in FOREIGN {
+        // SAFETY: start-up, single-threaded
+        unsafe { std::env::remove_var(k) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_for_programs() {
+        let e = program_env();
+        assert_eq!(e["TERM"], "xterm-256color");
+        assert_eq!(e["COLORTERM"], "truecolor");
+        assert_eq!(e["TERM_PROGRAM"], "zash");
+        assert!(FOREIGN.contains(&"TMUX") && FOREIGN.contains(&"WEZTERM_PANE"));
     }
 }

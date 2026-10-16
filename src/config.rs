@@ -140,6 +140,8 @@ pub struct Config {
     pub padding: f32,
     pub scrollback: usize,
     pub palette: Palette,
+    /// the colour file followed live
+    pub colors_file: PathBuf,
 }
 
 impl Default for Config {
@@ -152,6 +154,7 @@ impl Default for Config {
             padding: 0.0,
             scrollback: 10_000,
             palette: Palette::load(),
+            colors_file: Palette::tinct_file(),
         }
     }
 }
@@ -189,5 +192,98 @@ mod tests {
         assert_eq!(p.indexed(231), Rgb(255, 255, 255));
         assert_eq!(p.indexed(232), Rgb(8, 8, 8));
         assert_eq!(p.indexed(255), Rgb(238, 238, 238));
+    }
+}
+
+/// `~/.config/zash/zash.toml`: every field optional, missing ones keep the
+/// defaults above (taken from the WezTerm setup).
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct File {
+    font: Option<String>,
+    size: Option<f32>,
+    line_height: Option<f32>,
+    features: Option<Vec<String>>,
+    padding: Option<f32>,
+    scrollback: Option<usize>,
+    /// a tinct/WezTerm-style colour file to follow instead of the default
+    colors: Option<String>,
+}
+
+pub const DEFAULT_FILE: &str = r#"# zash — settings. Every line is optional; delete one to get the default back.
+# Changes apply the next time zash starts.
+
+# The font and its size in points (as WezTerm counts them).
+font = "MonaspiceNe Nerd Font"
+size = 11.5
+# Line height as a multiple of the font size.
+line_height = 1.2
+# OpenType features of the font (stylistic sets, character variants).
+features = ["cv06", "cv14", "cv32", "ss04", "ss07", "ss09"]
+# Space around the text, in pixels.
+padding = 0
+# Lines kept for scrolling back.
+scrollback = 10000
+# Colours: the file tinct writes for WezTerm, so zash follows the wallpaper.
+colors = "~/.config/wezterm/tinct_colors.lua"
+"#;
+
+impl Config {
+    pub fn file_path() -> PathBuf {
+        let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
+            .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".config"));
+        base.join("zash/zash.toml")
+    }
+
+    /// The defaults, then the user's file on top. A broken file is reported and ignored.
+    pub fn load() -> Config {
+        let mut c = Config::default();
+        let path = Self::file_path();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => {
+                // first start: write the file, so every setting is discoverable
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(&path, DEFAULT_FILE);
+                return c;
+            }
+        };
+        let f: File = match toml::from_str(&text) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("zash: {}: {e}", path.display());
+                return c;
+            }
+        };
+        if let Some(v) = f.font { c.font_family = v; }
+        if let Some(v) = f.size { c.font_size_pt = v; }
+        if let Some(v) = f.line_height { c.line_height = v; }
+        if let Some(v) = f.features { c.features = v.into_iter().map(|t| (t, 1)).collect(); }
+        if let Some(v) = f.padding { c.padding = v; }
+        if let Some(v) = f.scrollback { c.scrollback = v; }
+        if let Some(v) = f.colors {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let p = PathBuf::from(v.replacen('~', &home, 1));
+            c.colors_file = p.clone();
+            if let Ok(s) = std::fs::read_to_string(&p) {
+                c.palette = Palette::from_tinct_lua(&s);
+            }
+        }
+        // the environment still wins, for one-off runs
+        if let Ok(v) = std::env::var("ZASH_FONT") { c.font_family = v; }
+        if let Some(v) = std::env::var("ZASH_FONT_SIZE").ok().and_then(|s| s.parse().ok()) { c.font_size_pt = v; }
+        c
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    #[test]
+    fn default_file_parses() {
+        let f: super::File = toml::from_str(super::DEFAULT_FILE).unwrap();
+        assert_eq!(f.size, Some(11.5));
+        assert_eq!(f.features.unwrap().len(), 6);
     }
 }

@@ -32,6 +32,7 @@ struct Gpu {
 struct App {
     cfg: Config,
     cmd: Option<Vec<String>>,
+    workdir: Option<std::path::PathBuf>,
     proxy: EventLoopProxy<ZEvent>,
     gpu: Option<Gpu>,
     session: Option<Session>,
@@ -47,11 +48,11 @@ struct App {
     clicks: (std::time::Instant, u8, (usize, usize)),
 }
 
-pub fn run(cfg: Config, cmd: Option<Vec<String>>) -> Result<(), String> {
+pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::PathBuf>) -> Result<(), String> {
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, proxy, gpu: None, session: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)) };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, session: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)) };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -327,21 +328,23 @@ impl ApplicationHandler<ZEvent> for App {
         let renderer = Renderer::new(&device, &queue, format, &self.cfg, window.scale_factor() as f32);
         self.gpu = Some(Gpu { surface, device, queue, config, renderer, window });
         let grid = self.grid().unwrap();
-        match Session::spawn(self.cmd.take(), grid, self.cfg.scrollback, Sink::Window(self.proxy.clone())) {
+        match Session::spawn(self.cmd.take(), self.workdir.take(), grid, self.cfg.scrollback, Sink::Window(self.proxy.clone())) {
             Ok(s) => self.session = Some(s),
             Err(e) => {
                 eprintln!("zash: could not start the shell: {e}");
                 el.exit();
             }
         }
-        watch_theme(self.proxy.clone());
+        watch_theme(self.proxy.clone(), self.cfg.colors_file.clone());
         self.redraw();
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, ev: ZEvent) {
         let ev = match ev {
             ZEvent::Theme => {
-                self.cfg.palette = crate::config::Palette::load();
+                if let Ok(s) = std::fs::read_to_string(&self.cfg.colors_file) {
+                    self.cfg.palette = crate::config::Palette::from_tinct_lua(&s);
+                }
                 if let Some(g) = self.gpu.as_mut() {
                     g.renderer.invalidate();
                 }
@@ -527,9 +530,8 @@ fn _assert_dims<T: Dimensions>(_: &T) {}
 /// tinct rewrites its colour file when the wallpaper changes; zash follows.
 /// One stat every two seconds on a background thread: negligible, and no frames
 /// are drawn unless the file really changed.
-fn watch_theme(proxy: EventLoopProxy<ZEvent>) {
+fn watch_theme(proxy: EventLoopProxy<ZEvent>, path: std::path::PathBuf) {
     std::thread::spawn(move || {
-        let path = crate::config::Palette::tinct_file();
         let stamp = || std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         let mut last = stamp();
         loop {

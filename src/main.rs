@@ -15,11 +15,20 @@ mod snapshot;
 use std::time::Duration;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let cfg = config::Config::default();
+    session::scrub_environment();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let cfg = config::Config::load();
+    // -d DIR: start in that folder
+    let mut workdir = None;
+    if let Some(i) = args.iter().position(|a| a == "-d" || a == "--dir") {
+        if i + 1 < args.len() {
+            workdir = Some(std::path::PathBuf::from(args.remove(i + 1)));
+            args.remove(i);
+        }
+    }
 
     if args.first().map(String::as_str) == Some("--snapshot") {
-        let mut o = snapshot::Opts { png: None, cols: 100, rows: 30, wait: Duration::from_secs(5), cmd: Vec::new(), keys: None };
+        let mut o = snapshot::Opts { png: None, cols: 100, rows: 30, wait: Duration::from_secs(5), cmd: Vec::new(), keys: None, workdir: workdir.clone() };
         let mut it = args.into_iter().skip(1);
         while let Some(a) = it.next() {
             match a.as_str() {
@@ -70,12 +79,12 @@ fn main() {
     let cmd = match args.first().map(String::as_str) {
         Some("-e") => Some(args[1..].to_vec()).filter(|c| !c.is_empty()),
         Some("-h") | Some("--help") => {
-            println!("zash — the zett terminal\n\n  zash               your shell in a window\n  zash -e CMD …      run CMD in a window\n  zash --snapshot [out.png] [--size 100x30] [--wait MS] -- CMD …\n                     headless: run CMD, print the screen, optionally render a PNG\n\nKeys: Ctrl+Shift+C/V copy/paste · Ctrl+= / Ctrl+- / Ctrl+0 font size · Shift+PageUp/PageDown scroll");
+            println!("zash — the zett terminal\n\n  zash               your shell in a window\n  zash -e CMD …      run CMD in a window\n  zash -d DIR        start in DIR\n  zash --snapshot [out.png] [--size 100x30] [--wait MS] -- CMD …\n                     headless: run CMD, print the screen, optionally render a PNG\n\nKeys: Ctrl+Shift+C/V copy/paste · Ctrl+= / Ctrl+- / Ctrl+0 font size · Shift+PageUp/PageDown scroll\n\nSettings: ~/.config/zash/zash.toml (written on first start, with comments)");
             return;
         }
         _ => None,
     };
-    if let Err(e) = app::run(cfg, cmd) {
+    if let Err(e) = app::run(cfg, cmd, workdir) {
         eprintln!("zash: {e}");
         std::process::exit(1);
     }
