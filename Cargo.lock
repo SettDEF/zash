@@ -3044,6 +3044,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "glyphon",
+ "libc",
  "log",
  "png",
  "pollster",

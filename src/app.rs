@@ -150,6 +150,42 @@ impl App {
         }
     }
 
+    /// Scrolls so the previous (-1) or next (+1) prompt is at the top.
+    fn jump_prompt(&mut self, dir: i32) {
+        let Some(s) = &self.session else { return };
+        let prompts: Vec<usize> = crate::render::prompts(&s.marks.lock().unwrap()).into_iter().map(|p| p.0).collect();
+        let mut t = s.term.lock();
+        let hist = t.grid().history_size();
+        let top = hist - t.grid().display_offset();
+        let target = if dir < 0 { prompts.iter().rev().find(|&&l| l < top).copied() } else { prompts.iter().find(|&&l| l > top).copied() };
+        match target {
+            // display offset = how far the top is above the live screen
+            Some(l) if l <= hist => t.scroll_display(Scroll::Delta(top as i32 - l as i32)),
+            _ if dir > 0 => t.scroll_display(Scroll::Bottom),
+            _ => {}
+        }
+        drop(t);
+        self.redraw();
+    }
+
+    /// The text of the last finished command's output (between its C and D marks).
+    fn last_output(&self) -> Option<String> {
+        let s = self.session.as_ref()?;
+        let marks = s.marks.lock().unwrap().clone();
+        let d = marks.iter().rposition(|m| m.kind == 'D')?;
+        let c = marks[..d].iter().rposition(|m| m.kind == 'C')?;
+        let (from, to) = (marks[c].line, marks[d].line);
+        if to <= from {
+            return Some(String::new());
+        }
+        let t = s.term.lock();
+        let hist = t.grid().history_size() as i32;
+        let cols = t.grid().columns();
+        let start = Point::new(Line(from as i32 - hist), Column(0));
+        let end = Point::new(Line(to as i32 - 1 - hist), Column(cols.saturating_sub(1)));
+        Some(t.bounds_to_string(start, end).trim_end().to_string())
+    }
+
     fn set_font(&mut self, pt: f32) {
         self.font_pt = pt.clamp(5.0, 72.0);
         if let Some(g) = self.gpu.as_mut() {
@@ -174,6 +210,13 @@ impl App {
                         }
                         return;
                     }
+                    "o" => {
+                        // the last command's output, to the clipboard
+                        if let Some(text) = self.last_output() {
+                            clipboard_set(&text, false);
+                        }
+                        return;
+                    }
                     "v" => {
                         let text = clipboard_get(false);
                         let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
@@ -182,6 +225,17 @@ impl App {
                     }
                     _ => {}
                 }
+            }
+        }
+        if mods.ctrl && mods.shift {
+            let dir = match ev.logical_key {
+                Key::Named(NamedKey::ArrowUp) => Some(-1),
+                Key::Named(NamedKey::ArrowDown) => Some(1),
+                _ => None,
+            };
+            if let Some(d) = dir {
+                self.jump_prompt(d);
+                return;
             }
         }
         if mods.ctrl && !mods.shift && !mods.alt {
@@ -259,7 +313,11 @@ impl App {
 
     fn render(&mut self) {
         let (Some(g), Some(s)) = (self.gpu.as_mut(), self.session.as_ref()) else { return };
-        let frame = Frame::extract(&s.term.lock(), &self.cfg.palette);
+        let frame = {
+            let t = s.term.lock();
+            let marks = s.marks.lock().unwrap();
+            Frame::extract(&t, &self.cfg.palette).with_prompts(&t, &marks)
+        };
         let tex = match g.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Lost => {

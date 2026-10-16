@@ -39,11 +39,14 @@ pub struct CellView {
 }
 
 pub struct Frame {
+    /// prompt rows on screen with the exit status of the command before them (shell marks)
+    pub prompts: Vec<(usize, Option<i32>)>,
     pub cols: usize,
     pub rows: Vec<Vec<CellView>>,
     pub cursor: Option<(usize, usize, CursorShape)>,
     pub bg: Rgb,
     pub cursor_color: Rgb,
+    pub fail_color: Rgb,
 }
 
 fn resolve(c: AColor, term_colors: &alacritty_terminal::term::color::Colors, p: &Palette, bold: bool) -> Rgb {
@@ -132,7 +135,7 @@ impl Frame {
                 }
             }
         }
-        Frame { cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg }
+        Frame { prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -256,6 +259,8 @@ pub struct Renderer {
     atlas: TextAtlas,
     text: TextRenderer,
     rects: Rects,
+    /// drawn after the text: marks that must stay visible over glyphs
+    overlay: Rects,
     rows: Vec<(u64, Buffer)>,
     family: String,
     features: glyphon::cosmic_text::FontFeatures,
@@ -296,6 +301,7 @@ impl Renderer {
         }
         let mut r = Renderer {
             rects: Rects::new(device, format),
+            overlay: Rects::new(device, format),
             font_system: { let _ = &mut font_system; font_system },
             swash: SwashCache::new(),
             viewport,
@@ -394,6 +400,20 @@ impl Renderer {
         }
     }
 
+    fn overlay_list(&self, frame: &Frame) -> Vec<Rect> {
+        let (ch, pad) = (self.cell_h, self.pad);
+        let mut out = Vec::new();
+        // prompt marks: a thin bar at the left edge, red when the command before failed
+        for (r, exit) in &frame.prompts {
+            let failed = exit.is_some_and(|e| e != 0);
+            let mut col = if failed { frame.fail_color.f32() } else { frame.cursor_color.f32() };
+            col[3] = if failed { 1.0 } else { 0.7 };
+            let w = (self.font_px / 7.0).max(2.0).round();
+            out.push(Rect { xywh: [0.0, pad + *r as f32 * ch, w, ch], color: col });
+        }
+        out
+    }
+
     fn rect_list(&self, frame: &Frame, cur: Option<((f32, f32), (f32, f32))>) -> Vec<Rect> {
         let (cw, ch, pad) = (self.cell_w, self.cell_h, self.pad);
         let mut out = Vec::new();
@@ -465,6 +485,8 @@ impl Renderer {
         let (cur, animating) = self.cursor_motion(frame);
         let rects = self.rect_list(frame, cur);
         self.rects.upload(device, queue, &rects, width as f32, height as f32);
+        let over = self.overlay_list(frame);
+        self.overlay.upload(device, queue, &over, width as f32, height as f32);
         self.viewport.update(queue, Resolution { width, height });
         let (pad, ch) = (self.pad, self.cell_h);
         let areas: Vec<TextArea> = self.rows.iter().enumerate().map(|(i, (_, b))| TextArea {
@@ -503,6 +525,7 @@ impl Renderer {
             });
             self.rects.draw(&mut pass);
             let _ = self.text.render(&self.atlas, &self.viewport, &mut pass);
+            self.overlay.draw(&mut pass);
         }
         queue.submit(Some(enc.finish()));
         self.atlas.trim();
@@ -539,5 +562,49 @@ impl Renderer {
         if near(a.head) { a.head = t } else { moving = true }
         if near(a.tail) { a.tail = t } else { moving = true }
         (Some((a.head, a.tail)), moving)
+    }
+}
+
+/// Prompt lines (absolute) with the exit status of the command that ran just before each.
+pub fn prompts(marks: &[crate::session::Mark]) -> Vec<(usize, Option<i32>)> {
+    let mut out = Vec::new();
+    let mut last_exit = None;
+    for m in marks {
+        match m.kind {
+            'D' => last_exit = m.exit,
+            'A' => {
+                out.push((m.line, last_exit.take()));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+impl Frame {
+    /// Places prompt marks on the rows they fall on (given the scroll position).
+    pub fn with_prompts<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, marks: &[crate::session::Mark]) -> Frame {
+        let top = term.grid().history_size() as i64 - term.grid().display_offset() as i64;
+        let rows = self.rows.len() as i64;
+        self.prompts = prompts(marks)
+            .into_iter()
+            .filter_map(|(line, exit)| {
+                let r = line as i64 - top;
+                (0..rows).contains(&r).then_some((r as usize, exit))
+            })
+            .collect();
+        self
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use crate::session::Mark;
+
+    #[test]
+    fn exit_status_goes_to_the_next_prompt() {
+        let m = |kind, line, exit| Mark { kind, line, exit };
+        let marks = [m('A', 0, None), m('C', 2, None), m('D', 2, Some(0)), m('A', 2, None), m('C', 4, None), m('D', 4, Some(1)), m('A', 4, None)];
+        assert_eq!(super::prompts(&marks), vec![(0, None), (2, Some(0)), (4, Some(1))]);
     }
 }

@@ -56,7 +56,12 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    let frame = Frame::extract(&session.term.lock(), &cfg.palette);
+    let marks = session.marks.lock().unwrap().clone();
+    let frame = { let t = session.term.lock(); Frame::extract(&t, &cfg.palette).with_prompts(&t, &marks) };
+    if !marks.is_empty() {
+        let list: Vec<String> = marks.iter().map(|m| match m.exit { Some(e) => format!("{}{}={e}", m.kind, m.line), None => format!("{}{}", m.kind, m.line) }).collect();
+        eprintln!("zash: shell marks: {}", list.join(" "));
+    }
     Ok(frame)
 }
 

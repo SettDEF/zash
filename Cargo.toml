@@ -15,6 +15,7 @@ log = "0.4"
 png = "0.17"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+libc = "0.2"
 
 [profile.release]
 opt-level = 3
