@@ -543,19 +543,28 @@ impl Renderer {
         }
         if let (Some(pp), Some((cr, cc, _))) = (&frame.popup, frame.cursor) {
             // the completion popup: under the word being completed, above it when there is no room
-            const SHOW: usize = 10;
             let n = pp.items.len();
-            let first = match pp.sel { Some(s) if s >= SHOW => s + 1 - SHOW, _ => 0 };
-            let rows: Vec<usize> = (first..n.min(first + SHOW)).collect();
             let row_h = (self.cell_h * 1.25).round();
+            // as many rows as fit on the roomier side of the cursor line (up to 10)
+            let above_px = self.top + cr as f32 * self.cell_h;
+            let below_px = height as f32 - self.pad - self.top - (cr + 1) as f32 * self.cell_h;
+            let room = above_px.max(below_px) - self.cell_h;
+            let mut show: usize = ((room / row_h) as usize).clamp(1, 10);
+            if n > show {
+                // the footer ("3 of 40 · Tab next") takes a row too
+                show = show.saturating_sub(1).max(1);
+            }
+            let first = match pp.sel { Some(s) if s >= show => s + 1 - show, _ => 0 };
+            let rows: Vec<usize> = (first..n.min(first + show)).collect();
             let widest = rows.iter().map(|i| pp.items[*i].chars().count()).max().unwrap_or(0);
-            let more = n > SHOW;
-            let pw = ((widest.max(12) + 3) as f32 * self.cell_w).min(width as f32 - 2.0 * self.pad);
+            let more = n > show;
+            let footer_w = if more { 34 } else { 0 };
+            let pw = ((widest.max(12).max(footer_w) + 3) as f32 * self.cell_w).min(width as f32 - 2.0 * self.pad);
             let ph = rows.len() as f32 * row_h + self.cell_h * 0.5 + if more { row_h } else { 0.0 };
             let wx = self.pad + cc.saturating_sub(pp.word) as f32 * self.cell_w - self.cell_w;
             let x = wx.clamp(self.pad, (width as f32 - pw - self.pad).max(self.pad));
             let below = self.pad + self.top + (cr + 1) as f32 * self.cell_h + 2.0;
-            let y = if below + ph <= height as f32 - self.pad { below } else { (below - self.cell_h - ph - 4.0).max(self.top) };
+            let y = if below + ph <= height as f32 - self.pad || below_px >= above_px { below } else { (below - self.cell_h - ph - 4.0).max(self.top) };
             let edge = frame.fg.f32();
             over.push(Rect { xywh: [x - 1.0, y - 1.0, pw + 2.0, ph + 2.0], color: [edge[0], edge[1], edge[2], 0.18] });
             over.push(Rect { xywh: [x, y, pw, ph], color: frame.bar_bg.f32() });
