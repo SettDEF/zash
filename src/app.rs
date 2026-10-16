@@ -40,13 +40,18 @@ struct App {
     mouse: (f64, f64),
     selecting: bool,
     scroll_acc: f64,
+    /// the button held down for a program that wants the mouse
+    mouse_btn: Option<u8>,
+    last_cell: (usize, usize),
+    /// (time, count, cell) of the last left click: double = word, triple = line
+    clicks: (std::time::Instant, u8, (usize, usize)),
 }
 
 pub fn run(cfg: Config, cmd: Option<Vec<String>>) -> Result<(), String> {
     let event_loop = EventLoop::<Event>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, proxy, gpu: None, session: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0 };
+    let mut app = App { cfg, cmd, proxy, gpu: None, session: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)) };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -119,6 +124,29 @@ impl App {
         let offset = s.term.lock().grid().display_offset() as i32;
         let side = if col_f.fract() < 0.5 { Side::Left } else { Side::Right };
         Some((Point::new(Line(row as i32 - offset), Column(col)), side))
+    }
+
+    /// The screen cell under a window position (0-based column, row).
+    fn cell_at(&self, x: f64, y: f64) -> (usize, usize) {
+        let (Some(g), Some(s)) = (self.gpu.as_ref(), self.session.as_ref()) else { return (0, 0) };
+        let r = &g.renderer;
+        let col = (((x as f32 - r.pad) / r.cell_w).max(0.0) as usize).min(s.grid.cols.saturating_sub(1));
+        let row = (((y as f32 - r.pad) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
+        (col, row)
+    }
+
+    /// Does the program want the mouse? Shift keeps it for zash (selecting text), as everywhere.
+    fn app_mouse(&self) -> bool {
+        !self.mods.shift_key() && self.mode().intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+    }
+
+    fn send_mouse(&self, button: u8, motion: bool, pressed: bool, cell: (usize, usize)) {
+        let m = self.mods;
+        let mods = Mods { ctrl: m.control_key(), alt: m.alt_key(), shift: m.shift_key() };
+        let sgr = self.mode().contains(TermMode::SGR_MOUSE);
+        if let Some(s) = &self.session {
+            s.write(input::mouse(button, motion, pressed, cell.0, cell.1, mods, sgr));
+        }
     }
 
     fn set_font(&mut self, pt: f32) {
@@ -385,6 +413,19 @@ impl ApplicationHandler<Event> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
+                let cell = self.cell_at(position.x, position.y);
+                if self.app_mouse() {
+                    // drags (and plain motion, if asked) go to the program, once per cell
+                    let mode = self.mode();
+                    let want = mode.contains(TermMode::MOUSE_MOTION) || (mode.contains(TermMode::MOUSE_DRAG) && self.mouse_btn.is_some());
+                    if want && cell != self.last_cell {
+                        let b = self.mouse_btn.unwrap_or(3);
+                        self.send_mouse(b, true, true, cell);
+                    }
+                    self.last_cell = cell;
+                    return;
+                }
+                self.last_cell = cell;
                 if self.selecting {
                     if let (Some((p, side)), Some(s)) = (self.point_at(position.x, position.y), &self.session) {
                         if let Some(sel) = s.term.lock().selection.as_mut() {
@@ -394,28 +435,45 @@ impl ApplicationHandler<Event> for App {
                     }
                 }
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                if state == ElementState::Pressed {
-                    if let (Some((p, side)), Some(s)) = (self.point_at(self.mouse.0, self.mouse.1), &self.session) {
-                        s.term.lock().selection = Some(Selection::new(SelectionType::Simple, p, side));
-                        self.selecting = true;
-                        self.redraw();
-                    }
-                } else {
-                    self.selecting = false;
-                    // like every X/Wayland terminal: a selection is also the middle-click paste
-                    if let Some(s) = &self.session {
-                        let text = { let t = s.term.lock(); t.selection.as_ref().filter(|s| !s.is_empty()).and(t.selection_to_string()) };
-                        if let Some(t) = text.filter(|t| !t.is_empty()) {
-                            std::thread::spawn(move || clipboard_set(&t, true));
+            WindowEvent::MouseInput { state, button, .. } => {
+                let code = match button { MouseButton::Left => 0, MouseButton::Middle => 1, MouseButton::Right => 2, _ => return };
+                let pressed = state == ElementState::Pressed;
+                if self.app_mouse() {
+                    let cell = self.cell_at(self.mouse.0, self.mouse.1);
+                    self.mouse_btn = if pressed { Some(code) } else { None };
+                    self.send_mouse(code, false, pressed, cell);
+                    return;
+                }
+                match (button, pressed) {
+                    (MouseButton::Left, true) => {
+                        // 1 click: characters, 2: a word, 3: the line
+                        let now = std::time::Instant::now();
+                        let same = self.clicks.0.elapsed() < std::time::Duration::from_millis(400) && self.clicks.2 == self.last_cell;
+                        self.clicks = (now, if same { self.clicks.1 % 3 + 1 } else { 1 }, self.last_cell);
+                        let ty = match self.clicks.1 { 2 => SelectionType::Semantic, 3 => SelectionType::Lines, _ => SelectionType::Simple };
+                        if let (Some((p, side)), Some(s)) = (self.point_at(self.mouse.0, self.mouse.1), &self.session) {
+                            s.term.lock().selection = Some(Selection::new(ty, p, side));
+                            self.selecting = true;
+                            self.redraw();
                         }
                     }
+                    (MouseButton::Left, false) => {
+                        self.selecting = false;
+                        // like every X/Wayland terminal: a selection is also the middle-click paste
+                        if let Some(s) = &self.session {
+                            let text = { let t = s.term.lock(); t.selection.as_ref().filter(|s| !s.is_empty()).and(t.selection_to_string()) };
+                            if let Some(t) = text.filter(|t| !t.is_empty()) {
+                                std::thread::spawn(move || clipboard_set(&t, true));
+                            }
+                        }
+                    }
+                    (MouseButton::Middle, true) => {
+                        let text = clipboard_get(true);
+                        let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
+                        self.write(input::paste(&text, bracketed));
+                    }
+                    _ => {}
                 }
-            }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Middle, .. } => {
-                let text = clipboard_get(true);
-                let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
-                self.write(input::paste(&text, bracketed));
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let cell_h = self.gpu.as_ref().map(|g| g.renderer.cell_h as f64).unwrap_or(16.0);
@@ -430,8 +488,13 @@ impl ApplicationHandler<Event> for App {
                 }
                 self.scroll_acc -= whole as f64;
                 let mode = self.mode();
-                if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
-                    // full-screen programs (less, man, vim) get arrow keys
+                if self.app_mouse() {
+                    let cell = self.cell_at(self.mouse.0, self.mouse.1);
+                    for _ in 0..whole.unsigned_abs() {
+                        self.send_mouse(if whole > 0 { 64 } else { 65 }, false, true, cell);
+                    }
+                } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+                    // full-screen programs without the mouse (less, man) get arrow keys
                     let key = if whole > 0 { if mode.contains(TermMode::APP_CURSOR) { "\x1bOA" } else { "\x1b[A" } } else if mode.contains(TermMode::APP_CURSOR) { "\x1bOB" } else { "\x1b[B" };
                     if let Some(s) = &self.session {
                         s.write(key.repeat(whole.unsigned_abs() as usize).into_bytes());

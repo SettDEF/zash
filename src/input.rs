@@ -134,6 +134,25 @@ fn named(n: Named, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
     }
 }
 
+/// A mouse event for a program that asked for the mouse (tmux, Neovim, htop).
+/// `button`: 0 left, 1 middle, 2 right, 3 release (X10), 64/65 wheel up/down;
+/// `motion` adds 32. `col`/`row` are 0-based cells. SGR (1006) encoding when
+/// the program asked for it, the old X10 form otherwise.
+pub fn mouse(button: u8, motion: bool, pressed: bool, col: usize, row: usize, mods: Mods, sgr: bool) -> Vec<u8> {
+    let mut b = button as u32 + if motion { 32 } else { 0 };
+    if mods.shift { b += 4; }
+    if mods.alt { b += 8; }
+    if mods.ctrl { b += 16; }
+    if sgr {
+        format!("\x1b[<{};{};{}{}", b, col + 1, row + 1, if pressed { 'M' } else { 'm' }).into_bytes()
+    } else {
+        // X10: a release is button 3; coordinates past 223 cannot be sent
+        let b = if pressed || button >= 64 { b } else { 3 + (b & !3) };
+        let c = |v: usize| (32 + 1 + v.min(222)) as u8;
+        vec![0x1b, b'[', b'M', (32 + b) as u8, c(col), c(row)]
+    }
+}
+
 /// Keys in Vim-like notation (`echo hi<CR>`, `<C-a>`, `<Up>`, `<S-Tab>`,
 /// `<M-b>`), encoded exactly as the window would: for headless tests.
 pub fn encode_notation(s: &str, app_cursor: bool) -> Vec<Vec<u8>> {
@@ -245,6 +264,24 @@ mod tests {
         assert_eq!(e(Key::Named(Named::F(1)), NONE, false), b"\x1bOP");
         assert_eq!(e(Key::Named(Named::F(5)), NONE, false), b"\x1b[15~");
         assert_eq!(e(Key::Named(Named::F(12)), NONE, false), b"\x1b[24~");
+    }
+
+    #[test]
+    fn mouse_reports() {
+        assert_eq!(mouse(0, false, true, 4, 9, NONE, true), b"\x1b[<0;5;10M");
+        assert_eq!(mouse(0, false, false, 4, 9, NONE, true), b"\x1b[<0;5;10m");
+        assert_eq!(mouse(0, true, true, 0, 0, NONE, true), b"\x1b[<32;1;1M", "drag");
+        assert_eq!(mouse(64, false, true, 0, 0, NONE, true), b"\x1b[<64;1;1M", "wheel up");
+        assert_eq!(mouse(0, false, true, 0, 0, CTRL, true), b"\x1b[<16;1;1M");
+        assert_eq!(mouse(0, false, true, 1, 2, NONE, false), [0x1b, b'[', b'M', 32, 34, 35], "X10 press");
+        assert_eq!(mouse(0, false, false, 1, 2, NONE, false), [0x1b, b'[', b'M', 35, 34, 35], "X10 release is button 3");
+    }
+
+    #[test]
+    fn notation() {
+        assert_eq!(encode_notation("a<CR>", false), vec![b"a".to_vec(), b"\r".to_vec()]);
+        assert_eq!(encode_notation("<C-a><M-f><Up>", false), vec![vec![1], b"\x1bf".to_vec(), b"\x1b[A".to_vec()]);
+        assert_eq!(encode_notation("<S-Tab>", false), vec![b"\x1b[Z".to_vec()]);
     }
 
     #[test]
