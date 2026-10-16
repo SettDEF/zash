@@ -118,7 +118,9 @@ impl Frame {
                 fg = p.selection_fg;
                 bg = p.selection_bg;
             }
-            let ch = if f.contains(Flags::HIDDEN) { ' ' } else { cell.c };
+            // control characters never reach the shaper: a tab is kept in its cell (for copying)
+            // but would be expanded to a tab stop and push the rest of the row out of place
+            let ch = if f.contains(Flags::HIDDEN) || cell.c.is_control() { ' ' } else { cell.c };
             rows[row].push(CellView {
                 ch,
                 zw: cell.zerowidth().map(|z| z.to_vec()),
