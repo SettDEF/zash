@@ -13,7 +13,8 @@ use std::sync::mpsc;
 
 /// What the window's event loop receives: the terminal's events, or zash's own.
 pub enum ZEvent {
-    Term(Event),
+    /// an event of the terminal in tab `id`
+    Term(u64, Event),
     /// tinct wrote new colours
     Theme,
 }
@@ -22,7 +23,7 @@ pub enum ZEvent {
 /// (headless snapshots and tests).
 #[derive(Clone)]
 pub enum Sink {
-    Window(winit::event_loop::EventLoopProxy<ZEvent>),
+    Window(winit::event_loop::EventLoopProxy<ZEvent>, u64),
     Channel(mpsc::Sender<Event>),
 }
 
@@ -32,8 +33,8 @@ pub struct Listener(pub Sink);
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
         match &self.0 {
-            Sink::Window(p) => {
-                let _ = p.send_event(ZEvent::Term(event));
+            Sink::Window(p, id) => {
+                let _ = p.send_event(ZEvent::Term(*id, event));
             }
             Sink::Channel(tx) => {
                 let _ = tx.send(event);
@@ -76,6 +77,8 @@ pub struct Session {
     pty: Arc<Mutex<tty::Pty>>,
     pub grid: Grid,
     pub marks: Arc<Mutex<Vec<Mark>>>,
+    /// the program's process id (its folder opens new tabs in the same place)
+    pub pid: u32,
 }
 
 /// Finds OSC 133 marks in a chunk of output, carrying a partial sequence over
@@ -146,12 +149,13 @@ impl Session {
         let pty = tty::new(&options, grid.window_size(), 0)?;
         let reader = pty.file().try_clone()?;
         let writer = Arc::new(Mutex::new(pty.file().try_clone()?));
+        let pid = pty.child().id();
         let pty = Arc::new(Mutex::new(pty));
         let marks = Arc::new(Mutex::new(Vec::new()));
 
         let (t, m, l) = (term.clone(), marks.clone(), listener.clone());
         std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, l))?;
-        Ok(Session { term, writer, pty, grid, marks })
+        Ok(Session { term, writer, pty, grid, marks, pid })
     }
 
     /// Bytes for the program, as if typed.
@@ -168,6 +172,11 @@ impl Session {
                 Err(_) => return,
             }
         }
+    }
+
+    /// The folder the program is in now (where a new tab should start).
+    pub fn cwd(&self) -> Option<std::path::PathBuf> {
+        std::fs::read_link(format!("/proc/{}/cwd", self.pid)).ok()
     }
 
     pub fn resize(&mut self, grid: Grid) {

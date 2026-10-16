@@ -29,13 +29,23 @@ struct Gpu {
     window: Arc<Window>,
 }
 
+/// One tab: a session and its title.
+struct Tab {
+    id: u64,
+    session: Session,
+    title: String,
+}
+
 struct App {
     cfg: Config,
     cmd: Option<Vec<String>>,
     workdir: Option<std::path::PathBuf>,
     proxy: EventLoopProxy<ZEvent>,
     gpu: Option<Gpu>,
-    session: Option<Session>,
+    /// the open tabs; `active` is the one shown
+    tabs: Vec<Tab>,
+    active: usize,
+    next_id: u64,
     mods: ModifiersState,
     font_pt: f32,
     mouse: (f64, f64),
@@ -54,7 +64,7 @@ pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::Pat
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, session: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, next_id: 0, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -94,14 +104,17 @@ impl App {
     }
 
     fn sync_size(&mut self) {
-        if let (Some(grid), Some(s)) = (self.grid(), self.session.as_mut()) {
-            s.resize(grid);
+        // every tab, not only the one shown: a hidden one is the same size when it comes back
+        if let Some(grid) = self.grid() {
+            for t in &mut self.tabs {
+                t.session.resize(grid);
+            }
         }
         self.redraw();
     }
 
     fn write(&self, bytes: Vec<u8>) {
-        if let Some(s) = &self.session {
+        if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
             // typing returns to the live screen and drops a selection
             {
                 let mut t = s.term.lock();
@@ -113,17 +126,17 @@ impl App {
     }
 
     fn mode(&self) -> TermMode {
-        self.session.as_ref().map(|s| *s.term.lock().mode()).unwrap_or(TermMode::empty())
+        self.tabs.get(self.active).map(|t| &t.session).map(|s| *s.term.lock().mode()).unwrap_or(TermMode::empty())
     }
 
     /// Window pixels → a point in the terminal (accounting for scrollback).
     fn point_at(&self, x: f64, y: f64) -> Option<(Point, Side)> {
         let g = self.gpu.as_ref()?;
-        let s = self.session.as_ref()?;
+        let s = self.tabs.get(self.active).map(|t| &t.session)?;
         let r = &g.renderer;
         let col_f = ((x as f32 - r.pad) / r.cell_w).max(0.0);
         let col = (col_f as usize).min(s.grid.cols.saturating_sub(1));
-        let row = (((y as f32 - r.pad) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
+        let row = (((y as f32 - r.pad - r.top) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
         let offset = s.term.lock().grid().display_offset() as i32;
         let side = if col_f.fract() < 0.5 { Side::Left } else { Side::Right };
         Some((Point::new(Line(row as i32 - offset), Column(col)), side))
@@ -131,10 +144,10 @@ impl App {
 
     /// The screen cell under a window position (0-based column, row).
     fn cell_at(&self, x: f64, y: f64) -> (usize, usize) {
-        let (Some(g), Some(s)) = (self.gpu.as_ref(), self.session.as_ref()) else { return (0, 0) };
+        let (Some(g), Some(s)) = (self.gpu.as_ref(), self.tabs.get(self.active).map(|t| &t.session)) else { return (0, 0) };
         let r = &g.renderer;
         let col = (((x as f32 - r.pad) / r.cell_w).max(0.0) as usize).min(s.grid.cols.saturating_sub(1));
-        let row = (((y as f32 - r.pad) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
+        let row = (((y as f32 - r.pad - r.top) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
         (col, row)
     }
 
@@ -147,14 +160,14 @@ impl App {
         let m = self.mods;
         let mods = Mods { ctrl: m.control_key(), alt: m.alt_key(), shift: m.shift_key() };
         let sgr = self.mode().contains(TermMode::SGR_MOUSE);
-        if let Some(s) = &self.session {
+        if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
             s.write(input::mouse(button, motion, pressed, cell.0, cell.1, mods, sgr));
         }
     }
 
     fn search_key(&mut self, ev: &KeyEvent, mods: Mods) {
         use alacritty_terminal::index::Direction;
-        let (Some(s), Some(sess)) = (self.search.as_mut(), self.session.as_ref()) else { return };
+        let (Some(s), Some(sess)) = (self.search.as_mut(), self.tabs.get(self.active).map(|t| &t.session)) else { return };
         let mut t = sess.term.lock();
         match &ev.logical_key {
             Key::Named(NamedKey::Escape) => {
@@ -184,7 +197,7 @@ impl App {
     /// The link under a window position: a real hyperlink (OSC 8) or a URL in the text.
     fn link_at(&self, x: f64, y: f64) -> Option<String> {
         let (p, _) = self.point_at(x, y)?;
-        let s = self.session.as_ref()?;
+        let s = self.tabs.get(self.active).map(|t| &t.session)?;
         let t = s.term.lock();
         if let Some(h) = t.grid()[p].hyperlink() {
             return Some(h.uri().to_string());
@@ -196,7 +209,7 @@ impl App {
 
     /// Scrolls so the previous (-1) or next (+1) prompt is at the top.
     fn jump_prompt(&mut self, dir: i32) {
-        let Some(s) = &self.session else { return };
+        let Some(s) = self.tabs.get(self.active).map(|t| &t.session) else { return };
         let prompts: Vec<usize> = crate::render::prompts(&s.marks.lock().unwrap()).into_iter().map(|p| p.0).collect();
         let mut t = s.term.lock();
         let hist = t.grid().history_size();
@@ -214,7 +227,7 @@ impl App {
 
     /// The text of the last finished command's output (between its C and D marks).
     fn last_output(&self) -> Option<String> {
-        let s = self.session.as_ref()?;
+        let s = self.tabs.get(self.active).map(|t| &t.session)?;
         let marks = s.marks.lock().unwrap().clone();
         let d = marks.iter().rposition(|m| m.kind == 'D')?;
         let c = marks[..d].iter().rposition(|m| m.kind == 'C')?;
@@ -228,6 +241,58 @@ impl App {
         let start = Point::new(Line(from as i32 - hist), Column(0));
         let end = Point::new(Line(to as i32 - 1 - hist), Column(cols.saturating_sub(1)));
         Some(t.bounds_to_string(start, end).trim_end().to_string())
+    }
+
+    fn new_tab(&mut self, cmd: Option<Vec<String>>, dir: Option<std::path::PathBuf>) -> std::io::Result<()> {
+        let id = self.next_id;
+        self.next_id += 1;
+        // the tab bar appears with the second tab: make room before sizing the grid
+        let n = self.tabs.len() + 1;
+        if let Some(g) = self.gpu.as_mut() {
+            g.renderer.top = if n > 1 { g.renderer.tab_bar_h() } else { 0.0 };
+        }
+        let grid = self.grid().ok_or_else(|| std::io::Error::other("no window"))?;
+        let session = Session::spawn(cmd, dir, grid, self.cfg.scrollback, Sink::Window(self.proxy.clone(), id))?;
+        self.tabs.push(Tab { id, session, title: "zash".into() });
+        self.active = self.tabs.len() - 1;
+        self.search = None;
+        self.sync_size();
+        self.show_title();
+        Ok(())
+    }
+
+    fn close_tab(&mut self, i: usize, el: &ActiveEventLoop) {
+        self.tabs.remove(i);
+        if self.tabs.is_empty() {
+            el.exit();
+            return;
+        }
+        if i < self.active || self.active >= self.tabs.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        if let Some(g) = self.gpu.as_mut() {
+            g.renderer.top = if self.tabs.len() > 1 { g.renderer.tab_bar_h() } else { 0.0 };
+        }
+        self.search = None;
+        self.sync_size();
+        self.show_title();
+    }
+
+    fn switch_tab(&mut self, by: i32) {
+        let n = self.tabs.len() as i32;
+        if n < 2 {
+            return;
+        }
+        self.active = ((self.active as i32 + by).rem_euclid(n)) as usize;
+        self.search = None;
+        self.show_title();
+    }
+
+    fn show_title(&self) {
+        if let (Some(g), Some(t)) = (&self.gpu, self.tabs.get(self.active)) {
+            g.window.set_title(&t.title);
+        }
+        self.redraw();
     }
 
     fn set_font(&mut self, pt: f32) {
@@ -250,10 +315,25 @@ impl App {
             if let Key::Character(c) = &ev.logical_key {
                 match c.to_lowercase().as_str() {
                     "c" => {
-                        if let Some(s) = &self.session {
+                        if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
                             if let Some(t) = s.term.lock().selection_to_string() {
                                 clipboard_set(&t, false);
                             }
+                        }
+                        return;
+                    }
+                    "t" => {
+                        // a new tab, in the folder the current one is in
+                        let dir = self.tabs.get(self.active).and_then(|t| t.session.cwd());
+                        if let Err(e) = self.new_tab(None, dir) {
+                            eprintln!("zash: no new tab: {e}");
+                        }
+                        return;
+                    }
+                    "w" => {
+                        // hang up on the tab's program; its exit closes the tab
+                        if let Some(t) = self.tabs.get(self.active) {
+                            unsafe { libc::kill(t.session.pid as i32, libc::SIGHUP) };
                         }
                         return;
                     }
@@ -277,6 +357,19 @@ impl App {
                     }
                     _ => {}
                 }
+            }
+        }
+        // tabs: Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PageDown / Ctrl+PageUp
+        if mods.ctrl && !mods.alt {
+            let by = match ev.logical_key {
+                Key::Named(NamedKey::Tab) => Some(if mods.shift { -1 } else { 1 }),
+                Key::Named(NamedKey::PageDown) if !mods.shift => Some(1),
+                Key::Named(NamedKey::PageUp) if !mods.shift => Some(-1),
+                _ => None,
+            };
+            if let Some(b) = by {
+                self.switch_tab(b);
+                return;
             }
         }
         if mods.ctrl && mods.shift {
@@ -306,7 +399,7 @@ impl App {
                 Key::Named(NamedKey::PageDown) => Some(Scroll::PageDown),
                 _ => None,
             };
-            if let (Some(p), Some(s)) = (page, &self.session) {
+            if let (Some(p), Some(s)) = (page, self.tabs.get(self.active).map(|t| &t.session)) {
                 if !self.mode().contains(TermMode::ALT_SCREEN) {
                     s.term.lock().scroll_display(p);
                     self.redraw();
@@ -364,7 +457,7 @@ impl App {
     }
 
     fn render(&mut self) {
-        let (Some(g), Some(s)) = (self.gpu.as_mut(), self.session.as_ref()) else { return };
+        let (Some(g), Some(s)) = (self.gpu.as_mut(), self.tabs.get(self.active).map(|t| &t.session)) else { return };
         let mut frame = {
             let t = s.term.lock();
             let marks = s.marks.lock().unwrap();
@@ -373,6 +466,15 @@ impl App {
         if let Some(q) = &self.search {
             frame.bar = Some(q.bar());
         }
+        // a tab without a real title shows the name of the folder its shell is in
+        frame.tabs = self.tabs.iter().enumerate().map(|(i, t)| {
+            let title = if t.title == "zash" || t.title.is_empty() {
+                t.session.cwd().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "zash".into())
+            } else {
+                t.title.clone()
+            };
+            (title, i == self.active)
+        }).collect();
         let tex = match g.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Lost => {
@@ -450,11 +552,16 @@ impl ApplicationHandler<ZEvent> for App {
         let renderer = Renderer::new(&device, &queue, format, &self.cfg, window.scale_factor() as f32);
         self.gpu = Some(Gpu { surface, device, queue, config, renderer, window });
         let grid = self.grid().unwrap();
-        match Session::spawn(self.cmd.take(), self.workdir.take(), grid, self.cfg.scrollback, Sink::Window(self.proxy.clone())) {
-            Ok(s) => self.session = Some(s),
-            Err(e) => {
-                eprintln!("zash: could not start the shell: {e}");
-                el.exit();
+        let _ = grid;
+        let (cmd, dir) = (self.cmd.take(), self.workdir.take());
+        if let Err(e) = self.new_tab(cmd, dir) {
+            eprintln!("zash: could not start the shell: {e}");
+            el.exit();
+        }
+        // test hook: open more tabs at start (checking the tab bar without key presses)
+        if let Some(n) = std::env::var("ZASH_TEST_TABS").ok().and_then(|v| v.parse::<usize>().ok()) {
+            for _ in 1..n {
+                let _ = self.new_tab(None, None);
             }
         }
         let mut watched = vec![self.cfg.colors_file.clone()];
@@ -464,7 +571,7 @@ impl ApplicationHandler<ZEvent> for App {
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, ev: ZEvent) {
-        let ev = match ev {
+        let (id, ev) = match ev {
             ZEvent::Theme => {
                 if let Ok(s) = std::fs::read_to_string(&self.cfg.colors_file) {
                     self.cfg.palette = crate::config::Palette::from_tinct_lua(&s);
@@ -481,34 +588,39 @@ impl ApplicationHandler<ZEvent> for App {
                 self.redraw();
                 return;
             }
-            ZEvent::Term(e) => e,
+            ZEvent::Term(id, e) => (id, e),
         };
+        // the tab this event belongs to (it may have closed meanwhile)
+        let Some(tab) = self.tabs.iter().position(|t| t.id == id) else { return };
+        let shown = tab == self.active;
         match ev {
-            Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => self.redraw(),
-            Event::Title(t) => {
-                if let Some(g) = &self.gpu {
-                    g.window.set_title(&t);
+            Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => {
+                if shown {
+                    self.redraw();
                 }
+            }
+            Event::Title(t) => {
+                self.tabs[tab].title = t;
+                self.show_title();
             }
             Event::ResetTitle => {
-                if let Some(g) = &self.gpu {
-                    g.window.set_title("zash");
-                }
+                self.tabs[tab].title = "zash".into();
+                self.show_title();
             }
             Event::PtyWrite(s) => {
-                if let Some(sess) = &self.session {
+                if let Some(sess) = Some(&self.tabs[tab].session) {
                     sess.write(s.into_bytes());
                 }
             }
             Event::ClipboardStore(ty, text) => clipboard_set(&text, matches!(ty, alacritty_terminal::term::ClipboardType::Selection)),
             Event::ClipboardLoad(ty, f) => {
                 let text = clipboard_get(matches!(ty, alacritty_terminal::term::ClipboardType::Selection));
-                if let Some(s) = &self.session {
+                if let Some(s) = Some(&self.tabs[tab].session) {
                     s.write(f(&text).into_bytes());
                 }
             }
             Event::ColorRequest(i, f) => {
-                if let Some(s) = &self.session {
+                if let Some(s) = Some(&self.tabs[tab].session) {
                     let p = &self.cfg.palette;
                     let c = match i {
                         256 => p.fg,
@@ -521,12 +633,12 @@ impl ApplicationHandler<ZEvent> for App {
                 }
             }
             Event::TextAreaSizeRequest(f) => {
-                if let Some(s) = &self.session {
+                if let Some(s) = Some(&self.tabs[tab].session) {
                     let g = s.grid;
                     s.write(f(WindowSize { num_lines: g.rows as u16, num_cols: g.cols as u16, cell_width: g.cell_w as u16, cell_height: g.cell_h as u16 }).into_bytes());
                 }
             }
-            Event::ChildExit(_) | Event::Exit => el.exit(),
+            Event::ChildExit(_) | Event::Exit => self.close_tab(tab, el),
             Event::Bell => {}
         }
     }
@@ -551,7 +663,7 @@ impl ApplicationHandler<ZEvent> for App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => self.key(&event),
             WindowEvent::Focused(f) => {
                 if self.mode().contains(TermMode::FOCUS_IN_OUT) {
-                    if let Some(s) = &self.session {
+                    if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
                         s.write(if f { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
                     }
                 }
@@ -572,7 +684,7 @@ impl ApplicationHandler<ZEvent> for App {
                 }
                 self.last_cell = cell;
                 if self.selecting {
-                    if let (Some((p, side)), Some(s)) = (self.point_at(position.x, position.y), &self.session) {
+                    if let (Some((p, side)), Some(s)) = (self.point_at(position.x, position.y), self.tabs.get(self.active).map(|t| &t.session)) {
                         if let Some(sel) = s.term.lock().selection.as_mut() {
                             sel.update(p, side);
                         }
@@ -603,7 +715,7 @@ impl ApplicationHandler<ZEvent> for App {
                         let same = self.clicks.0.elapsed() < std::time::Duration::from_millis(400) && self.clicks.2 == self.last_cell;
                         self.clicks = (now, if same { self.clicks.1 % 3 + 1 } else { 1 }, self.last_cell);
                         let ty = match self.clicks.1 { 2 => SelectionType::Semantic, 3 => SelectionType::Lines, _ => SelectionType::Simple };
-                        if let (Some((p, side)), Some(s)) = (self.point_at(self.mouse.0, self.mouse.1), &self.session) {
+                        if let (Some((p, side)), Some(s)) = (self.point_at(self.mouse.0, self.mouse.1), self.tabs.get(self.active).map(|t| &t.session)) {
                             s.term.lock().selection = Some(Selection::new(ty, p, side));
                             self.selecting = true;
                             self.redraw();
@@ -612,7 +724,7 @@ impl ApplicationHandler<ZEvent> for App {
                     (MouseButton::Left, false) => {
                         self.selecting = false;
                         // like every X/Wayland terminal: a selection is also the middle-click paste
-                        if let Some(s) = &self.session {
+                        if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
                             let text = { let t = s.term.lock(); t.selection.as_ref().filter(|s| !s.is_empty()).and(t.selection_to_string()) };
                             if let Some(t) = text.filter(|t| !t.is_empty()) {
                                 std::thread::spawn(move || clipboard_set(&t, true));
@@ -648,10 +760,10 @@ impl ApplicationHandler<ZEvent> for App {
                 } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
                     // full-screen programs without the mouse (less, man) get arrow keys
                     let key = if whole > 0 { if mode.contains(TermMode::APP_CURSOR) { "\x1bOA" } else { "\x1b[A" } } else if mode.contains(TermMode::APP_CURSOR) { "\x1bOB" } else { "\x1b[B" };
-                    if let Some(s) = &self.session {
+                    if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
                         s.write(key.repeat(whole.unsigned_abs() as usize).into_bytes());
                     }
-                } else if let Some(s) = &self.session {
+                } else if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
                     s.term.lock().scroll_display(Scroll::Delta(whole));
                     self.redraw();
                 }

@@ -12,6 +12,7 @@ cargo run --release -- --snapshot out.png --size 100x30 -- ls --color=always
 ```
 
 Keys: Ctrl+Shift+F search the scrollback · Ctrl+click open a link ·
+Ctrl+Shift+T new tab (same folder) · Ctrl+Shift+W close it · Ctrl+Tab / Ctrl+PageDown next tab ·
 Ctrl+Shift+C / Ctrl+Shift+V copy and paste · Ctrl+Shift+Up / Down jump between
 prompts · Ctrl+Shift+O copy the last command's output · Ctrl+= / Ctrl+- / Ctrl+0
 font size · Shift+PageUp / Shift+PageDown scroll · select with the mouse

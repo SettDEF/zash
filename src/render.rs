@@ -39,6 +39,8 @@ pub struct CellView {
 }
 
 pub struct Frame {
+    /// tab titles and which one is shown (drawn as a bar when there are two or more)
+    pub tabs: Vec<(String, bool)>,
     /// a bar drawn over the terminal at the top right (search)
     pub bar: Option<String>,
     pub bar_bg: Rgb,
@@ -139,7 +141,7 @@ impl Frame {
                 }
             }
         }
-        Frame { bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
+        Frame { tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -264,7 +266,9 @@ pub struct Renderer {
     text: TextRenderer,
     /// text drawn above the overlay (the search bar)
     text2: TextRenderer,
-    bar: Buffer,
+    bars: Vec<(Buffer, f32, f32)>,
+    /// height of the tab bar above the rows (0 with one tab)
+    pub top: f32,
     rects: Rects,
     /// drawn after the text: marks that must stay visible over glyphs
     overlay: Rects,
@@ -316,7 +320,8 @@ impl Renderer {
             atlas,
             text,
             text2,
-            bar: Buffer::new_empty(Metrics::new(1.0, 1.0)),
+            bars: Vec::new(),
+            top: 0.0,
             rows: Vec::new(),
             family: cfg.font_family.clone(),
             features,
@@ -354,10 +359,15 @@ impl Renderer {
         self.rows.clear();
     }
 
+    /// The tab bar's height.
+    pub fn tab_bar_h(&self) -> f32 {
+        (self.cell_h * 1.6).round()
+    }
+
     /// Cells that fit in a surface of this size.
     pub fn grid_for(&self, width: u32, height: u32) -> (usize, usize) {
         let cols = ((width as f32 - 2.0 * self.pad) / self.cell_w).floor().max(2.0) as usize;
-        let rows = ((height as f32 - 2.0 * self.pad) / self.cell_h).floor().max(1.0) as usize;
+        let rows = ((height as f32 - 2.0 * self.pad - self.top) / self.cell_h).floor().max(1.0) as usize;
         (cols, rows)
     }
 
@@ -419,7 +429,7 @@ impl Renderer {
             let mut col = if failed { frame.fail_color.f32() } else { frame.cursor_color.f32() };
             col[3] = if failed { 1.0 } else { 0.7 };
             let w = (self.font_px / 7.0).max(2.0).round();
-            out.push(Rect { xywh: [0.0, pad + *r as f32 * ch, w, ch], color: col });
+            out.push(Rect { xywh: [0.0, pad + self.top + *r as f32 * ch, w, ch], color: col });
         }
         out
     }
@@ -428,7 +438,7 @@ impl Renderer {
         let (cw, ch, pad) = (self.cell_w, self.cell_h, self.pad);
         let mut out = Vec::new();
         for (r, row) in frame.rows.iter().enumerate() {
-            let y = pad + r as f32 * ch;
+            let y = pad + self.top + r as f32 * ch;
             // backgrounds, merged across cells of one colour
             let mut run: Option<(usize, usize, Rgb)> = None;
             for (c, cell) in row.iter().enumerate() {
@@ -456,7 +466,7 @@ impl Renderer {
             }
         }
         if let Some((r, c, shape)) = frame.cursor {
-            let (x, y) = cur.map(|c| c.0).unwrap_or((pad + c as f32 * cw, pad + r as f32 * ch));
+            let (x, y) = cur.map(|c| c.0).unwrap_or((pad + c as f32 * cw, pad + self.top + r as f32 * ch));
             // the smear: from the lagging tail to the head, along one line only
             if let Some((_, (tx, ty))) = cur.filter(|_| self.cursor_trail) {
                 if (ty - y).abs() < 1.0 && (tx - x).abs() > 1.0 {
@@ -496,36 +506,62 @@ impl Renderer {
         let rects = self.rect_list(frame, cur);
         self.rects.upload(device, queue, &rects, width as f32, height as f32);
         let mut over = self.overlay_list(frame);
-        // the bar: shaped, then a box behind it in the overlay layer
-        let bar_area = frame.bar.as_ref().map(|txt| {
-            let mut b = Buffer::new(&mut self.font_system, Metrics::new(self.font_px, self.cell_h));
-            b.set_size(None, Some(self.cell_h));
-            let fg = frame.fg;
-            b.set_text(txt, &Attrs::new().family(Family::Name(&self.family)).color(Color::rgb(fg.0, fg.1, fg.2)), Shaping::Advanced, None);
-            b.shape_until_scroll(&mut self.font_system, false);
+        // labels drawn above everything: the tab bar and the search bar
+        let mut labels: Vec<(Buffer, f32, f32)> = Vec::new();
+        let label = |fs: &mut FontSystem, family: &str, txt: &str, fg: Rgb, px: f32, h: f32| {
+            let mut b = Buffer::new(fs, Metrics::new(px, h));
+            b.set_size(None, Some(h));
+            b.set_text(txt, &Attrs::new().family(Family::Name(family)).color(Color::rgb(fg.0, fg.1, fg.2)), Shaping::Advanced, None);
+            b.shape_until_scroll(fs, false);
             let w = b.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
+            (b, w)
+        };
+        if frame.tabs.len() > 1 {
+            // the tab bar: one pill per tab, the active one lifted
+            let h = self.top;
+            let n = frame.tabs.len() as f32;
+            let tw = ((width as f32 - self.cell_w) / n).min(self.cell_w * 28.0);
+            for (i, (title, active)) in frame.tabs.iter().enumerate() {
+                let x = self.cell_w * 0.5 + i as f32 * tw;
+                if *active {
+                    over.push(Rect { xywh: [x + 2.0, h * 0.12, tw - 4.0, h * 0.76], color: frame.bar_bg.f32() });
+                }
+                let max_chars = ((tw / self.cell_w) as usize).saturating_sub(3).max(4);
+                let mut t: String = title.chars().take(max_chars).collect();
+                if title.chars().count() > max_chars {
+                    t.pop();
+                    t.push('…');
+                }
+                let fg = if *active { frame.fg } else { Rgb((frame.fg.0 as f32 * 0.6) as u8, (frame.fg.1 as f32 * 0.6) as u8, (frame.fg.2 as f32 * 0.6) as u8) };
+                let (b, w) = label(&mut self.font_system, &self.family, &t, fg, self.font_px * 0.9, self.cell_h);
+                labels.push((b, x + (tw - w) / 2.0, (h - self.cell_h) / 2.0));
+            }
+        }
+        if let Some(txt) = &frame.bar {
+            let (b, w) = label(&mut self.font_system, &self.family, txt, frame.fg, self.font_px, self.cell_h);
             let (bw, bh) = (w + 2.0 * self.cell_w, self.cell_h * 1.5);
             // bottom right: found lines are scrolled to the top, so the bar never covers them
             let (x, y) = (width as f32 - bw - self.cell_w, height as f32 - bh - self.cell_h * 0.5);
             over.push(Rect { xywh: [x, y, bw, bh], color: frame.bar_bg.f32() });
-            self.bar = b;
-            (x + self.cell_w, y + self.cell_h * 0.25)
-        });
+            labels.push((b, x + self.cell_w, y + self.cell_h * 0.25));
+        }
+        self.bars = labels;
         self.overlay.upload(device, queue, &over, width as f32, height as f32);
         self.viewport.update(queue, Resolution { width, height });
-        let (pad, ch) = (self.pad, self.cell_h);
+        let (pad, ch, top0) = (self.pad, self.cell_h, self.pad + self.top);
         let areas: Vec<TextArea> = self.rows.iter().enumerate().map(|(i, (_, b))| TextArea {
             buffer: b,
             left: pad,
-            top: pad + i as f32 * ch,
+            top: top0 + i as f32 * ch,
             scale: 1.0,
-            bounds: TextBounds { left: 0, top: 0, right: width as i32, bottom: height as i32 },
+            // rows never draw into the tab bar
+            bounds: TextBounds { left: 0, top: self.top as i32, right: width as i32, bottom: height as i32 },
             default_color: Color::rgb(255, 255, 255),
             custom_glyphs: &[],
         }).collect();
         let _ = self.text.prepare(device, queue, &mut self.font_system, &mut self.atlas, &self.viewport, areas, &mut self.swash);
-        let bar_areas: Vec<TextArea> = bar_area.iter().map(|(x, y)| TextArea {
-            buffer: &self.bar,
+        let bar_areas: Vec<TextArea> = self.bars.iter().map(|(b, x, y)| TextArea {
+            buffer: b,
             left: *x,
             top: *y,
             scale: 1.0,
@@ -569,7 +605,7 @@ impl Renderer {
     }
 
     fn cursor_motion(&mut self, frame: &Frame) -> (Option<((f32, f32), (f32, f32))>, bool) {
-        let target = frame.cursor.map(|(r, c, _)| (self.pad + c as f32 * self.cell_w, self.pad + r as f32 * self.cell_h));
+        let target = frame.cursor.map(|(r, c, _)| (self.pad + c as f32 * self.cell_w, self.pad + self.top + r as f32 * self.cell_h));
         let (Some(t), true) = (target, self.cursor_ms > 0.0) else {
             self.anim = None;
             return (None, false);
