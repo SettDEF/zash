@@ -104,7 +104,8 @@ pub fn render_png(frame: &Frame, cfg: &Config, path: &str) -> Result<(u32, u32),
     });
     let view = tex.create_view(&Default::default());
     r.cursor_ms = 0.0;
-    r.render(&device, &queue, &view, width, height, frame);
+    let pane = crate::render::PaneView { id: 0, x: 0.0, y: 0.0, w: width as f32, h: height as f32, frame, focused: true };
+    r.render(&device, &queue, &view, width, height, &[pane]);
 
     // read back, rows padded to 256 bytes
     let row = (width * 4).div_ceil(256) * 256;

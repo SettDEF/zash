@@ -490,7 +490,10 @@ impl App {
         };
         let view = tex.texture.create_view(&Default::default());
         g.window.pre_present_notify();
-        let animating = g.renderer.render(&g.device, &g.queue, &view, g.config.width, g.config.height, &frame);
+        let (w, h) = (g.config.width as f32, g.config.height as f32);
+        let top = g.renderer.top;
+        let pane = crate::render::PaneView { id: self.tabs[self.active].id, x: 0.0, y: top, w, h: h - top, frame: &frame, focused: true };
+        let animating = g.renderer.render(&g.device, &g.queue, &view, g.config.width, g.config.height, &[pane]);
         g.queue.present(tex);
         // another frame only while the cursor is still gliding: idle stays idle
         if animating {

@@ -8,6 +8,7 @@
 mod app;
 mod config;
 mod input;
+mod keys;
 mod links;
 mod search;
 mod render;

@@ -262,6 +262,21 @@ fn as_bytes(v: &[f32]) -> Vec<u8> {
 
 // ── the renderer ──
 
+/// One pane to draw: where it is in the window (pixels) and what it shows.
+pub struct PaneView<'a> {
+    pub id: u64,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub frame: &'a Frame,
+    pub focused: bool,
+}
+
+fn dim6(c: Rgb) -> Rgb {
+    Rgb((c.0 as f32 * 0.6) as u8, (c.1 as f32 * 0.6) as u8, (c.2 as f32 * 0.6) as u8)
+}
+
 pub struct Renderer {
     pub font_system: FontSystem,
     swash: SwashCache,
@@ -276,7 +291,8 @@ pub struct Renderer {
     rects: Rects,
     /// drawn after the text: marks that must stay visible over glyphs
     overlay: Rects,
-    rows: Vec<(u64, Buffer)>,
+    /// shaped rows per pane (by pane id)
+    rows: std::collections::HashMap<u64, Vec<(u64, Buffer)>>,
     family: String,
     features: glyphon::cosmic_text::FontFeatures,
     pub font_px: f32,
@@ -326,7 +342,7 @@ impl Renderer {
             text2,
             bars: Vec::new(),
             top: 0.0,
-            rows: Vec::new(),
+            rows: std::collections::HashMap::new(),
             family: cfg.font_family.clone(),
             features,
             font_px: 0.0,
@@ -370,13 +386,19 @@ impl Renderer {
 
     /// Cells that fit in a surface of this size.
     pub fn grid_for(&self, width: u32, height: u32) -> (usize, usize) {
-        let cols = ((width as f32 - 2.0 * self.pad) / self.cell_w).floor().max(2.0) as usize;
-        let rows = ((height as f32 - 2.0 * self.pad - self.top) / self.cell_h).floor().max(1.0) as usize;
+        self.grid_in(width as f32, height as f32 - self.top)
+    }
+
+    /// Cells that fit in a pane of this many pixels (padding inside it).
+    pub fn grid_in(&self, w: f32, h: f32) -> (usize, usize) {
+        let cols = ((w - 2.0 * self.pad) / self.cell_w).floor().max(2.0) as usize;
+        let rows = ((h - 2.0 * self.pad) / self.cell_h).floor().max(1.0) as usize;
         (cols, rows)
     }
 
-    fn shape_rows(&mut self, frame: &Frame, width: f32) {
-        self.rows.resize_with(frame.rows.len(), || (0, Buffer::new_empty(Metrics::new(1.0, 1.0))));
+    fn shape_rows(&mut self, pane: u64, frame: &Frame, width: f32) {
+        let mut cache = self.rows.remove(&pane).unwrap_or_default();
+        cache.resize_with(frame.rows.len(), || (0, Buffer::new_empty(Metrics::new(1.0, 1.0))));
         for (i, row) in frame.rows.iter().enumerate() {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             self.font_px.to_bits().hash(&mut h);
@@ -387,7 +409,7 @@ impl Renderer {
                 c.spacer.hash(&mut h);
             }
             let key = h.finish();
-            if self.rows[i].0 == key && key != 0 {
+            if cache[i].0 == key && key != 0 {
                 continue;
             }
             // runs of cells with one style become one span
@@ -420,12 +442,13 @@ impl Renderer {
             let default = Attrs::new().family(Family::Name(&family));
             b.set_rich_text(spans.iter().map(|(t, st)| (t.as_str(), mk(st))), &default, Shaping::Advanced, None);
             b.shape_until_scroll(&mut self.font_system, false);
-            self.rows[i] = (key, b);
+            cache[i] = (key, b);
         }
+        self.rows.insert(pane, cache);
     }
 
-    fn overlay_list(&self, frame: &Frame) -> Vec<Rect> {
-        let (ch, pad) = (self.cell_h, self.pad);
+    fn overlay_list(&self, frame: &Frame, ox: f32, oy: f32) -> Vec<Rect> {
+        let ch = self.cell_h;
         let mut out = Vec::new();
         // prompt marks: a thin bar at the left edge, red when the command before failed
         for (r, exit) in &frame.prompts {
@@ -433,16 +456,16 @@ impl Renderer {
             let mut col = if failed { frame.fail_color.f32() } else { frame.cursor_color.f32() };
             col[3] = if failed { 1.0 } else { 0.7 };
             let w = (self.font_px / 7.0).max(2.0).round();
-            out.push(Rect { xywh: [0.0, pad + self.top + *r as f32 * ch, w, ch], color: col });
+            out.push(Rect { xywh: [ox - self.pad, oy + *r as f32 * ch, w, ch], color: col });
         }
         out
     }
 
-    fn rect_list(&self, frame: &Frame, cur: Option<((f32, f32), (f32, f32))>) -> Vec<Rect> {
-        let (cw, ch, pad) = (self.cell_w, self.cell_h, self.pad);
+    fn rect_list(&self, frame: &Frame, cur: Option<((f32, f32), (f32, f32))>, ox: f32, oy: f32) -> Vec<Rect> {
+        let (cw, ch, pad) = (self.cell_w, self.cell_h, ox);
         let mut out = Vec::new();
         for (r, row) in frame.rows.iter().enumerate() {
-            let y = pad + self.top + r as f32 * ch;
+            let y = oy + r as f32 * ch;
             // backgrounds, merged across cells of one colour
             let mut run: Option<(usize, usize, Rgb)> = None;
             for (c, cell) in row.iter().enumerate() {
@@ -470,7 +493,7 @@ impl Renderer {
             }
         }
         if let Some((r, c, shape)) = frame.cursor {
-            let (x, y) = cur.map(|c| c.0).unwrap_or((pad + c as f32 * cw, pad + self.top + r as f32 * ch));
+            let (x, y) = cur.map(|c| c.0).unwrap_or((pad + c as f32 * cw, oy + r as f32 * ch));
             // the smear: from the lagging tail to the head, along one line only
             if let Some((_, (tx, ty))) = cur.filter(|_| self.cursor_trail) {
                 if (ty - y).abs() < 1.0 && (tx - x).abs() > 1.0 {
@@ -502,15 +525,43 @@ impl Renderer {
         out
     }
 
-    /// Draws a frame into `view` (a window surface or an offscreen texture).
+    /// Draws the panes of a tab into `view` (a window surface or an offscreen texture).
+    /// The focused pane carries the chrome: tab bar, completion popup, search bar.
     /// Returns true while something still animates (the caller asks for another frame).
-    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView, width: u32, height: u32, frame: &Frame) -> bool {
-        self.shape_rows(frame, width as f32);
-        let (cur, animating) = self.cursor_motion(frame);
-        let rects = self.rect_list(frame, cur);
+    pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView, width: u32, height: u32, panes: &[PaneView]) -> bool {
+        let Some(focus) = panes.iter().find(|p| p.focused).or(panes.first()) else { return false };
+        let frame = focus.frame;
+        // shaped rows of panes that are gone are dropped
+        self.rows.retain(|id, _| panes.iter().any(|p| p.id == *id));
+        let (fox, foy) = (focus.x + self.pad, focus.y + self.pad);
+        let (cur, animating) = self.cursor_motion(frame, fox, foy);
+        let mut rects = Vec::new();
+        let mut over = Vec::new();
+        for p in panes {
+            self.shape_rows(p.id, p.frame, p.w - 2.0 * self.pad);
+            let (ox, oy) = (p.x + self.pad, p.y + self.pad);
+            rects.extend(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy));
+            over.extend(self.overlay_list(p.frame, ox, oy));
+        }
+        if panes.len() > 1 {
+            let line = { let mut c = frame.fg.f32(); c[3] = 0.16; c };
+            let shade = { let mut c = frame.bg.f32(); c[3] = 0.32; c };
+            for p in panes {
+                // a hairline where a pane meets its left or upper neighbour
+                if p.x > 0.5 {
+                    over.push(Rect { xywh: [p.x.round() - 1.0, p.y, 1.0, p.h], color: line });
+                }
+                if p.y > self.top + 0.5 {
+                    over.push(Rect { xywh: [p.x, p.y.round() - 1.0, p.w, 1.0], color: line });
+                }
+                // panes without the keyboard step back a little
+                if !p.focused {
+                    over.push(Rect { xywh: [p.x, p.y, p.w, p.h], color: shade });
+                }
+            }
+        }
         self.rects.upload(device, queue, &rects, width as f32, height as f32);
-        let mut over = self.overlay_list(frame);
-        // labels drawn above everything: the tab bar and the search bar
+        // labels drawn above everything: the tab bar, the popup and the search bar
         let mut labels: Vec<(Buffer, f32, f32)> = Vec::new();
         let label = |fs: &mut FontSystem, family: &str, txt: &str, fg: Rgb, px: f32, h: f32| {
             let mut b = Buffer::new(fs, Metrics::new(px, h));
@@ -536,7 +587,7 @@ impl Renderer {
                     t.pop();
                     t.push('…');
                 }
-                let fg = if *active { frame.fg } else { Rgb((frame.fg.0 as f32 * 0.6) as u8, (frame.fg.1 as f32 * 0.6) as u8, (frame.fg.2 as f32 * 0.6) as u8) };
+                let fg = if *active { frame.fg } else { dim6(frame.fg) };
                 let (b, w) = label(&mut self.font_system, &self.family, &t, fg, self.font_px * 0.9, self.cell_h);
                 labels.push((b, x + (tw - w) / 2.0, (h - self.cell_h) / 2.0));
             }
@@ -545,9 +596,11 @@ impl Renderer {
             // the completion popup: under the word being completed, above it when there is no room
             let n = pp.items.len();
             let row_h = (self.cell_h * 1.25).round();
+            let (left, right, bottom) = (focus.x + self.pad, focus.x + focus.w - self.pad, height as f32 - self.pad);
             // as many rows as fit on the roomier side of the cursor line (up to 10)
-            let above_px = self.top + cr as f32 * self.cell_h;
-            let below_px = height as f32 - self.pad - self.top - (cr + 1) as f32 * self.cell_h;
+            let line_y = foy + cr as f32 * self.cell_h;
+            let above_px = line_y - self.top;
+            let below_px = bottom - line_y - self.cell_h;
             let room = above_px.max(below_px) - self.cell_h;
             let mut show: usize = ((room / row_h) as usize).clamp(1, 10);
             if n > show {
@@ -561,14 +614,14 @@ impl Renderer {
             let footer_w = if more { 34 } else { 0 };
             let pw = ((widest.max(12).max(footer_w) + 3) as f32 * self.cell_w).min(width as f32 - 2.0 * self.pad);
             let ph = rows.len() as f32 * row_h + self.cell_h * 0.5 + if more { row_h } else { 0.0 };
-            let wx = self.pad + cc.saturating_sub(pp.word) as f32 * self.cell_w - self.cell_w;
-            let x = wx.clamp(self.pad, (width as f32 - pw - self.pad).max(self.pad));
-            let below = self.pad + self.top + (cr + 1) as f32 * self.cell_h + 2.0;
-            let y = if below + ph <= height as f32 - self.pad || below_px >= above_px { below } else { (below - self.cell_h - ph - 4.0).max(self.top) };
+            let wx = fox + cc.saturating_sub(pp.word) as f32 * self.cell_w - self.cell_w;
+            let x = wx.clamp(left.min(width as f32 - pw - self.pad).max(self.pad), (right.max(left + pw) - pw).min(width as f32 - pw - self.pad).max(self.pad));
+            let below = line_y + self.cell_h + 2.0;
+            let y = if below + ph <= bottom || below_px >= above_px { below } else { (line_y - ph - 4.0).max(self.top) };
             let edge = frame.fg.f32();
             over.push(Rect { xywh: [x - 1.0, y - 1.0, pw + 2.0, ph + 2.0], color: [edge[0], edge[1], edge[2], 0.18] });
             over.push(Rect { xywh: [x, y, pw, ph], color: frame.bar_bg.f32() });
-            let dim = Rgb((frame.fg.0 as f32 * 0.6) as u8, (frame.fg.1 as f32 * 0.6) as u8, (frame.fg.2 as f32 * 0.6) as u8);
+            let dim = dim6(frame.fg);
             for (k, i) in rows.iter().enumerate() {
                 let ry = y + self.cell_h * 0.25 + k as f32 * row_h;
                 let chosen = pp.sel == Some(*i);
@@ -589,25 +642,31 @@ impl Renderer {
         if let Some(txt) = &frame.bar {
             let (b, w) = label(&mut self.font_system, &self.family, txt, frame.fg, self.font_px, self.cell_h);
             let (bw, bh) = (w + 2.0 * self.cell_w, self.cell_h * 1.5);
-            // bottom right: found lines are scrolled to the top, so the bar never covers them
-            let (x, y) = (width as f32 - bw - self.cell_w, height as f32 - bh - self.cell_h * 0.5);
+            // bottom right of the focused pane: found lines are scrolled to the top, so the bar never covers them
+            let (x, y) = ((focus.x + focus.w - bw - self.cell_w).max(focus.x), focus.y + focus.h - bh - self.cell_h * 0.5);
             over.push(Rect { xywh: [x, y, bw, bh], color: frame.bar_bg.f32() });
             labels.push((b, x + self.cell_w, y + self.cell_h * 0.25));
         }
         self.bars = labels;
         self.overlay.upload(device, queue, &over, width as f32, height as f32);
         self.viewport.update(queue, Resolution { width, height });
-        let (pad, ch, top0) = (self.pad, self.cell_h, self.pad + self.top);
-        let areas: Vec<TextArea> = self.rows.iter().enumerate().map(|(i, (_, b))| TextArea {
-            buffer: b,
-            left: pad,
-            top: top0 + i as f32 * ch,
-            scale: 1.0,
-            // rows never draw into the tab bar
-            bounds: TextBounds { left: 0, top: self.top as i32, right: width as i32, bottom: height as i32 },
-            default_color: Color::rgb(255, 255, 255),
-            custom_glyphs: &[],
-        }).collect();
+        let ch = self.cell_h;
+        let mut areas: Vec<TextArea> = Vec::new();
+        for p in panes {
+            let Some(cache) = self.rows.get(&p.id) else { continue };
+            let (ox, oy) = (p.x + self.pad, p.y + self.pad);
+            // each pane's text stays inside its pane (and out of the tab bar)
+            let bounds = TextBounds { left: p.x as i32, top: (p.y.max(self.top)) as i32, right: (p.x + p.w) as i32, bottom: (p.y + p.h) as i32 };
+            areas.extend(cache.iter().enumerate().map(|(i, (_, b))| TextArea {
+                buffer: b,
+                left: ox,
+                top: oy + i as f32 * ch,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
+            }));
+        }
         let _ = self.text.prepare(device, queue, &mut self.font_system, &mut self.atlas, &self.viewport, areas, &mut self.swash);
         let bar_areas: Vec<TextArea> = self.bars.iter().map(|(b, x, y)| TextArea {
             buffer: b,
@@ -653,8 +712,8 @@ impl Renderer {
         animating
     }
 
-    fn cursor_motion(&mut self, frame: &Frame) -> (Option<((f32, f32), (f32, f32))>, bool) {
-        let target = frame.cursor.map(|(r, c, _)| (self.pad + c as f32 * self.cell_w, self.pad + self.top + r as f32 * self.cell_h));
+    fn cursor_motion(&mut self, frame: &Frame, ox: f32, oy: f32) -> (Option<((f32, f32), (f32, f32))>, bool) {
+        let target = frame.cursor.map(|(r, c, _)| (ox + c as f32 * self.cell_w, oy + r as f32 * self.cell_h));
         let (Some(t), true) = (target, self.cursor_ms > 0.0) else {
             self.anim = None;
             return (None, false);
