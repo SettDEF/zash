@@ -30,7 +30,9 @@ pub struct Opts {
 pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
     let (tx, rx) = mpsc::channel();
     let grid = Grid { cols: o.cols, rows: o.rows, cell_w: 9.0, cell_h: 18.0 };
-    let session = Session::spawn(Some(o.cmd.clone()), o.workdir.clone(), grid, cfg.scrollback, Sink::Channel(tx))?;
+    // no command: the login shell, with zash's shell integration (as in the window)
+    let cmd = if o.cmd.is_empty() { None } else { Some(o.cmd.clone()) };
+    let session = Session::spawn(cmd, o.workdir.clone(), grid, cfg.scrollback, Sink::Channel(tx))?;
     if let Some(keys) = &o.keys {
         // give the program a moment to start, then type at a human-ish pace
         std::thread::sleep(Duration::from_millis(400));
@@ -73,6 +75,7 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
     }
     let mut frame = { let t = session.term.lock(); Frame::extract(&t, &cfg.palette).with_prompts(&t, &marks) };
     frame.bar = bar;
+    frame.popup = session.popup.lock().unwrap().clone();
     if !marks.is_empty() {
         let list: Vec<String> = marks.iter().map(|m| match m.exit { Some(e) => format!("{}{}={e}", m.kind, m.line), None => format!("{}{}", m.kind, m.line) }).collect();
         eprintln!("zash: shell marks: {}", list.join(" "));

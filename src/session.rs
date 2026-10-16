@@ -72,6 +72,8 @@ pub struct Mark {
 }
 
 pub struct Session {
+    /// the shell plugin's completion popup (None: closed)
+    pub popup: Arc<Mutex<Option<Popup>>>,
     pub term: Arc<FairMutex<Term<Listener>>>,
     writer: Arc<Mutex<File>>,
     pty: Arc<Mutex<tty::Pty>>,
@@ -89,14 +91,52 @@ pub struct MarkScanner {
     carry: Vec<u8>,
 }
 
+/// What a zash escape carried: a shell mark, or the completion popup's state.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Found {
+    Mark(char, Option<i32>),
+    Popup(Option<Popup>),
+}
+
+/// The completion popup the shell plugin shows (OSC 7733).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Popup {
+    pub items: Vec<String>,
+    /// the chosen item (Tab), none before the first Tab
+    pub sel: Option<usize>,
+    /// how many columns the word being completed already has: the popup lines up with its start
+    pub word: usize,
+}
+
+impl Popup {
+    /// `popup;SEL;WORD;item\x1fitem…` (SEL 0 = none chosen) or `close`.
+    pub fn parse(body: &str) -> Option<Option<Popup>> {
+        if body == "close" {
+            return Some(None);
+        }
+        let rest = body.strip_prefix("popup;")?;
+        let mut it = rest.splitn(3, ';');
+        let sel: usize = it.next()?.parse().ok()?;
+        let word: usize = it.next()?.parse().ok()?;
+        let items: Vec<String> = it.next().unwrap_or("").split('\x1f').filter(|s| !s.is_empty()).map(String::from).collect();
+        if items.is_empty() {
+            return Some(None);
+        }
+        Some(Some(Popup { sel: sel.checked_sub(1).filter(|s| *s < items.len()), word, items }))
+    }
+}
+
 impl MarkScanner {
     /// Nothing carried over from the last chunk.
     pub fn idle(&self) -> bool {
         self.carry.is_empty()
     }
 
-    pub fn scan(&mut self, chunk: &[u8]) -> Vec<(usize, char, Option<i32>)> {
-        const HEAD: &[u8] = b"\x1b]133;";
+    /// The zash escapes in a chunk of output (OSC 133 marks, OSC 7733 popup), with the
+    /// offset in the chunk right after each one ends.
+    pub fn scan(&mut self, chunk: &[u8]) -> Vec<(usize, Found)> {
+        const HEAD: &[u8] = b"\x1b]";
+        const LONGEST: usize = 7; // "\x1b]7733;"
         let carried = self.carry.len();
         let mut data = std::mem::take(&mut self.carry);
         data.extend_from_slice(chunk);
@@ -107,22 +147,31 @@ impl MarkScanner {
             // the terminator: BEL or ESC \
             let end = data[start..].iter().position(|&b| b == 0x07 || b == 0x1b).map(|e| start + e);
             let Some(end) = end else {
-                // unfinished: keep it for the next chunk
-                self.carry = data[i + p..].to_vec();
+                // unfinished: keep it for the next chunk (bounded: a runaway OSC is dropped)
+                if data.len() - (i + p) < 1 << 16 {
+                    self.carry = data[i + p..].to_vec();
+                }
                 return out;
             };
             let body = String::from_utf8_lossy(&data[start..end]);
-            let mut parts = body.split(';');
-            if let Some(kind) = parts.next().and_then(|k| k.chars().next()) {
-                let exit = if kind == 'D' { parts.next().and_then(|v| v.parse().ok()) } else { None };
-                let after = if data[end] == 0x1b { end + 2 } else { end + 1 };
-                // offsets relative to this chunk (the carried part was already parsed)
-                out.push((after.saturating_sub(carried).min(chunk.len()), kind, exit));
+            let after = if data[end] == 0x1b { end + 2 } else { end + 1 };
+            // offsets relative to this chunk (the carried part was already parsed)
+            let at = after.saturating_sub(carried).min(chunk.len());
+            if let Some(m) = body.strip_prefix("133;") {
+                let mut parts = m.split(';');
+                if let Some(kind) = parts.next().and_then(|k| k.chars().next()) {
+                    let exit = if kind == 'D' { parts.next().and_then(|v| v.parse().ok()) } else { None };
+                    out.push((at, Found::Mark(kind, exit)));
+                }
+            } else if let Some(m) = body.strip_prefix("7733;") {
+                if let Some(p) = Popup::parse(m) {
+                    out.push((at, Found::Popup(p)));
+                }
             }
             i = end + 1;
         }
         // a sequence may begin right at the end of the chunk
-        let tail = data.len().saturating_sub(HEAD.len() - 1);
+        let tail = data.len().saturating_sub(LONGEST - 1);
         if let Some(p) = data[tail.max(i)..].iter().position(|&b| b == 0x1b) {
             self.carry = data[tail.max(i) + p..].to_vec();
         }
@@ -152,10 +201,11 @@ impl Session {
         let pid = pty.child().id();
         let pty = Arc::new(Mutex::new(pty));
         let marks = Arc::new(Mutex::new(Vec::new()));
+        let popup = Arc::new(Mutex::new(None));
 
-        let (t, m, l) = (term.clone(), marks.clone(), listener.clone());
-        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, l))?;
-        Ok(Session { term, writer, pty, grid, marks, pid })
+        let (t, m, l, pp) = (term.clone(), marks.clone(), listener.clone(), popup.clone());
+        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, l))?;
+        Ok(Session { term, writer, pty, grid, marks, popup, pid })
     }
 
     /// Bytes for the program, as if typed.
@@ -192,7 +242,7 @@ impl Session {
 }
 
 /// Reads the program's output, notes shell marks, feeds the parser.
-fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, listener: Listener) {
+fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, popup: Arc<Mutex<Option<Popup>>>, listener: Listener) {
     use alacritty_terminal::grid::Dimensions;
     let mut parser: alacritty_terminal::vte::ansi::Processor = alacritty_terminal::vte::ansi::Processor::new();
     let mut scanner = MarkScanner::default();
@@ -226,9 +276,20 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
             // most output has no escape at all: skip the mark scan then
             let found = if chunk.contains(&0x1b) || !scanner.idle() { scanner.scan(chunk) } else { Vec::new() };
             let mut at = 0;
-            for (end, kind, exit) in found {
+            for (end, what) in found {
                 parser.advance(&mut *t, &chunk[at..end]);
                 at = end;
+                let (kind, exit) = match what {
+                    Found::Popup(p) => {
+                        *popup.lock().unwrap() = p;
+                        continue;
+                    }
+                    Found::Mark(k, e) => (k, e),
+                };
+                // a command starting or a new prompt: the popup is over
+                if kind == 'C' || kind == 'A' {
+                    *popup.lock().unwrap() = None;
+                }
                 let line = t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize;
                 let mut m = marks.lock().unwrap();
                 m.push(Mark { kind, line, exit });
@@ -257,13 +318,23 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
 
 #[cfg(test)]
 mod mark_tests {
-    use super::MarkScanner;
+    use super::{Found, MarkScanner, Popup};
+
+    #[test]
+    fn popup_messages() {
+        let mut s = MarkScanner::default();
+        let out = s.scan(b"\x1b]7733;popup;2;3;Documents/\x1fDownloads/\x07x\x1b]7733;close\x07");
+        assert_eq!(out[0].1, Found::Popup(Some(Popup { items: vec!["Documents/".into(), "Downloads/".into()], sel: Some(1), word: 3 })));
+        assert_eq!(out[1].1, Found::Popup(None));
+        assert_eq!(Popup::parse("popup;0;1;a"), Some(Some(Popup { items: vec!["a".into()], sel: None, word: 1 })));
+        assert_eq!(Popup::parse("nonsense"), None);
+    }
 
     #[test]
     fn finds_marks() {
         let mut s = MarkScanner::default();
         let out = s.scan(b"ab\x1b]133;A\x07$ ls\r\n\x1b]133;C\x07out\x1b]133;D;1\x1b\\");
-        assert_eq!(out.iter().map(|o| (o.1, o.2)).collect::<Vec<_>>(), vec![('A', None), ('C', None), ('D', Some(1))]);
+        assert_eq!(out.iter().map(|o| o.1.clone()).collect::<Vec<_>>(), vec![Found::Mark('A', None), Found::Mark('C', None), Found::Mark('D', Some(1))]);
         assert_eq!(out[0].0, 10, "offset just after the BEL");
     }
 
@@ -273,7 +344,7 @@ mod mark_tests {
         assert!(s.scan(b"text\x1b]13").is_empty());
         let out = s.scan(b"3;D;0\x07more");
         assert_eq!(out.len(), 1);
-        assert_eq!((out[0].1, out[0].2), ('D', Some(0)));
+        assert_eq!(out[0].1, Found::Mark('D', Some(0)));
         assert_eq!(out[0].0, 6, "offset within the second chunk");
     }
 }

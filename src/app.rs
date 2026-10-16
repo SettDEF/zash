@@ -463,6 +463,7 @@ impl App {
             let marks = s.marks.lock().unwrap();
             Frame::extract(&t, &self.cfg.palette).with_prompts(&t, &marks)
         };
+        frame.popup = s.popup.lock().unwrap().clone();
         if let Some(q) = &self.search {
             frame.bar = Some(q.bar());
         }

@@ -39,6 +39,8 @@ pub struct CellView {
 }
 
 pub struct Frame {
+    /// the shell plugin's completion popup, drawn at the cursor
+    pub popup: Option<crate::session::Popup>,
     /// tab titles and which one is shown (drawn as a bar when there are two or more)
     pub tabs: Vec<(String, bool)>,
     /// a bar drawn over the terminal at the top right (search)
@@ -143,7 +145,7 @@ impl Frame {
                 }
             }
         }
-        Frame { tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
+        Frame { popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -537,6 +539,42 @@ impl Renderer {
                 let fg = if *active { frame.fg } else { Rgb((frame.fg.0 as f32 * 0.6) as u8, (frame.fg.1 as f32 * 0.6) as u8, (frame.fg.2 as f32 * 0.6) as u8) };
                 let (b, w) = label(&mut self.font_system, &self.family, &t, fg, self.font_px * 0.9, self.cell_h);
                 labels.push((b, x + (tw - w) / 2.0, (h - self.cell_h) / 2.0));
+            }
+        }
+        if let (Some(pp), Some((cr, cc, _))) = (&frame.popup, frame.cursor) {
+            // the completion popup: under the word being completed, above it when there is no room
+            const SHOW: usize = 10;
+            let n = pp.items.len();
+            let first = match pp.sel { Some(s) if s >= SHOW => s + 1 - SHOW, _ => 0 };
+            let rows: Vec<usize> = (first..n.min(first + SHOW)).collect();
+            let row_h = (self.cell_h * 1.25).round();
+            let widest = rows.iter().map(|i| pp.items[*i].chars().count()).max().unwrap_or(0);
+            let more = n > SHOW;
+            let pw = ((widest.max(12) + 3) as f32 * self.cell_w).min(width as f32 - 2.0 * self.pad);
+            let ph = rows.len() as f32 * row_h + self.cell_h * 0.5 + if more { row_h } else { 0.0 };
+            let wx = self.pad + cc.saturating_sub(pp.word) as f32 * self.cell_w - self.cell_w;
+            let x = wx.clamp(self.pad, (width as f32 - pw - self.pad).max(self.pad));
+            let below = self.pad + self.top + (cr + 1) as f32 * self.cell_h + 2.0;
+            let y = if below + ph <= height as f32 - self.pad { below } else { (below - self.cell_h - ph - 4.0).max(self.top) };
+            let edge = frame.fg.f32();
+            over.push(Rect { xywh: [x - 1.0, y - 1.0, pw + 2.0, ph + 2.0], color: [edge[0], edge[1], edge[2], 0.18] });
+            over.push(Rect { xywh: [x, y, pw, ph], color: frame.bar_bg.f32() });
+            let dim = Rgb((frame.fg.0 as f32 * 0.6) as u8, (frame.fg.1 as f32 * 0.6) as u8, (frame.fg.2 as f32 * 0.6) as u8);
+            for (k, i) in rows.iter().enumerate() {
+                let ry = y + self.cell_h * 0.25 + k as f32 * row_h;
+                let chosen = pp.sel == Some(*i);
+                if chosen {
+                    let c = frame.cursor_color.f32();
+                    over.push(Rect { xywh: [x + 3.0, ry, pw - 6.0, row_h], color: [c[0], c[1], c[2], 0.28] });
+                }
+                let (b, _) = label(&mut self.font_system, &self.family, &pp.items[*i], if chosen || pp.sel.is_none() { frame.fg } else { dim }, self.font_px, self.cell_h);
+                labels.push((b, x + self.cell_w, ry + (row_h - self.cell_h) / 2.0));
+            }
+            if more {
+                let ry = y + self.cell_h * 0.25 + rows.len() as f32 * row_h;
+                let t = format!("{} of {n}  ·  Tab next, Shift+Tab back", pp.sel.map(|s| s + 1).unwrap_or(0));
+                let (b, _) = label(&mut self.font_system, &self.family, &t, dim, self.font_px * 0.85, self.cell_h);
+                labels.push((b, x + self.cell_w, ry + (row_h - self.cell_h) / 2.0));
             }
         }
         if let Some(txt) = &frame.bar {

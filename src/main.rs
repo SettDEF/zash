@@ -56,10 +56,6 @@ fn main() {
                 }
             }
         }
-        if o.cmd.is_empty() {
-            eprintln!("zash --snapshot needs a command after --");
-            std::process::exit(2);
-        }
         match snapshot::capture(&o, &cfg) {
             Ok(frame) => {
                 println!("{}", frame.text());
@@ -84,7 +80,7 @@ fn main() {
     let cmd = match args.first().map(String::as_str) {
         Some("-e") => Some(args[1..].to_vec()).filter(|c| !c.is_empty()),
         Some("-h") | Some("--help") => {
-            println!("zash — the zett terminal\n\n  zash               your shell in a window\n  zash -e CMD …      run CMD in a window\n  zash -d DIR        start in DIR\n  zash --snapshot [out.png] [--size 100x30] [--wait MS] -- CMD …\n                     headless: run CMD, print the screen, optionally render a PNG\n\nKeys: Ctrl+Shift+C/V copy/paste · Ctrl+Shift+Up/Down previous/next prompt · Ctrl+Shift+O copy the last output · Ctrl+Shift+F search · Ctrl+click open a link · Ctrl+Shift+T/W new/close tab · Ctrl+Tab next tab · Ctrl+= / Ctrl+- / Ctrl+0 font size · Shift+PageUp/PageDown scroll\n\nSettings: ~/.config/zash/zash.toml (written on first start, with comments)");
+            println!("zash — the zett terminal\n\n  zash               your shell in a window\n  zash -e CMD …      run CMD in a window\n  zash -d DIR        start in DIR\n  zash --snapshot [out.png] [--size 100x30] [--wait MS] [-- CMD …]   (no CMD: your shell)\n                     headless: run CMD, print the screen, optionally render a PNG\n\nKeys: Ctrl+Shift+C/V copy/paste · Ctrl+Shift+Up/Down previous/next prompt · Ctrl+Shift+O copy the last output · Ctrl+Shift+F search · Ctrl+click open a link · Ctrl+Shift+T/W new/close tab · Ctrl+Tab next tab · Ctrl+= / Ctrl+- / Ctrl+0 font size · Shift+PageUp/PageDown scroll\n\nSettings: ~/.config/zash/zash.toml (written on first start, with comments)");
             return;
         }
         _ => None,
