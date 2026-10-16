@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=zash
+GenericName=Terminal
+Comment=A fast, smooth terminal written in Rust
+Exec=zash
+Icon=zash
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;command;prompt;
+StartupWMClass=zash
