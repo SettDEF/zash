@@ -39,6 +39,10 @@ pub struct CellView {
 }
 
 pub struct Frame {
+    /// a bar drawn over the terminal at the top right (search)
+    pub bar: Option<String>,
+    pub bar_bg: Rgb,
+    pub fg: Rgb,
     /// prompt rows on screen with the exit status of the command before them (shell marks)
     pub prompts: Vec<(usize, Option<i32>)>,
     pub cols: usize,
@@ -135,7 +139,7 @@ impl Frame {
                 }
             }
         }
-        Frame { prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
+        Frame { bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -258,6 +262,9 @@ pub struct Renderer {
     viewport: Viewport,
     atlas: TextAtlas,
     text: TextRenderer,
+    /// text drawn above the overlay (the search bar)
+    text2: TextRenderer,
+    bar: Buffer,
     rects: Rects,
     /// drawn after the text: marks that must stay visible over glyphs
     overlay: Rects,
@@ -292,6 +299,7 @@ impl Renderer {
         let viewport = Viewport::new(device, &cache);
         let mut atlas = TextAtlas::new(device, queue, &cache, format);
         let text = TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
+        let text2 = TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let mut features = glyphon::cosmic_text::FontFeatures::new();
         for (tag, v) in &cfg.features {
             let b = tag.as_bytes();
@@ -307,6 +315,8 @@ impl Renderer {
             viewport,
             atlas,
             text,
+            text2,
+            bar: Buffer::new_empty(Metrics::new(1.0, 1.0)),
             rows: Vec::new(),
             family: cfg.font_family.clone(),
             features,
@@ -485,7 +495,22 @@ impl Renderer {
         let (cur, animating) = self.cursor_motion(frame);
         let rects = self.rect_list(frame, cur);
         self.rects.upload(device, queue, &rects, width as f32, height as f32);
-        let over = self.overlay_list(frame);
+        let mut over = self.overlay_list(frame);
+        // the bar: shaped, then a box behind it in the overlay layer
+        let bar_area = frame.bar.as_ref().map(|txt| {
+            let mut b = Buffer::new(&mut self.font_system, Metrics::new(self.font_px, self.cell_h));
+            b.set_size(None, Some(self.cell_h));
+            let fg = frame.fg;
+            b.set_text(txt, &Attrs::new().family(Family::Name(&self.family)).color(Color::rgb(fg.0, fg.1, fg.2)), Shaping::Advanced, None);
+            b.shape_until_scroll(&mut self.font_system, false);
+            let w = b.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
+            let (bw, bh) = (w + 2.0 * self.cell_w, self.cell_h * 1.5);
+            // bottom right: found lines are scrolled to the top, so the bar never covers them
+            let (x, y) = (width as f32 - bw - self.cell_w, height as f32 - bh - self.cell_h * 0.5);
+            over.push(Rect { xywh: [x, y, bw, bh], color: frame.bar_bg.f32() });
+            self.bar = b;
+            (x + self.cell_w, y + self.cell_h * 0.25)
+        });
         self.overlay.upload(device, queue, &over, width as f32, height as f32);
         self.viewport.update(queue, Resolution { width, height });
         let (pad, ch) = (self.pad, self.cell_h);
@@ -499,6 +524,16 @@ impl Renderer {
             custom_glyphs: &[],
         }).collect();
         let _ = self.text.prepare(device, queue, &mut self.font_system, &mut self.atlas, &self.viewport, areas, &mut self.swash);
+        let bar_areas: Vec<TextArea> = bar_area.iter().map(|(x, y)| TextArea {
+            buffer: &self.bar,
+            left: *x,
+            top: *y,
+            scale: 1.0,
+            bounds: TextBounds { left: 0, top: 0, right: width as i32, bottom: height as i32 },
+            default_color: Color::rgb(255, 255, 255),
+            custom_glyphs: &[],
+        }).collect();
+        let _ = self.text2.prepare(device, queue, &mut self.font_system, &mut self.atlas, &self.viewport, bar_areas, &mut self.swash);
 
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("zash frame") });
         {
@@ -526,6 +561,7 @@ impl Renderer {
             self.rects.draw(&mut pass);
             let _ = self.text.render(&self.atlas, &self.viewport, &mut pass);
             self.overlay.draw(&mut pass);
+            let _ = self.text2.render(&self.atlas, &self.viewport, &mut pass);
         }
         queue.submit(Some(enc.finish()));
         self.atlas.trim();

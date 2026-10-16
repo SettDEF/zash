@@ -9,6 +9,7 @@ mod app;
 mod config;
 mod input;
 mod links;
+mod search;
 mod render;
 mod session;
 mod shell;
@@ -30,7 +31,7 @@ fn main() {
     }
 
     if args.first().map(String::as_str) == Some("--snapshot") {
-        let mut o = snapshot::Opts { png: None, cols: 100, rows: 30, wait: Duration::from_secs(5), cmd: Vec::new(), keys: None, workdir: workdir.clone() };
+        let mut o = snapshot::Opts { png: None, cols: 100, rows: 30, wait: Duration::from_secs(5), cmd: Vec::new(), keys: None, workdir: workdir.clone(), search: None, older: 0 };
         let mut it = args.into_iter().skip(1);
         while let Some(a) = it.next() {
             match a.as_str() {
@@ -41,6 +42,8 @@ fn main() {
                     }
                 }
                 "--keys" => o.keys = it.next(),
+                "--search" => o.search = it.next(),
+                "--older" => o.older = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
                 "--wait" => o.wait = Duration::from_millis(it.next().and_then(|s| s.parse().ok()).unwrap_or(5000)),
                 "--" => {
                     o.cmd = it.by_ref().collect();
@@ -81,7 +84,7 @@ fn main() {
     let cmd = match args.first().map(String::as_str) {
         Some("-e") => Some(args[1..].to_vec()).filter(|c| !c.is_empty()),
         Some("-h") | Some("--help") => {
-            println!("zash — the zett terminal\n\n  zash               your shell in a window\n  zash -e CMD …      run CMD in a window\n  zash -d DIR        start in DIR\n  zash --snapshot [out.png] [--size 100x30] [--wait MS] -- CMD …\n                     headless: run CMD, print the screen, optionally render a PNG\n\nKeys: Ctrl+Shift+C/V copy/paste · Ctrl+Shift+Up/Down previous/next prompt · Ctrl+Shift+O copy the last output · Ctrl+= / Ctrl+- / Ctrl+0 font size · Shift+PageUp/PageDown scroll\n\nSettings: ~/.config/zash/zash.toml (written on first start, with comments)");
+            println!("zash — the zett terminal\n\n  zash               your shell in a window\n  zash -e CMD …      run CMD in a window\n  zash -d DIR        start in DIR\n  zash --snapshot [out.png] [--size 100x30] [--wait MS] -- CMD …\n                     headless: run CMD, print the screen, optionally render a PNG\n\nKeys: Ctrl+Shift+C/V copy/paste · Ctrl+Shift+Up/Down previous/next prompt · Ctrl+Shift+O copy the last output · Ctrl+Shift+F search · Ctrl+click open a link · Ctrl+= / Ctrl+- / Ctrl+0 font size · Shift+PageUp/PageDown scroll\n\nSettings: ~/.config/zash/zash.toml (written on first start, with comments)");
             return;
         }
         _ => None,

@@ -21,6 +21,9 @@ pub struct Opts {
     /// keys typed into the program once it has started (input::encode_notation)
     pub keys: Option<String>,
     pub workdir: Option<std::path::PathBuf>,
+    /// search the scrollback for this, `older` steps back (tests)
+    pub search: Option<String>,
+    pub older: usize,
 }
 
 /// Runs the command until it exits (or `wait` passes) and returns the screen.
@@ -57,7 +60,19 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
         }
     }
     let marks = session.marks.lock().unwrap().clone();
-    let frame = { let t = session.term.lock(); Frame::extract(&t, &cfg.palette).with_prompts(&t, &marks) };
+    let mut bar = None;
+    if let Some(q) = &o.search {
+        let mut s = crate::search::Search::default();
+        let mut t = session.term.lock();
+        s.set_query(&mut t, q);
+        for _ in 0..o.older {
+            s.step(&mut t, alacritty_terminal::index::Direction::Left);
+        }
+        eprintln!("zash: search {q:?}: match at line {:?} of the history", s.current_line(&t));
+        bar = Some(s.bar());
+    }
+    let mut frame = { let t = session.term.lock(); Frame::extract(&t, &cfg.palette).with_prompts(&t, &marks) };
+    frame.bar = bar;
     if !marks.is_empty() {
         let list: Vec<String> = marks.iter().map(|m| match m.exit { Some(e) => format!("{}{}={e}", m.kind, m.line), None => format!("{}{}", m.kind, m.line) }).collect();
         eprintln!("zash: shell marks: {}", list.join(" "));

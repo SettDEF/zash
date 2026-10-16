@@ -11,7 +11,8 @@ cargo run --release -- --snapshot out.png --size 100x30 -- ls --color=always
                                          # headless: print the screen, render a PNG
 ```
 
-Keys: Ctrl+Shift+C / Ctrl+Shift+V copy and paste · Ctrl+Shift+Up / Down jump between
+Keys: Ctrl+Shift+F search the scrollback · Ctrl+click open a link ·
+Ctrl+Shift+C / Ctrl+Shift+V copy and paste · Ctrl+Shift+Up / Down jump between
 prompts · Ctrl+Shift+O copy the last command's output · Ctrl+= / Ctrl+- / Ctrl+0
 font size · Shift+PageUp / Shift+PageDown scroll · select with the mouse
 (also fills the middle-click selection).

@@ -46,13 +46,15 @@ struct App {
     last_cell: (usize, usize),
     /// (time, count, cell) of the last left click: double = word, triple = line
     clicks: (std::time::Instant, u8, (usize, usize)),
+    /// scrollback search (Ctrl+Shift+F) while it is open
+    search: Option<crate::search::Search>,
 }
 
 pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::PathBuf>) -> Result<(), String> {
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, session: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)) };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, session: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -150,6 +152,35 @@ impl App {
         }
     }
 
+    fn search_key(&mut self, ev: &KeyEvent, mods: Mods) {
+        use alacritty_terminal::index::Direction;
+        let (Some(s), Some(sess)) = (self.search.as_mut(), self.session.as_ref()) else { return };
+        let mut t = sess.term.lock();
+        match &ev.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                s.close(&mut t);
+                drop(t);
+                self.search = None;
+                self.redraw();
+                return;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                let mut q = s.query.clone();
+                q.pop();
+                s.set_query(&mut t, &q);
+            }
+            Key::Named(NamedKey::Enter) => s.step(&mut t, if mods.shift { Direction::Right } else { Direction::Left }),
+            _ => {
+                if let Some(text) = ev.text.as_deref().filter(|x| !x.chars().any(|c| c.is_control())) {
+                    let q = format!("{}{text}", s.query);
+                    s.set_query(&mut t, &q);
+                }
+            }
+        }
+        drop(t);
+        self.redraw();
+    }
+
     /// The link under a window position: a real hyperlink (OSC 8) or a URL in the text.
     fn link_at(&self, x: f64, y: f64) -> Option<String> {
         let (p, _) = self.point_at(x, y)?;
@@ -211,6 +242,9 @@ impl App {
     fn key(&mut self, ev: &KeyEvent) {
         let m = self.mods;
         let mods = Mods { ctrl: m.control_key(), alt: m.alt_key(), shift: m.shift_key() };
+        if self.search.is_some() {
+            return self.search_key(ev, mods);
+        }
         // zash's own keys first
         if mods.ctrl && mods.shift {
             if let Key::Character(c) = &ev.logical_key {
@@ -221,6 +255,11 @@ impl App {
                                 clipboard_set(&t, false);
                             }
                         }
+                        return;
+                    }
+                    "f" => {
+                        self.search = Some(crate::search::Search::default());
+                        self.redraw();
                         return;
                     }
                     "o" => {
@@ -326,11 +365,14 @@ impl App {
 
     fn render(&mut self) {
         let (Some(g), Some(s)) = (self.gpu.as_mut(), self.session.as_ref()) else { return };
-        let frame = {
+        let mut frame = {
             let t = s.term.lock();
             let marks = s.marks.lock().unwrap();
             Frame::extract(&t, &self.cfg.palette).with_prompts(&t, &marks)
         };
+        if let Some(q) = &self.search {
+            frame.bar = Some(q.bar());
+        }
         let tex = match g.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Lost => {
@@ -641,3 +683,4 @@ fn watch_theme(proxy: EventLoopProxy<ZEvent>, paths: Vec<std::path::PathBuf>) {
         }
     });
 }
+
