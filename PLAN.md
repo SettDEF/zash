@@ -30,6 +30,9 @@ you can watch. Local-first: no account, no cloud.
 ## Features, by area
 
 ### 1. The core terminal
+- **The environment programs see** is right: TERM, COLORTERM, TERM_PROGRAM, a
+  UTF-8 locale, the start folder, and none of the variables of the terminal
+  or multiplexer zash was started from (tmux, WezTerm, kitty…).
 - VT/xterm emulation (vte parser, own grid), 24-bit colour, undercurl and
   coloured underlines, hyperlinks (OSC 8), clipboard (OSC 52), cwd (OSC 7),
   shell marks (OSC 133), notifications (OSC 9/777), synchronized output.
@@ -86,6 +89,28 @@ you can watch. Local-first: no account, no cloud.
 - **Error lens**: compiler and test errors are highlighted; one key opens the
   line in zett (or Neovim), another hands the error to an agent.
 - Custom renderers in Lua: "when a command prints X, show it as Y".
+
+### 6½. Rich text from scripts: sizes, fonts, columns
+Rows are not stuck at one font and one size. A script can say so, and zash
+draws it — without breaking the grid for everything else.
+- **Text sizes**: the published text-sizing escape (OSC 66: scale 1–7, fractional
+  sizes, width in cells), so titles, banners and dashboards print big; other
+  terminals that support it show the same thing.
+- **Fonts per span**: a zash extension sets the family, weight, style and
+  colour of a run of text (`sans` for prose, `serif` for a heading, the
+  terminal font for code), falling back to plain text elsewhere.
+- **Columns**: a row can be split into columns with their own widths and
+  alignment (left, right, centre, decimal), so tables and side-by-side output
+  line up even with proportional fonts.
+- **From any script**, no escape codes to remember:
+  `zash print --size 2 "Build finished"`,
+  `zash print --font serif --weight bold "Chapter 1"`,
+  `zash print --columns 30%,*,10ch "name" "description" "size"`,
+  and a tiny library for Lua, shell and Python scripts.
+- Selection, copying and scrollback still treat it as text; the grid
+  underneath stays intact, so full-screen programs are unaffected.
+- Needs zash's own pre-parser in front of the VT parser (unknown escapes are
+  dropped there today): planned with T5, smart output.
 
 ### 7. Scrollback and history
 - **Vim in the scrollback**: `v`, `y`, `/`, `n`, text objects over output.
@@ -193,7 +218,8 @@ A release that is worse than the best on any of them is not done.
 - **T4 — the command line.** zett-edit on the prompt, completion popup with
   descriptions and preview, ghost text; bash and fish integration.
 - **T5 — smart output.** Hints, recognisers and tables, previews, error lens,
-  Lua renderers.
+  Lua renderers; rich text from scripts (sizes, fonts per span, columns,
+  `zash print`), on zash's own pre-parser.
 - **T6 — programmable.** `term.lua`: everything configurable; triggers, hooks,
   remote control, plugins.
 - **T7 — sessions.** Session server, attach, restore after reboot, SSH that
