@@ -6,7 +6,7 @@
 use crate::config::Config;
 use crate::input::{self, Mods, Named};
 use crate::render::{Frame, Renderer};
-use crate::session::{Grid, Session, Sink};
+use crate::session::{Grid, Session, Sink, ZEvent};
 use alacritty_terminal::event::{Event, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
@@ -32,7 +32,7 @@ struct Gpu {
 struct App {
     cfg: Config,
     cmd: Option<Vec<String>>,
-    proxy: EventLoopProxy<Event>,
+    proxy: EventLoopProxy<ZEvent>,
     gpu: Option<Gpu>,
     session: Option<Session>,
     mods: ModifiersState,
@@ -48,7 +48,7 @@ struct App {
 }
 
 pub fn run(cfg: Config, cmd: Option<Vec<String>>) -> Result<(), String> {
-    let event_loop = EventLoop::<Event>::with_user_event().build().map_err(|e| e.to_string())?;
+    let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
     let mut app = App { cfg, cmd, proxy, gpu: None, session: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)) };
@@ -278,7 +278,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler<Event> for App {
+impl ApplicationHandler<ZEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.gpu.is_some() {
             return;
@@ -334,10 +334,22 @@ impl ApplicationHandler<Event> for App {
                 el.exit();
             }
         }
+        watch_theme(self.proxy.clone());
         self.redraw();
     }
 
-    fn user_event(&mut self, el: &ActiveEventLoop, ev: Event) {
+    fn user_event(&mut self, el: &ActiveEventLoop, ev: ZEvent) {
+        let ev = match ev {
+            ZEvent::Theme => {
+                self.cfg.palette = crate::config::Palette::load();
+                if let Some(g) = self.gpu.as_mut() {
+                    g.renderer.invalidate();
+                }
+                self.redraw();
+                return;
+            }
+            ZEvent::Term(e) => e,
+        };
         match ev {
             Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => self.redraw(),
             Event::Title(t) => {
@@ -511,3 +523,24 @@ impl ApplicationHandler<Event> for App {
 
 #[allow(dead_code)]
 fn _assert_dims<T: Dimensions>(_: &T) {}
+
+/// tinct rewrites its colour file when the wallpaper changes; zash follows.
+/// One stat every two seconds on a background thread: negligible, and no frames
+/// are drawn unless the file really changed.
+fn watch_theme(proxy: EventLoopProxy<ZEvent>) {
+    std::thread::spawn(move || {
+        let path = crate::config::Palette::tinct_file();
+        let stamp = || std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let mut last = stamp();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let now = stamp();
+            if now != last {
+                last = now;
+                if proxy.send_event(ZEvent::Theme).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+}

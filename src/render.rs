@@ -314,6 +314,11 @@ impl Renderer {
         self.rows.clear();
     }
 
+    /// Forget shaped rows (colours changed).
+    pub fn invalidate(&mut self) {
+        self.rows.clear();
+    }
+
     /// Cells that fit in a surface of this size.
     pub fn grid_for(&self, width: u32, height: u32) -> (usize, usize) {
         let cols = ((width as f32 - 2.0 * self.pad) / self.cell_w).floor().max(2.0) as usize;

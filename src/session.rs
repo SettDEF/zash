@@ -9,11 +9,18 @@ use alacritty_terminal::tty;
 use std::sync::Arc;
 use std::sync::mpsc;
 
+/// What the window's event loop receives: the terminal's events, or zash's own.
+pub enum ZEvent {
+    Term(Event),
+    /// tinct wrote new colours
+    Theme,
+}
+
 /// Where the terminal's events go: the window's event loop, or a channel
 /// (headless snapshots and tests).
 #[derive(Clone)]
 pub enum Sink {
-    Window(winit::event_loop::EventLoopProxy<Event>),
+    Window(winit::event_loop::EventLoopProxy<ZEvent>),
     Channel(mpsc::Sender<Event>),
 }
 
@@ -24,7 +31,7 @@ impl EventListener for Listener {
     fn send_event(&self, event: Event) {
         match &self.0 {
             Sink::Window(p) => {
-                let _ = p.send_event(event);
+                let _ = p.send_event(ZEvent::Term(event));
             }
             Sink::Channel(tx) => {
                 let _ = tx.send(event);
