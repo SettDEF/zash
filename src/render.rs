@@ -266,6 +266,8 @@ pub struct Renderer {
     /// cursor animation: time constant in ms (0: jumps), and the trailing smear
     pub cursor_ms: f32,
     pub cursor_trail: bool,
+    /// background opacity (pre-multiplied into the clear colour)
+    pub opacity: f32,
     anim: Option<CursorAnim>,
 }
 
@@ -308,6 +310,7 @@ impl Renderer {
             pad: 0.0,
             cursor_ms: cfg.cursor_ms,
             cursor_trail: cfg.cursor_trail,
+            opacity: cfg.opacity,
             anim: None,
         };
         r.set_font(cfg.font_size_pt, cfg.line_height, cfg.padding, scale);
@@ -485,7 +488,11 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: bg[0] as f64, g: bg[1] as f64, b: bg[2] as f64, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear({
+                            // pre-multiplied: the compositor blends (and blurs) what is behind
+                            let o = self.opacity as f64;
+                            wgpu::Color { r: bg[0] as f64 * o, g: bg[1] as f64 * o, b: bg[2] as f64 * o, a: o }
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

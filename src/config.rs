@@ -145,6 +145,20 @@ pub struct Config {
     pub palette: Palette,
     /// the colour file followed live
     pub colors_file: PathBuf,
+    /// window background opacity, 0..1 (text and cell colours stay solid)
+    pub opacity: f32,
+    /// the shell's Glass panel writes this (opacity = …); followed live unless the config sets one
+    pub glass_file: Option<PathBuf>,
+}
+
+impl Config {
+    /// `return { opacity = 0.95 }`, as the Glass panel writes it for WezTerm.
+    pub fn read_glass(path: &std::path::Path) -> Option<f32> {
+        let s = std::fs::read_to_string(path).ok()?;
+        let v = s.split("opacity").nth(1)?.split('=').nth(1)?;
+        let num: String = v.trim().chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        num.parse::<f32>().ok().map(|o| o.clamp(0.1, 1.0))
+    }
 }
 
 impl Default for Config {
@@ -160,6 +174,8 @@ impl Default for Config {
             cursor_trail: true,
             palette: Palette::load(),
             colors_file: Palette::tinct_file(),
+            opacity: 1.0,
+            glass_file: None,
         }
     }
 }
@@ -213,6 +229,8 @@ struct File {
     scrollback: Option<usize>,
     cursor_animation: Option<f32>,
     cursor_trail: Option<bool>,
+    /// 0..1; leave out to follow the shell's Glass panel
+    opacity: Option<f32>,
     /// a tinct/WezTerm-style colour file to follow instead of the default
     colors: Option<String>,
 }
@@ -234,6 +252,8 @@ scrollback = 10000
 # The cursor glides to where it goes (milliseconds; 0 = it jumps), with a short smear.
 cursor_animation = 90
 cursor_trail = true
+# Background opacity (0.1–1). Leave it out to follow the shell's Glass panel.
+# opacity = 0.95
 # Colours: the file tinct writes for WezTerm, so zash follows the wallpaper.
 colors = "~/.config/wezterm/tinct_colors.lua"
 "#;
@@ -275,6 +295,15 @@ impl Config {
         if let Some(v) = f.scrollback { c.scrollback = v; }
         if let Some(v) = f.cursor_animation { c.cursor_ms = v.max(0.0); }
         if let Some(v) = f.cursor_trail { c.cursor_trail = v; }
+        match f.opacity {
+            Some(v) => c.opacity = v.clamp(0.1, 1.0),
+            None => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let g = PathBuf::from(home).join(".config/wezterm/glass.lua");
+                if let Some(o) = Self::read_glass(&g) { c.opacity = o; }
+                c.glass_file = Some(g);
+            }
+        }
         if let Some(v) = f.colors {
             let home = std::env::var("HOME").unwrap_or_default();
             let p = PathBuf::from(v.replacen('~', &home, 1));
@@ -297,5 +326,18 @@ mod file_tests {
         let f: super::File = toml::from_str(super::DEFAULT_FILE).unwrap();
         assert_eq!(f.size, Some(11.5));
         assert_eq!(f.features.unwrap().len(), 6);
+    }
+}
+
+#[cfg(test)]
+mod glass_tests {
+    #[test]
+    fn reads_glass_lua() {
+        let p = std::env::temp_dir().join(format!("zash-glass-{}.lua", std::process::id()));
+        std::fs::write(&p, "return { opacity = 0.95 }\n").unwrap();
+        assert_eq!(super::Config::read_glass(&p), Some(0.95));
+        std::fs::write(&p, "return { opacity = 5 }\n").unwrap();
+        assert_eq!(super::Config::read_glass(&p), Some(1.0));
+        std::fs::remove_file(&p).unwrap();
     }
 }

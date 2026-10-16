@@ -288,7 +288,7 @@ impl ApplicationHandler<ZEvent> for App {
         if self.gpu.is_some() {
             return;
         }
-        let mut attrs = Window::default_attributes().with_title("zash").with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0));
+        let mut attrs = Window::default_attributes().with_title("zash").with_transparent(self.cfg.opacity < 1.0).with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0));
         #[cfg(target_os = "linux")]
         {
             use winit::platform::wayland::WindowAttributesExtWayland;
@@ -323,7 +323,12 @@ impl ApplicationHandler<ZEvent> for App {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode,
-            alpha_mode: caps.alpha_modes[0],
+            // translucent background needs a compositor that blends; else opaque
+            alpha_mode: if self.cfg.opacity < 1.0 && caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+                wgpu::CompositeAlphaMode::PreMultiplied
+            } else {
+                caps.alpha_modes[0]
+            },
             view_formats: vec![],
             desired_maximum_frame_latency: 1,
             color_space: wgpu::SurfaceColorSpace::Auto,
@@ -339,7 +344,9 @@ impl ApplicationHandler<ZEvent> for App {
                 el.exit();
             }
         }
-        watch_theme(self.proxy.clone(), self.cfg.colors_file.clone());
+        let mut watched = vec![self.cfg.colors_file.clone()];
+        watched.extend(self.cfg.glass_file.clone());
+        watch_theme(self.proxy.clone(), watched);
         self.redraw();
     }
 
@@ -348,6 +355,12 @@ impl ApplicationHandler<ZEvent> for App {
             ZEvent::Theme => {
                 if let Ok(s) = std::fs::read_to_string(&self.cfg.colors_file) {
                     self.cfg.palette = crate::config::Palette::from_tinct_lua(&s);
+                }
+                if let Some(o) = self.cfg.glass_file.as_ref().and_then(|g| crate::config::Config::read_glass(g)) {
+                    self.cfg.opacity = o;
+                    if let Some(g) = self.gpu.as_mut() {
+                        g.renderer.opacity = o;
+                    }
                 }
                 if let Some(g) = self.gpu.as_mut() {
                     g.renderer.invalidate();
@@ -534,9 +547,9 @@ fn _assert_dims<T: Dimensions>(_: &T) {}
 /// tinct rewrites its colour file when the wallpaper changes; zash follows.
 /// One stat every two seconds on a background thread: negligible, and no frames
 /// are drawn unless the file really changed.
-fn watch_theme(proxy: EventLoopProxy<ZEvent>, path: std::path::PathBuf) {
+fn watch_theme(proxy: EventLoopProxy<ZEvent>, paths: Vec<std::path::PathBuf>) {
     std::thread::spawn(move || {
-        let stamp = || std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let stamp = || paths.iter().map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect::<Vec<_>>();
         let mut last = stamp();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
