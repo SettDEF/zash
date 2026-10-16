@@ -28,10 +28,18 @@ pub enum Sink {
 }
 
 #[derive(Clone)]
-pub struct Listener(pub Sink);
+pub struct Listener(pub Sink, pub Arc<std::sync::OnceLock<Arc<Mutex<File>>>>);
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
+        // replies to the program (device attributes, cursor position, colours asked for) go
+        // straight back from the reader thread: a program waiting with a short timeout gets them
+        if let (Event::PtyWrite(s), Some(w)) = (&event, self.1.get()) {
+            if let Ok(mut f) = w.lock() {
+                let _ = std::io::Write::write_all(&mut *f, s.as_bytes());
+            }
+            return;
+        }
         match &self.0 {
             Sink::Window(p, id) => {
                 let _ = p.send_event(ZEvent::Term(*id, event));
@@ -74,6 +82,8 @@ pub struct Mark {
 pub struct Session {
     /// the shell plugin's completion popup (None: closed)
     pub popup: Arc<Mutex<Option<Popup>>>,
+    /// DECSCNM: reverse video for the whole screen
+    pub reverse: Arc<std::sync::atomic::AtomicBool>,
     pub term: Arc<FairMutex<Term<Listener>>>,
     writer: Arc<Mutex<File>>,
     pty: Arc<Mutex<tty::Pty>>,
@@ -95,6 +105,8 @@ pub struct MarkScanner {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Found {
     Mark(char, Option<i32>),
+    /// DECSCNM: the whole screen in reverse video (light background), on or off
+    Reverse(bool),
     Popup(Option<Popup>),
 }
 
@@ -170,6 +182,18 @@ impl MarkScanner {
             }
             i = end + 1;
         }
+        // DECSCNM (CSI ? 5 h / l), which the emulator does not keep: zash swaps the colours itself
+        for (pat, on) in [(&b"\x1b[?5h"[..], true), (&b"\x1b[?5l"[..], false)] {
+            let mut from = 0;
+            while let Some(p) = data[from..].windows(pat.len()).position(|w| w == pat) {
+                let after = from + p + pat.len();
+                if after > carried {
+                    out.push(((after - carried).min(chunk.len()), Found::Reverse(on)));
+                }
+                from = after;
+            }
+        }
+        out.sort_by_key(|(at, _)| *at);
         // a sequence may begin right at the end of the chunk
         let tail = data.len().saturating_sub(LONGEST - 1);
         if let Some(p) = data[tail.max(i)..].iter().position(|&b| b == 0x1b) {
@@ -183,7 +207,8 @@ impl Session {
     /// Starts `cmd` (or the login shell) in a new pty, read by zash's own loop.
     pub fn spawn(cmd: Option<Vec<String>>, workdir: Option<std::path::PathBuf>, grid: Grid, scrollback: usize, sink: Sink) -> std::io::Result<Session> {
         let config = term::Config { scrolling_history: scrollback, kitty_keyboard: false, ..Default::default() };
-        let listener = Listener(sink);
+        let replies = Arc::new(std::sync::OnceLock::new());
+        let listener = Listener(sink, replies.clone());
         let term = Arc::new(FairMutex::new(Term::new(config, &grid.term_size(), listener.clone())));
 
         let mut env = program_env();
@@ -198,14 +223,16 @@ impl Session {
         let pty = tty::new(&options, grid.window_size(), 0)?;
         let reader = pty.file().try_clone()?;
         let writer = Arc::new(Mutex::new(pty.file().try_clone()?));
+        let _ = replies.set(writer.clone());
         let pid = pty.child().id();
         let pty = Arc::new(Mutex::new(pty));
         let marks = Arc::new(Mutex::new(Vec::new()));
         let popup = Arc::new(Mutex::new(None));
+        let reverse = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        let (t, m, l, pp) = (term.clone(), marks.clone(), listener.clone(), popup.clone());
-        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, l))?;
-        Ok(Session { term, writer, pty, grid, marks, popup, pid })
+        let (t, m, l, pp, rv) = (term.clone(), marks.clone(), listener.clone(), popup.clone(), reverse.clone());
+        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, rv, l))?;
+        Ok(Session { term, writer, pty, grid, marks, popup, reverse, pid })
     }
 
     /// Bytes for the program, as if typed.
@@ -242,7 +269,7 @@ impl Session {
 }
 
 /// Reads the program's output, notes shell marks, feeds the parser.
-fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, popup: Arc<Mutex<Option<Popup>>>, listener: Listener) {
+fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, popup: Arc<Mutex<Option<Popup>>>, reverse: Arc<std::sync::atomic::AtomicBool>, listener: Listener) {
     use alacritty_terminal::grid::Dimensions;
     let mut parser: alacritty_terminal::vte::ansi::Processor = alacritty_terminal::vte::ansi::Processor::new();
     let mut scanner = MarkScanner::default();
@@ -282,6 +309,10 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                 let (kind, exit) = match what {
                     Found::Popup(p) => {
                         *popup.lock().unwrap() = p;
+                        continue;
+                    }
+                    Found::Reverse(on) => {
+                        reverse.store(on, std::sync::atomic::Ordering::Relaxed);
                         continue;
                     }
                     Found::Mark(k, e) => (k, e),

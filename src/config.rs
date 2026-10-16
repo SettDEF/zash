@@ -62,6 +62,11 @@ impl Default for Palette {
 }
 
 impl Palette {
+    /// The palette for a screen in reverse video (DECSCNM): text and background swap.
+    pub fn reversed(&self) -> Palette {
+        Palette { fg: self.bg, bg: self.fg, cursor_bg: self.bg, cursor_fg: self.fg, ..self.clone() }
+    }
+
     /// Reads tinct's WezTerm colour file: `key = "#hex"` lines and the
     /// `ansi = { … }` / `brights = { … }` lists. Anything missing keeps its default.
     pub fn from_tinct_lua(src: &str) -> Palette {

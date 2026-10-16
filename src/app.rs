@@ -779,7 +779,8 @@ impl App {
             let mut frame = {
                 let t = s.term.lock();
                 let marks = s.marks.lock().unwrap();
-                Frame::extract(&t, &self.cfg.palette).with_prompts(&t, &marks)
+                let pal = if s.reverse.load(std::sync::atomic::Ordering::Relaxed) { self.cfg.palette.reversed() } else { self.cfg.palette.clone() };
+                Frame::extract(&t, &pal).with_prompts(&t, &marks)
             };
             if id == tab.focus {
                 frame.popup = s.popup.lock().unwrap().clone();

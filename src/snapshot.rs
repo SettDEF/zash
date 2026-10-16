@@ -73,7 +73,8 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
         eprintln!("zash: search {q:?}: match at line {:?} of the history", s.current_line(&t));
         bar = Some(s.bar());
     }
-    let mut frame = { let t = session.term.lock(); Frame::extract(&t, &cfg.palette).with_prompts(&t, &marks) };
+    let pal = if session.reverse.load(std::sync::atomic::Ordering::Relaxed) { cfg.palette.reversed() } else { cfg.palette.clone() };
+    let mut frame = { let t = session.term.lock(); Frame::extract(&t, &pal).with_prompts(&t, &marks) };
     frame.bar = bar;
     frame.popup = session.popup.lock().unwrap().clone();
     if !marks.is_empty() {
