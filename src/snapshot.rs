@@ -74,7 +74,19 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
         bar = Some(s.bar());
     }
     let pal = if session.reverse.load(std::sync::atomic::Ordering::Relaxed) { cfg.palette.reversed() } else { cfg.palette.clone() };
+    // test hook: ZASH_TEST_SCROLL="LINES,PX" scrolls back LINES and freezes a glide at PX pixels
+    let glide = std::env::var("ZASH_TEST_SCROLL").ok().and_then(|v| {
+        let (l, p) = v.split_once(',')?;
+        Some((l.trim().parse::<i32>().ok()?, p.trim().parse::<f32>().ok()?))
+    });
+    if let Some((lines, _)) = glide {
+        session.term.lock().scroll_display(alacritty_terminal::grid::Scroll::Delta(lines));
+    }
     let mut frame = { let t = session.term.lock(); Frame::extract(&t, &pal).with_prompts(&t, &marks) };
+    if let Some((_, px)) = glide {
+        let t = session.term.lock();
+        frame = frame.with_scroll(&t, &pal, px, cfg_cell_h(cfg));
+    }
     frame.bar = bar;
     frame.popup = session.popup.lock().unwrap().clone();
     if !marks.is_empty() {
@@ -135,4 +147,9 @@ pub fn render_png(frame: &Frame, cfg: &Config, path: &str) -> Result<(u32, u32),
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header().and_then(|mut w| w.write_image_data(&pixels)).map_err(|e| e.to_string())?;
     Ok((width, height))
+}
+
+/// The cell height the offscreen renderer will use (scale 1), for test hooks.
+fn cfg_cell_h(cfg: &Config) -> f32 {
+    (cfg.font_size_pt * 96.0 / 72.0 * cfg.line_height).round()
 }

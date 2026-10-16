@@ -81,6 +81,9 @@ struct App {
     last_cell: (usize, usize),
     /// (time, count, cell) of the last left click: double = word, triple = line
     clicks: (std::time::Instant, u8, (usize, usize)),
+    /// smooth scrolling: how far the focused pane is still drawn from its real position (px), and when that was
+    glide: f32,
+    glide_at: std::time::Instant,
     /// scrollback search (Ctrl+Shift+F) while it is open
     search: Option<crate::search::Search>,
 }
@@ -89,7 +92,7 @@ pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::Pat
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -216,6 +219,39 @@ impl App {
         let col = (((x as f32 - f.x - r.pad) / r.cell_w).max(0.0) as usize).min(s.grid.cols.saturating_sub(1));
         let row = (((y as f32 - f.y - r.pad) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
         (col, row)
+    }
+
+    /// Scrolls the focused pane's view; with smooth scrolling the move glides from where it was.
+    fn scroll_view(&mut self, how: Scroll) {
+        let Some(s) = self.sess() else { return };
+        let rows = s.grid.rows as f32;
+        let moved = {
+            let mut t = s.term.lock();
+            let before = t.grid().display_offset() as i32;
+            t.scroll_display(how);
+            t.grid().display_offset() as i32 - before
+        };
+        if moved != 0 && self.cfg.smooth_scroll_ms > 0.0 {
+            let ch = self.gpu.as_ref().map(|g| g.renderer.cell_h).unwrap_or(16.0);
+            self.settle_glide();
+            // drawn from the old place (up by the lines it moved), easing to the new one;
+            // never more than a screen away, so a long jump still lands quickly
+            let max = rows * ch;
+            self.glide = (self.glide - moved as f32 * ch).clamp(-max, max);
+        }
+        self.redraw();
+    }
+
+    /// Advances the glide to now (exponential: the same at any frame rate).
+    fn settle_glide(&mut self) {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.glide_at).as_secs_f32() * 1000.0;
+        self.glide_at = now;
+        let tau = (self.cfg.smooth_scroll_ms / 3.0).max(1.0);
+        self.glide *= (-dt / tau).exp();
+        if self.glide.abs() < 0.5 {
+            self.glide = 0.0;
+        }
     }
 
     /// Moves the keyboard to another pane of the shown tab (telling programs that ask about focus).
@@ -711,10 +747,9 @@ impl App {
                 Key::Named(NamedKey::PageDown) => Some(Scroll::PageDown),
                 _ => None,
             };
-            if let (Some(p), Some(s)) = (page, self.sess()) {
+            if let (Some(p), true) = (page, self.sess().is_some()) {
                 if !self.mode().contains(TermMode::ALT_SCREEN) {
-                    s.term.lock().scroll_display(p);
-                    self.redraw();
+                    self.scroll_view(p);
                     return;
                 }
             }
@@ -769,6 +804,24 @@ impl App {
     }
 
     fn render(&mut self) {
+        self.settle_glide();
+        // the touchpad's part of a line not scrolled yet shows too: pixel-exact scrolling
+        let frac_px = {
+            let ch = self.gpu.as_ref().map(|g| g.renderer.cell_h).unwrap_or(16.0);
+            let free = self.sess().map(|s| {
+                let t = s.term.lock();
+                let g = t.grid();
+                let normal = !t.mode().contains(TermMode::ALT_SCREEN);
+                (normal && g.display_offset() < g.history_size(), normal && g.display_offset() > 0)
+            });
+            match free {
+                Some((up, _)) if self.scroll_acc > 0.0 && up && !self.app_mouse() && self.cfg.smooth_scroll_ms > 0.0 => (self.scroll_acc as f32) * ch,
+                Some((_, down)) if self.scroll_acc < 0.0 && down && !self.app_mouse() && self.cfg.smooth_scroll_ms > 0.0 => (self.scroll_acc as f32) * ch,
+                _ => 0.0,
+            }
+        };
+        let scroll_px = self.glide + frac_px;
+        let cell_h = self.gpu.as_ref().map(|g| g.renderer.cell_h).unwrap_or(16.0);
         let Some(tab) = self.tabs.get(self.active) else { return };
         // every pane of the shown tab, copied out of its terminal
         let rects = self.pane_rects(self.active);
@@ -780,7 +833,8 @@ impl App {
                 let t = s.term.lock();
                 let marks = s.marks.lock().unwrap();
                 let pal = if s.reverse.load(std::sync::atomic::Ordering::Relaxed) { self.cfg.palette.reversed() } else { self.cfg.palette.clone() };
-                Frame::extract(&t, &pal).with_prompts(&t, &marks)
+                let f = Frame::extract(&t, &pal).with_prompts(&t, &marks);
+                if id == tab.focus { f.with_scroll(&t, &pal, scroll_px, cell_h) } else { f }
             };
             if id == tab.focus {
                 frame.popup = s.popup.lock().unwrap().clone();
@@ -817,7 +871,7 @@ impl App {
         let animating = g.renderer.render(&g.device, &g.queue, &view, g.config.width, g.config.height, &panes);
         g.queue.present(tex);
         // another frame only while the cursor is still gliding: idle stays idle
-        if animating {
+        if animating || self.glide != 0.0 {
             g.window.request_redraw();
         }
     }
@@ -1130,9 +1184,8 @@ impl ApplicationHandler<ZEvent> for App {
                     if let Some(s) = self.sess() {
                         s.write(key.repeat(whole.unsigned_abs() as usize).into_bytes());
                     }
-                } else if let Some(s) = self.sess() {
-                    s.term.lock().scroll_display(Scroll::Delta(whole));
-                    self.redraw();
+                } else if self.sess().is_some() {
+                    self.scroll_view(Scroll::Delta(whole));
                 }
             }
             _ => {}

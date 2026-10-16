@@ -146,6 +146,8 @@ pub struct Config {
     pub scrollback: usize,
     /// cursor glide time constant, ms (0: no animation)
     pub cursor_ms: f32,
+    /// scrolling glides for this long (ms; 0 = it jumps a line at a time)
+    pub smooth_scroll_ms: f32,
     pub cursor_trail: bool,
     pub palette: Palette,
     /// the colour file followed live
@@ -176,6 +178,7 @@ impl Default for Config {
             padding: 0.0,
             scrollback: 10_000,
             cursor_ms: 90.0,
+            smooth_scroll_ms: 80.0,
             cursor_trail: true,
             palette: Palette::load(),
             colors_file: Palette::tinct_file(),
@@ -233,6 +236,7 @@ struct File {
     padding: Option<f32>,
     scrollback: Option<usize>,
     cursor_animation: Option<f32>,
+    smooth_scroll: Option<f32>,
     cursor_trail: Option<bool>,
     /// 0..1; leave out to follow the shell's Glass panel
     opacity: Option<f32>,
@@ -257,6 +261,8 @@ scrollback = 10000
 # The cursor glides to where it goes (milliseconds; 0 = it jumps), with a short smear.
 cursor_animation = 90
 cursor_trail = true
+# Scrolling glides instead of jumping a line at a time (milliseconds; 0 = off).
+smooth_scroll = 80
 # Background opacity (0.1–1). Leave it out to follow the shell's Glass panel.
 # opacity = 0.95
 # Colours: the file tinct writes for WezTerm, so zash follows the wallpaper.
@@ -299,6 +305,7 @@ impl Config {
         if let Some(v) = f.padding { c.padding = v; }
         if let Some(v) = f.scrollback { c.scrollback = v; }
         if let Some(v) = f.cursor_animation { c.cursor_ms = v.max(0.0); }
+        if let Some(v) = f.smooth_scroll { c.smooth_scroll_ms = v.max(0.0); }
         if let Some(v) = f.cursor_trail { c.cursor_trail = v; }
         match f.opacity {
             Some(v) => c.opacity = v.clamp(0.1, 1.0),

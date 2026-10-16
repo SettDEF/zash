@@ -39,6 +39,11 @@ pub struct CellView {
 }
 
 pub struct Frame {
+    /// smooth scrolling: rows just above and below the screen (nearest first), and how
+    /// far the content is drawn shifted (pixels, + = down) while a scroll glides
+    pub above: Vec<Vec<CellView>>,
+    pub below: Vec<Vec<CellView>>,
+    pub scroll_px: f32,
     /// the shell plugin's completion popup, drawn at the cursor
     pub popup: Option<crate::session::Popup>,
     /// tab titles and which one is shown (drawn as a bar when there are two or more)
@@ -104,35 +109,7 @@ impl Frame {
             if row >= lines {
                 continue;
             }
-            let cell = ic.cell;
-            let f = cell.flags;
-            let bold = f.contains(Flags::BOLD);
-            let mut fg = resolve(cell.fg, content.colors, p, bold);
-            let mut bg = resolve(cell.bg, content.colors, p, false);
-            if f.contains(Flags::DIM) {
-                fg = dim(fg);
-            }
-            if f.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            let selected = sel.is_some_and(|s| s.contains(ic.point));
-            if selected {
-                fg = p.selection_fg;
-                bg = p.selection_bg;
-            }
-            // control characters never reach the shaper: a tab is kept in its cell (for copying)
-            // but would be expanded to a tab stop and push the rest of the row out of place
-            let ch = if f.contains(Flags::HIDDEN) || cell.c.is_control() { ' ' } else { cell.c };
-            rows[row].push(CellView {
-                ch,
-                zw: cell.zerowidth().map(|z| z.to_vec()),
-                style: Style2 { fg: (fg.0, fg.1, fg.2), bold, italic: f.contains(Flags::ITALIC) },
-                bg: (bg != p.bg).then_some(bg),
-                underline: f.intersects(Flags::ALL_UNDERLINES),
-                strike: f.contains(Flags::STRIKEOUT),
-                wide: f.contains(Flags::WIDE_CHAR),
-                spacer: f.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
-            });
+            rows[row].push(cell_view(ic.cell, ic.point, content.colors, p, sel));
         }
         let cursor = (content.cursor.shape != CursorShape::Hidden).then(|| {
             let Point { line: Line(l), column: Column(c) } = content.cursor.point;
@@ -145,7 +122,7 @@ impl Frame {
                 }
             }
         }
-        Frame { popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
+        Frame { above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -292,7 +269,9 @@ pub struct Renderer {
     /// drawn after the text: marks that must stay visible over glyphs
     overlay: Rects,
     /// shaped rows per pane (by pane id)
-    rows: std::collections::HashMap<u64, Vec<(u64, Buffer)>>,
+    rows: std::collections::HashMap<u64, std::collections::HashMap<u64, Buffer>>,
+    /// per pane: the content key of each drawn row, top to bottom (above the screen first)
+    order: std::collections::HashMap<u64, Vec<u64>>,
     family: String,
     features: glyphon::cosmic_text::FontFeatures,
     pub font_px: f32,
@@ -343,6 +322,7 @@ impl Renderer {
             bars: Vec::new(),
             top: 0.0,
             rows: std::collections::HashMap::new(),
+            order: std::collections::HashMap::new(),
             family: cfg.font_family.clone(),
             features,
             font_px: 0.0,
@@ -391,12 +371,18 @@ impl Renderer {
         (cols, rows)
     }
 
+    /// Shapes the rows of a pane: above the screen, the screen, below it (top to bottom).
+    /// The cache is keyed by a row's content, not its position: when the screen scrolls,
+    /// rows that only moved are not shaped again.
     fn shape_rows(&mut self, pane: u64, frame: &Frame, width: f32) {
-        let mut cache = self.rows.remove(&pane).unwrap_or_default();
-        cache.resize_with(frame.rows.len(), || (0, Buffer::new_empty(Metrics::new(1.0, 1.0))));
-        for (i, row) in frame.rows.iter().enumerate() {
+        let mut old = self.rows.remove(&pane).unwrap_or_default();
+        let mut cache: std::collections::HashMap<u64, Buffer> = std::collections::HashMap::with_capacity(frame.rows.len() + 4);
+        let mut order = Vec::with_capacity(frame.rows.len() + frame.above.len() + frame.below.len());
+        let all = frame.above.iter().rev().chain(frame.rows.iter()).chain(frame.below.iter());
+        for row in all {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             self.font_px.to_bits().hash(&mut h);
+            width.to_bits().hash(&mut h);
             for c in row {
                 c.ch.hash(&mut h);
                 c.zw.hash(&mut h);
@@ -404,7 +390,12 @@ impl Renderer {
                 c.spacer.hash(&mut h);
             }
             let key = h.finish();
-            if cache[i].0 == key && key != 0 {
+            order.push(key);
+            if cache.contains_key(&key) {
+                continue;
+            }
+            if let Some(b) = old.remove(&key) {
+                cache.insert(key, b);
                 continue;
             }
             // runs of cells with one style become one span
@@ -437,13 +428,15 @@ impl Renderer {
             let default = Attrs::new().family(Family::Name(&family));
             b.set_rich_text(spans.iter().map(|(t, st)| (t.as_str(), mk(st))), &default, Shaping::Advanced, None);
             b.shape_until_scroll(&mut self.font_system, false);
-            cache[i] = (key, b);
+            cache.insert(key, b);
         }
         self.rows.insert(pane, cache);
+        self.order.insert(pane, order);
     }
 
-    fn overlay_list(&self, frame: &Frame, ox: f32, oy: f32) -> Vec<Rect> {
+    fn overlay_list(&self, frame: &Frame, ox: f32, oy: f32, clip: [f32; 4]) -> Vec<Rect> {
         let ch = self.cell_h;
+        let oy = oy + frame.scroll_px;
         let mut out = Vec::new();
         // prompt marks: a thin bar at the left edge, red when the command before failed
         for (r, exit) in &frame.prompts {
@@ -453,14 +446,22 @@ impl Renderer {
             let w = (self.font_px / 7.0).max(2.0).round();
             out.push(Rect { xywh: [ox - self.pad, oy + *r as f32 * ch, w, ch], color: col });
         }
-        out
+        clipped(out, clip)
     }
 
-    fn rect_list(&self, frame: &Frame, cur: Option<((f32, f32), (f32, f32))>, ox: f32, oy: f32) -> Vec<Rect> {
+    fn rect_list(&self, frame: &Frame, cur: Option<((f32, f32), (f32, f32))>, ox: f32, oy: f32, clip: [f32; 4]) -> Vec<Rect> {
         let (cw, ch, pad) = (self.cell_w, self.cell_h, ox);
+        // while a scroll glides everything is drawn shifted; rows beyond the screen fill the edge
+        let oy = oy + frame.scroll_px;
+        let cur = cur.map(|((hx, hy), (tx, ty))| ((hx, hy + frame.scroll_px), (tx, ty + frame.scroll_px)));
         let mut out = Vec::new();
-        for (r, row) in frame.rows.iter().enumerate() {
-            let y = oy + r as f32 * ch;
+        let first = -(frame.above.len() as i64);
+        let all = frame.above.iter().rev().chain(frame.rows.iter()).chain(frame.below.iter());
+        for (k, row) in all.enumerate() {
+            let y = oy + (first + k as i64) as f32 * ch;
+            if y + ch < clip[1] || y > clip[1] + clip[3] {
+                continue;
+            }
             // backgrounds, merged across cells of one colour
             let mut run: Option<(usize, usize, Rgb)> = None;
             for (c, cell) in row.iter().enumerate() {
@@ -517,7 +518,7 @@ impl Renderer {
                 }
             }
         }
-        out
+        clipped(out, clip)
     }
 
     /// Draws the panes of a tab into `view` (a window surface or an offscreen texture).
@@ -528,6 +529,7 @@ impl Renderer {
         let frame = focus.frame;
         // shaped rows of panes that are gone are dropped
         self.rows.retain(|id, _| panes.iter().any(|p| p.id == *id));
+        self.order.retain(|id, _| panes.iter().any(|p| p.id == *id));
         let (fox, foy) = (focus.x + self.pad, focus.y + self.pad);
         let (cur, animating) = self.cursor_motion(frame, fox, foy);
         let mut rects = Vec::new();
@@ -535,8 +537,9 @@ impl Renderer {
         for p in panes {
             self.shape_rows(p.id, p.frame, p.w - 2.0 * self.pad);
             let (ox, oy) = (p.x + self.pad, p.y + self.pad);
-            rects.extend(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy));
-            over.extend(self.overlay_list(p.frame, ox, oy));
+            let clip = [p.x, p.y.max(self.top), p.w, p.y + p.h - p.y.max(self.top)];
+            rects.extend(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy, clip));
+            over.extend(self.overlay_list(p.frame, ox, oy, clip));
         }
         if panes.len() > 1 {
             let line = { let mut c = frame.fg.f32(); c[3] = 0.16; c };
@@ -648,14 +651,15 @@ impl Renderer {
         let ch = self.cell_h;
         let mut areas: Vec<TextArea> = Vec::new();
         for p in panes {
-            let Some(cache) = self.rows.get(&p.id) else { continue };
-            let (ox, oy) = (p.x + self.pad, p.y + self.pad);
+            let (Some(cache), Some(order)) = (self.rows.get(&p.id), self.order.get(&p.id)) else { continue };
+            let (ox, oy) = (p.x + self.pad, p.y + self.pad + p.frame.scroll_px);
+            let first = -(p.frame.above.len() as i64);
             // each pane's text stays inside its pane (and out of the tab bar)
             let bounds = TextBounds { left: p.x as i32, top: (p.y.max(self.top)) as i32, right: (p.x + p.w) as i32, bottom: (p.y + p.h) as i32 };
-            areas.extend(cache.iter().enumerate().map(|(i, (_, b))| TextArea {
+            areas.extend(order.iter().enumerate().filter_map(|(i, key)| cache.get(key).map(|b| (i, b))).map(|(i, b)| TextArea {
                 buffer: b,
                 left: ox,
-                top: oy + i as f32 * ch,
+                top: oy + (first + i as i64) as f32 * ch,
                 scale: 1.0,
                 bounds,
                 default_color: Color::rgb(255, 255, 255),
@@ -782,4 +786,80 @@ mod prompt_tests {
         let marks = [m('A', 0, None), m('C', 2, None), m('D', 2, Some(0)), m('A', 2, None), m('C', 4, None), m('D', 4, Some(1)), m('A', 4, None)];
         assert_eq!(super::prompts(&marks), vec![(0, None), (2, Some(0)), (4, Some(1))]);
     }
+}
+
+/// One cell, resolved to what is drawn.
+fn cell_view(cell: &alacritty_terminal::term::cell::Cell, point: Point, colors: &alacritty_terminal::term::color::Colors, p: &Palette, sel: Option<alacritty_terminal::selection::SelectionRange>) -> CellView {
+    let f = cell.flags;
+    let bold = f.contains(Flags::BOLD);
+    let mut fg = resolve(cell.fg, colors, p, bold);
+    let mut bg = resolve(cell.bg, colors, p, false);
+    if f.contains(Flags::DIM) {
+        fg = dim(fg);
+    }
+    if f.contains(Flags::INVERSE) {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    if sel.is_some_and(|s| s.contains(point)) {
+        fg = p.selection_fg;
+        bg = p.selection_bg;
+    }
+    // control characters never reach the shaper: a tab is kept in its cell (for copying)
+    // but would be expanded to a tab stop and push the rest of the row out of place
+    let ch = if f.contains(Flags::HIDDEN) || cell.c.is_control() { ' ' } else { cell.c };
+    CellView {
+        ch,
+        zw: cell.zerowidth().map(|z| z.to_vec()),
+        style: Style2 { fg: (fg.0, fg.1, fg.2), bold, italic: f.contains(Flags::ITALIC) },
+        bg: (bg != p.bg).then_some(bg),
+        underline: f.intersects(Flags::ALL_UNDERLINES),
+        strike: f.contains(Flags::STRIKEOUT),
+        wide: f.contains(Flags::WIDE_CHAR),
+        spacer: f.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
+    }
+}
+
+impl Frame {
+    /// While a scroll glides by `px` (+ = content moving down), adds the rows that slide
+    /// into view at the edge, so it is never blank.
+    pub fn with_scroll<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, p: &Palette, px: f32, cell_h: f32) -> Frame {
+        if px.abs() < 0.5 || cell_h <= 0.0 {
+            return self;
+        }
+        let n = (px.abs() / cell_h).ceil() as i32 + 1;
+        let grid = term.grid();
+        let top = -(grid.display_offset() as i32);
+        let lines = term.screen_lines() as i32;
+        let hist = grid.history_size() as i32;
+        let cols = term.columns();
+        let sel = term.selection.as_ref().and_then(|s| s.to_range(term));
+        let colors = term.colors();
+        let row = |l: i32| -> Vec<CellView> {
+            (0..cols).map(|c| {
+                let pt = Point::new(Line(l), Column(c));
+                cell_view(&grid[pt], pt, colors, p, sel)
+            }).collect()
+        };
+        if px > 0.0 {
+            // content moved down: older lines show above the top
+            self.above = (1..=n).map(|k| top - k).take_while(|l| *l >= -hist).map(row).collect();
+        } else {
+            self.below = (0..n).map(|k| top + lines + k).take_while(|l| *l < lines).map(row).collect();
+        }
+        self.scroll_px = px;
+        self
+    }
+}
+
+/// Rectangles cut to a pane (x, y, w, h): nothing spills into a neighbour or the tab bar.
+fn clipped(rects: Vec<Rect>, clip: [f32; 4]) -> Vec<Rect> {
+    let (cx0, cy0, cx1, cy1) = (clip[0], clip[1], clip[0] + clip[2], clip[1] + clip[3]);
+    rects
+        .into_iter()
+        .filter_map(|r| {
+            let [x, y, w, h] = r.xywh;
+            let (x0, y0, x1, y1) = (x.max(cx0), y.max(cy0), (x + w).min(cx1), (y + h).min(cy1));
+            (x1 > x0 && y1 > y0).then_some(Rect { xywh: [x0, y0, x1 - x0, y1 - y0], color: r.color })
+        })
+        .collect()
 }
