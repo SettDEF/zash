@@ -5,7 +5,9 @@
 
 use crate::config::Config;
 use crate::input::{self, Mods, Named};
-use crate::render::{Frame, Renderer};
+use crate::keys::{Action, Chord, Keys};
+use crate::layout::{Layout, Rect};
+use crate::render::{Frame, PaneView, Renderer};
 use crate::session::{Grid, Session, Sink, ZEvent};
 use alacritty_terminal::event::{Event, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -29,11 +31,26 @@ struct Gpu {
     window: Arc<Window>,
 }
 
-/// One tab: a session and its title.
-struct Tab {
+/// One terminal: a session and its title.
+struct Pane {
     id: u64,
     session: Session,
     title: String,
+}
+
+/// One tab: its panes, how they are split, and which one has the keyboard.
+struct Tab {
+    panes: Vec<Pane>,
+    layout: Layout,
+    focus: u64,
+    /// the focused pane fills the tab (tmux zoom)
+    zoom: bool,
+}
+
+impl Tab {
+    fn focused(&self) -> Option<&Pane> {
+        self.panes.iter().find(|p| p.id == self.focus)
+    }
 }
 
 struct App {
@@ -45,7 +62,15 @@ struct App {
     /// the open tabs; `active` is the one shown
     tabs: Vec<Tab>,
     active: usize,
+    /// the tab shown before (last-window)
+    last_active: usize,
     next_id: u64,
+    /// pane and tab keys, from the tmux config
+    keys: Keys,
+    /// the prefix was pressed: the next key is a command
+    prefix: bool,
+    /// a repeatable command (`bind -r`) may run again without the prefix until then
+    repeat_until: Option<std::time::Instant>,
     mods: ModifiersState,
     font_pt: f32,
     mouse: (f64, f64),
@@ -64,7 +89,7 @@ pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::Pat
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, next_id: 0, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -91,10 +116,46 @@ fn clipboard_set(text: &str, primary: bool) {
 }
 
 impl App {
-    fn grid(&self) -> Option<Grid> {
+    /// The focused pane of the shown tab.
+    fn pane(&self) -> Option<&Pane> {
+        self.tabs.get(self.active)?.focused()
+    }
+
+    fn sess(&self) -> Option<&Session> {
+        self.pane().map(|p| &p.session)
+    }
+
+    /// The window below the tab bar, in pixels.
+    fn area(&self) -> Option<Rect> {
         let g = self.gpu.as_ref()?;
-        let (cols, rows) = g.renderer.grid_for(g.config.width, g.config.height);
+        let top = g.renderer.top;
+        Some(Rect { x: 0.0, y: top, w: g.config.width as f32, h: g.config.height as f32 - top })
+    }
+
+    /// Where each pane of a tab is (a zoomed tab shows only its focused pane).
+    fn pane_rects(&self, tab: usize) -> Vec<(u64, Rect)> {
+        let (Some(t), Some(area)) = (self.tabs.get(tab), self.area()) else { return Vec::new() };
+        if t.zoom {
+            return vec![(t.focus, area)];
+        }
+        t.layout.rects(area)
+    }
+
+    /// The focused pane's rectangle in the shown tab.
+    fn focus_rect(&self) -> Option<Rect> {
+        let t = self.tabs.get(self.active)?;
+        self.pane_rects(self.active).into_iter().find(|(id, _)| *id == t.focus).map(|(_, r)| r)
+    }
+
+    fn grid_in(&self, r: Rect) -> Option<Grid> {
+        let g = self.gpu.as_ref()?;
+        let (cols, rows) = g.renderer.grid_in(r.w, r.h);
         Some(Grid { cols, rows, cell_w: g.renderer.cell_w, cell_h: g.renderer.cell_h })
+    }
+
+    /// The grid of the whole tab area (a new tab's first pane).
+    fn grid(&self) -> Option<Grid> {
+        self.grid_in(self.area()?)
     }
 
     fn redraw(&self) {
@@ -104,17 +165,22 @@ impl App {
     }
 
     fn sync_size(&mut self) {
-        // every tab, not only the one shown: a hidden one is the same size when it comes back
-        if let Some(grid) = self.grid() {
-            for t in &mut self.tabs {
-                t.session.resize(grid);
+        // every pane of every tab, not only the shown ones: a hidden one is the right size when it comes back
+        for ti in 0..self.tabs.len() {
+            let rects = self.pane_rects(ti);
+            for (id, r) in rects {
+                if let Some(grid) = self.grid_in(r) {
+                    if let Some(p) = self.tabs[ti].panes.iter_mut().find(|p| p.id == id) {
+                        p.session.resize(grid);
+                    }
+                }
             }
         }
         self.redraw();
     }
 
     fn write(&self, bytes: Vec<u8>) {
-        if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
+        if let Some(s) = self.sess() {
             // typing returns to the live screen and drops a selection
             {
                 let mut t = s.term.lock();
@@ -126,29 +192,54 @@ impl App {
     }
 
     fn mode(&self) -> TermMode {
-        self.tabs.get(self.active).map(|t| &t.session).map(|s| *s.term.lock().mode()).unwrap_or(TermMode::empty())
+        self.sess().map(|s| *s.term.lock().mode()).unwrap_or(TermMode::empty())
     }
 
-    /// Window pixels → a point in the terminal (accounting for scrollback).
+    /// Window pixels → a point in the focused pane's terminal (accounting for scrollback).
     fn point_at(&self, x: f64, y: f64) -> Option<(Point, Side)> {
         let g = self.gpu.as_ref()?;
-        let s = self.tabs.get(self.active).map(|t| &t.session)?;
+        let s = self.sess()?;
+        let f = self.focus_rect()?;
         let r = &g.renderer;
-        let col_f = ((x as f32 - r.pad) / r.cell_w).max(0.0);
+        let col_f = ((x as f32 - f.x - r.pad) / r.cell_w).max(0.0);
         let col = (col_f as usize).min(s.grid.cols.saturating_sub(1));
-        let row = (((y as f32 - r.pad - r.top) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
+        let row = (((y as f32 - f.y - r.pad) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
         let offset = s.term.lock().grid().display_offset() as i32;
         let side = if col_f.fract() < 0.5 { Side::Left } else { Side::Right };
         Some((Point::new(Line(row as i32 - offset), Column(col)), side))
     }
 
-    /// The screen cell under a window position (0-based column, row).
+    /// The focused pane's cell under a window position (0-based column, row).
     fn cell_at(&self, x: f64, y: f64) -> (usize, usize) {
-        let (Some(g), Some(s)) = (self.gpu.as_ref(), self.tabs.get(self.active).map(|t| &t.session)) else { return (0, 0) };
+        let (Some(g), Some(s), Some(f)) = (self.gpu.as_ref(), self.sess(), self.focus_rect()) else { return (0, 0) };
         let r = &g.renderer;
-        let col = (((x as f32 - r.pad) / r.cell_w).max(0.0) as usize).min(s.grid.cols.saturating_sub(1));
-        let row = (((y as f32 - r.pad - r.top) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
+        let col = (((x as f32 - f.x - r.pad) / r.cell_w).max(0.0) as usize).min(s.grid.cols.saturating_sub(1));
+        let row = (((y as f32 - f.y - r.pad) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
         (col, row)
+    }
+
+    /// Moves the keyboard to another pane of the shown tab (telling programs that ask about focus).
+    fn focus_pane(&mut self, id: u64) {
+        let Some(t) = self.tabs.get_mut(self.active) else { return };
+        if t.focus == id || !t.panes.iter().any(|p| p.id == id) {
+            return;
+        }
+        let tell = |p: Option<&Pane>, on: bool| {
+            if let Some(p) = p {
+                if p.session.term.lock().mode().contains(TermMode::FOCUS_IN_OUT) {
+                    p.session.write(if on { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
+                }
+            }
+        };
+        tell(t.focused(), false);
+        t.focus = id;
+        tell(t.focused(), true);
+        if t.zoom {
+            t.zoom = false;
+            self.sync_size();
+        }
+        self.search = None;
+        self.show_title();
     }
 
     /// Does the program want the mouse? Shift keeps it for zash (selecting text), as everywhere.
@@ -160,14 +251,16 @@ impl App {
         let m = self.mods;
         let mods = Mods { ctrl: m.control_key(), alt: m.alt_key(), shift: m.shift_key() };
         let sgr = self.mode().contains(TermMode::SGR_MOUSE);
-        if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
+        if let Some(s) = self.sess() {
             s.write(input::mouse(button, motion, pressed, cell.0, cell.1, mods, sgr));
         }
     }
 
     fn search_key(&mut self, ev: &KeyEvent, mods: Mods) {
         use alacritty_terminal::index::Direction;
-        let (Some(s), Some(sess)) = (self.search.as_mut(), self.tabs.get(self.active).map(|t| &t.session)) else { return };
+        // fields directly (not self.sess()): the search is borrowed mutably at the same time
+        let sess = self.tabs.get(self.active).and_then(|t| t.panes.iter().find(|p| p.id == t.focus)).map(|p| &p.session);
+        let (Some(s), Some(sess)) = (self.search.as_mut(), sess) else { return };
         let mut t = sess.term.lock();
         match &ev.logical_key {
             Key::Named(NamedKey::Escape) => {
@@ -197,7 +290,7 @@ impl App {
     /// The link under a window position: a real hyperlink (OSC 8) or a URL in the text.
     fn link_at(&self, x: f64, y: f64) -> Option<String> {
         let (p, _) = self.point_at(x, y)?;
-        let s = self.tabs.get(self.active).map(|t| &t.session)?;
+        let s = self.sess()?;
         let t = s.term.lock();
         if let Some(h) = t.grid()[p].hyperlink() {
             return Some(h.uri().to_string());
@@ -209,7 +302,7 @@ impl App {
 
     /// Scrolls so the previous (-1) or next (+1) prompt is at the top.
     fn jump_prompt(&mut self, dir: i32) {
-        let Some(s) = self.tabs.get(self.active).map(|t| &t.session) else { return };
+        let Some(s) = self.sess() else { return };
         let prompts: Vec<usize> = crate::render::prompts(&s.marks.lock().unwrap()).into_iter().map(|p| p.0).collect();
         let mut t = s.term.lock();
         let hist = t.grid().history_size();
@@ -227,7 +320,7 @@ impl App {
 
     /// The text of the last finished command's output (between its C and D marks).
     fn last_output(&self) -> Option<String> {
-        let s = self.tabs.get(self.active).map(|t| &t.session)?;
+        let s = self.sess()?;
         let marks = s.marks.lock().unwrap().clone();
         let d = marks.iter().rposition(|m| m.kind == 'D')?;
         let c = marks[..d].iter().rposition(|m| m.kind == 'C')?;
@@ -243,22 +336,76 @@ impl App {
         Some(t.bounds_to_string(start, end).trim_end().to_string())
     }
 
-    fn new_tab(&mut self, cmd: Option<Vec<String>>, dir: Option<std::path::PathBuf>) -> std::io::Result<()> {
+    fn spawn_pane(&mut self, cmd: Option<Vec<String>>, dir: Option<std::path::PathBuf>, grid: Grid) -> std::io::Result<Pane> {
         let id = self.next_id;
         self.next_id += 1;
-        // the tab bar appears with the second tab: make room before sizing the grid
-        let n = self.tabs.len() + 1;
+        let session = Session::spawn(cmd, dir, grid, self.cfg.scrollback, Sink::Window(self.proxy.clone(), id))?;
+        Ok(Pane { id, session, title: "zash".into() })
+    }
+
+    /// The tab bar shows from the second tab: the space below it changes.
+    fn fit_tab_bar(&mut self) {
+        let n = self.tabs.len();
         if let Some(g) = self.gpu.as_mut() {
             g.renderer.top = if n > 1 { g.renderer.tab_bar_h() } else { 0.0 };
         }
+    }
+
+    fn new_tab(&mut self, cmd: Option<Vec<String>>, dir: Option<std::path::PathBuf>) -> std::io::Result<()> {
+        // make room for the tab bar before sizing the grid
+        if let Some(g) = self.gpu.as_mut() {
+            if !self.tabs.is_empty() {
+                g.renderer.top = g.renderer.tab_bar_h();
+            }
+        }
         let grid = self.grid().ok_or_else(|| std::io::Error::other("no window"))?;
-        let session = Session::spawn(cmd, dir, grid, self.cfg.scrollback, Sink::Window(self.proxy.clone(), id))?;
-        self.tabs.push(Tab { id, session, title: "zash".into() });
+        let pane = self.spawn_pane(cmd, dir, grid)?;
+        let id = pane.id;
+        self.tabs.push(Tab { panes: vec![pane], layout: Layout::Leaf(id), focus: id, zoom: false });
+        self.last_active = self.active;
         self.active = self.tabs.len() - 1;
         self.search = None;
         self.sync_size();
         self.show_title();
         Ok(())
+    }
+
+    /// Splits the focused pane; the new one opens in the same folder and gets the keyboard.
+    fn split(&mut self, side_by_side: bool) {
+        let Some(t) = self.tabs.get(self.active) else { return };
+        let (at, dir) = (t.focus, t.focused().and_then(|p| p.session.cwd()));
+        let Some(grid) = self.focus_rect().and_then(|r| self.grid_in(r)) else { return };
+        match self.spawn_pane(None, dir, grid) {
+            Ok(p) => {
+                let id = p.id;
+                let t = &mut self.tabs[self.active];
+                t.zoom = false;
+                t.panes.push(p);
+                t.layout.split(at, id, side_by_side);
+                self.sync_size();
+                self.focus_pane(id);
+            }
+            Err(e) => eprintln!("zash: no new pane: {e}"),
+        }
+    }
+
+    /// A pane's program ended: the pane goes, its neighbour takes the space; the last pane closes the tab.
+    fn close_pane(&mut self, ti: usize, id: u64, el: &ActiveEventLoop) {
+        let t = &mut self.tabs[ti];
+        t.panes.retain(|p| p.id != id);
+        let layout = std::mem::replace(&mut t.layout, Layout::Leaf(0));
+        match layout.remove(id) {
+            Some(l) => {
+                if t.focus == id {
+                    t.focus = l.ids()[0];
+                }
+                t.layout = l;
+                t.zoom = false;
+                self.sync_size();
+                self.show_title();
+            }
+            None => self.close_tab(ti, el),
+        }
     }
 
     fn close_tab(&mut self, i: usize, el: &ActiveEventLoop) {
@@ -270,12 +417,20 @@ impl App {
         if i < self.active || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }
-        if let Some(g) = self.gpu.as_mut() {
-            g.renderer.top = if self.tabs.len() > 1 { g.renderer.tab_bar_h() } else { 0.0 };
-        }
+        self.last_active = self.last_active.min(self.tabs.len() - 1);
+        self.fit_tab_bar();
         self.search = None;
         self.sync_size();
         self.show_title();
+    }
+
+    fn show_tab(&mut self, i: usize) {
+        if i < self.tabs.len() && i != self.active {
+            self.last_active = self.active;
+            self.active = i;
+            self.search = None;
+            self.show_title();
+        }
     }
 
     fn switch_tab(&mut self, by: i32) {
@@ -283,16 +438,171 @@ impl App {
         if n < 2 {
             return;
         }
-        self.active = ((self.active as i32 + by).rem_euclid(n)) as usize;
-        self.search = None;
-        self.show_title();
+        self.show_tab(((self.active as i32 + by).rem_euclid(n)) as usize);
     }
 
     fn show_title(&self) {
-        if let (Some(g), Some(t)) = (&self.gpu, self.tabs.get(self.active)) {
-            g.window.set_title(&t.title);
+        if let (Some(g), Some(p)) = (&self.gpu, self.pane()) {
+            g.window.set_title(&p.title);
         }
         self.redraw();
+    }
+
+    /// Hang up on programs: they exit, and their exit closes the pane.
+    fn hang_up(&self, pids: Vec<u32>) {
+        for pid in pids {
+            unsafe { libc::kill(pid as i32, libc::SIGHUP) };
+        }
+    }
+
+    /// Does what a tmux key binding asked for.
+    fn run(&mut self, a: &Action) {
+        let area = self.area();
+        match a {
+            Action::Split { side_by_side } => self.split(*side_by_side),
+            Action::Focus(d) => {
+                let to = self.tabs.get(self.active).zip(area).and_then(|(t, ar)| t.layout.neighbour(t.focus, *d, ar));
+                if let Some(id) = to {
+                    self.focus_pane(id);
+                }
+            }
+            Action::FocusNext => {
+                if let Some(t) = self.tabs.get(self.active) {
+                    let ids = t.layout.ids();
+                    let i = ids.iter().position(|x| *x == t.focus).unwrap_or(0);
+                    let next = ids[(i + 1) % ids.len()];
+                    // tmux's "next pane in zoomed mode" binding zooms right after: keep it zoomed
+                    let zoomed = t.zoom;
+                    self.focus_pane(next);
+                    if zoomed {
+                        self.tabs[self.active].zoom = true;
+                        self.sync_size();
+                    }
+                }
+            }
+            Action::Resize(d, n) => {
+                let cell = self.gpu.as_ref().map(|g| if matches!(d, crate::keys::Dir::Left | crate::keys::Dir::Right) { g.renderer.cell_w } else { g.renderer.cell_h });
+                if let (Some(ar), Some(c), Some(t)) = (area, cell, self.tabs.get_mut(self.active)) {
+                    let f = t.focus;
+                    if t.layout.resize(f, *d, c * *n as f32, ar) {
+                        self.sync_size();
+                    }
+                }
+            }
+            Action::Zoom => {
+                if let Some(t) = self.tabs.get_mut(self.active) {
+                    if t.panes.len() > 1 {
+                        t.zoom = !t.zoom;
+                        self.sync_size();
+                    }
+                }
+            }
+            Action::ClosePane => {
+                let pid = self.pane().map(|p| p.session.pid);
+                self.hang_up(pid.into_iter().collect());
+            }
+            Action::CloseTab => {
+                let pids = self.tabs.get(self.active).map(|t| t.panes.iter().map(|p| p.session.pid).collect()).unwrap_or_default();
+                self.hang_up(pids);
+            }
+            Action::NewTab => {
+                let dir = self.sess().and_then(|s| s.cwd());
+                if let Err(e) = self.new_tab(None, dir) {
+                    eprintln!("zash: no new tab: {e}");
+                }
+            }
+            Action::NextTab => self.switch_tab(1),
+            Action::PrevTab => self.switch_tab(-1),
+            Action::LastTab => self.show_tab(self.last_active),
+            Action::SendPrefix => {
+                // the prefix itself, to a program inside (a nested tmux)
+                let p = self.keys.prefix.clone();
+                let key = match p.key.as_str() {
+                    "Space" => input::Key::Text(" "),
+                    k => input::Key::Text(k),
+                };
+                let mods = Mods { ctrl: p.ctrl, alt: p.alt, shift: false };
+                let app_cursor = self.mode().contains(TermMode::APP_CURSOR);
+                if let Some(b) = input::encode(&key, mods, app_cursor) {
+                    self.write(b);
+                }
+            }
+            Action::Search => {
+                self.search = Some(crate::search::Search::default());
+            }
+            Action::Paste => {
+                let text = clipboard_get(false);
+                let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
+                self.write(input::paste(&text, bracketed));
+            }
+            Action::Seq(list) => {
+                for a in list.clone() {
+                    self.run(&a);
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    /// A key as the tmux config names it; None for a lone modifier.
+    fn chord(ev: &KeyEvent, mods: Mods) -> Option<Chord> {
+        let key = match &ev.logical_key {
+            Key::Named(n) => match n {
+                NamedKey::Space => "Space",
+                NamedKey::Escape => "Escape",
+                NamedKey::Enter => "Enter",
+                NamedKey::Tab => "Tab",
+                NamedKey::Backspace => "Backspace",
+                NamedKey::ArrowUp => "Up",
+                NamedKey::ArrowDown => "Down",
+                NamedKey::ArrowLeft => "Left",
+                NamedKey::ArrowRight => "Right",
+                NamedKey::PageUp => "PageUp",
+                NamedKey::PageDown => "PageDown",
+                _ => return None,
+            }
+            .to_string(),
+            Key::Character(c) => {
+                if mods.ctrl { c.to_lowercase() } else { c.to_string() }
+            }
+            _ => return None,
+        };
+        Some(Chord { ctrl: mods.ctrl, alt: mods.alt, key })
+    }
+
+    /// Pane and tab keys (prefix, `-n` and repeat bindings). True when the key was used.
+    fn tmux_key(&mut self, ev: &KeyEvent, mods: Mods) -> bool {
+        let Some(chord) = Self::chord(ev, mods) else { return self.prefix }; // a modifier alone keeps the prefix waiting
+        let now = std::time::Instant::now();
+        if self.prefix {
+            self.prefix = false;
+            if let Some(b) = self.keys.table.get(&chord).cloned() {
+                self.repeat_until = b.repeat.then(|| now + std::time::Duration::from_millis(600));
+                self.run(&b.action);
+            }
+            self.redraw();
+            // an unbound key after the prefix does nothing (as in tmux)
+            return true;
+        }
+        if let Some(until) = self.repeat_until.take() {
+            if now < until {
+                if let Some(b) = self.keys.table.get(&chord).cloned().filter(|b| b.repeat) {
+                    self.repeat_until = Some(now + std::time::Duration::from_millis(600));
+                    self.run(&b.action);
+                    return true;
+                }
+            }
+        }
+        if chord == self.keys.prefix {
+            self.prefix = true;
+            self.redraw();
+            return true;
+        }
+        if let Some(b) = self.keys.root.get(&chord).cloned() {
+            self.run(&b.action);
+            return true;
+        }
+        false
     }
 
     fn set_font(&mut self, pt: f32) {
@@ -310,12 +620,16 @@ impl App {
         if self.search.is_some() {
             return self.search_key(ev, mods);
         }
+        // pane and tab keys from the tmux config (prefix, -n, repeat)
+        if self.tmux_key(ev, mods) {
+            return;
+        }
         // zash's own keys first
         if mods.ctrl && mods.shift {
             if let Key::Character(c) = &ev.logical_key {
                 match c.to_lowercase().as_str() {
                     "c" => {
-                        if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
+                        if let Some(s) = self.sess() {
                             if let Some(t) = s.term.lock().selection_to_string() {
                                 clipboard_set(&t, false);
                             }
@@ -324,17 +638,15 @@ impl App {
                     }
                     "t" => {
                         // a new tab, in the folder the current one is in
-                        let dir = self.tabs.get(self.active).and_then(|t| t.session.cwd());
+                        let dir = self.sess().and_then(|s| s.cwd());
                         if let Err(e) = self.new_tab(None, dir) {
                             eprintln!("zash: no new tab: {e}");
                         }
                         return;
                     }
                     "w" => {
-                        // hang up on the tab's program; its exit closes the tab
-                        if let Some(t) = self.tabs.get(self.active) {
-                            unsafe { libc::kill(t.session.pid as i32, libc::SIGHUP) };
-                        }
+                        // hang up on the focused pane's program; its exit closes the pane (the last one, the tab)
+                        self.run(&Action::ClosePane);
                         return;
                     }
                     "f" => {
@@ -399,7 +711,7 @@ impl App {
                 Key::Named(NamedKey::PageDown) => Some(Scroll::PageDown),
                 _ => None,
             };
-            if let (Some(p), Some(s)) = (page, self.tabs.get(self.active).map(|t| &t.session)) {
+            if let (Some(p), Some(s)) = (page, self.sess()) {
                 if !self.mode().contains(TermMode::ALT_SCREEN) {
                     s.term.lock().scroll_display(p);
                     self.redraw();
@@ -457,25 +769,35 @@ impl App {
     }
 
     fn render(&mut self) {
-        let (Some(g), Some(s)) = (self.gpu.as_mut(), self.tabs.get(self.active).map(|t| &t.session)) else { return };
-        let mut frame = {
-            let t = s.term.lock();
-            let marks = s.marks.lock().unwrap();
-            Frame::extract(&t, &self.cfg.palette).with_prompts(&t, &marks)
-        };
-        frame.popup = s.popup.lock().unwrap().clone();
-        if let Some(q) = &self.search {
-            frame.bar = Some(q.bar());
-        }
-        // a tab without a real title shows the name of the folder its shell is in
-        frame.tabs = self.tabs.iter().enumerate().map(|(i, t)| {
-            let title = if t.title == "zash" || t.title.is_empty() {
-                t.session.cwd().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "zash".into())
-            } else {
-                t.title.clone()
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        // every pane of the shown tab, copied out of its terminal
+        let rects = self.pane_rects(self.active);
+        let mut frames: Vec<(u64, Rect, Frame)> = Vec::new();
+        for (id, r) in rects {
+            let Some(p) = tab.panes.iter().find(|p| p.id == id) else { continue };
+            let s = &p.session;
+            let mut frame = {
+                let t = s.term.lock();
+                let marks = s.marks.lock().unwrap();
+                Frame::extract(&t, &self.cfg.palette).with_prompts(&t, &marks)
             };
-            (title, i == self.active)
-        }).collect();
+            if id == tab.focus {
+                frame.popup = s.popup.lock().unwrap().clone();
+                if let Some(q) = &self.search {
+                    frame.bar = Some(q.bar());
+                } else if self.prefix {
+                    frame.bar = Some(self.prefix_hint());
+                }
+                // a tab without a real title shows the name of the folder its shell is in
+                frame.tabs = self.tabs.iter().enumerate().map(|(i, t)| (Self::tab_title(t), i == self.active)).collect();
+            } else {
+                // only the focused pane shows a cursor
+                frame.cursor = None;
+            }
+            frames.push((id, r, frame));
+        }
+        let focus = tab.focus;
+        let Some(g) = self.gpu.as_mut() else { return };
         let tex = match g.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Suboptimal(_) | wgpu::CurrentSurfaceTexture::Lost => {
@@ -490,15 +812,39 @@ impl App {
         };
         let view = tex.texture.create_view(&Default::default());
         g.window.pre_present_notify();
-        let (w, h) = (g.config.width as f32, g.config.height as f32);
-        let top = g.renderer.top;
-        let pane = crate::render::PaneView { id: self.tabs[self.active].id, x: 0.0, y: top, w, h: h - top, frame: &frame, focused: true };
-        let animating = g.renderer.render(&g.device, &g.queue, &view, g.config.width, g.config.height, &[pane]);
+        let panes: Vec<PaneView> = frames.iter().map(|(id, r, f)| PaneView { id: *id, x: r.x, y: r.y, w: r.w, h: r.h, frame: f, focused: *id == focus }).collect();
+        let animating = g.renderer.render(&g.device, &g.queue, &view, g.config.width, g.config.height, &panes);
         g.queue.present(tex);
         // another frame only while the cursor is still gliding: idle stays idle
         if animating {
             g.window.request_redraw();
         }
+    }
+
+    fn tab_title(t: &Tab) -> String {
+        let Some(p) = t.focused() else { return "zash".into() };
+        if p.title == "zash" || p.title.is_empty() {
+            p.session.cwd().and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "zash".into())
+        } else {
+            p.title.clone()
+        }
+    }
+
+    /// What the prefix can do next, shown while it waits (the keys from the user's own config).
+    fn prefix_hint(&self) -> String {
+        let find = |want: &dyn Fn(&Action) -> bool| {
+            let mut ks: Vec<&Chord> = self.keys.table.iter().filter(|(_, b)| want(&b.action)).map(|(k, _)| k).collect();
+            ks.sort_by(|a, b| a.key.cmp(&b.key));
+            ks.first().map(|c| if c.ctrl { format!("^{}", c.key) } else { c.key.clone() })
+        };
+        let mut parts = Vec::new();
+        if let Some(k) = find(&|a| *a == Action::Split { side_by_side: true }) { parts.push(format!("{k} split │")); }
+        if let Some(k) = find(&|a| *a == Action::Split { side_by_side: false }) { parts.push(format!("{k} split ─")); }
+        if let Some(k) = find(&|a| matches!(a, Action::Focus(_))) { parts.push(format!("{k}… move")); }
+        if let Some(k) = find(&|a| *a == Action::Zoom) { parts.push(format!("{k} zoom")); }
+        if let Some(k) = find(&|a| *a == Action::ClosePane) { parts.push(format!("{k} close")); }
+        if let Some(k) = find(&|a| *a == Action::NewTab) { parts.push(format!("{k} tab")); }
+        format!("prefix  {}", parts.join("  ·  "))
     }
 }
 
@@ -562,6 +908,14 @@ impl ApplicationHandler<ZEvent> for App {
             eprintln!("zash: could not start the shell: {e}");
             el.exit();
         }
+        // test hook: tmux commands run at start, `;`-separated (checking splits without key presses)
+        if let Ok(cmds) = std::env::var("ZASH_TEST_RUN") {
+            for c in cmds.split(';') {
+                if let Some(a) = crate::keys::action(c.trim()) {
+                    self.run(&a);
+                }
+            }
+        }
         // test hook: open more tabs at start (checking the tab bar without key presses)
         if let Some(n) = std::env::var("ZASH_TEST_TABS").ok().and_then(|v| v.parse::<usize>().ok()) {
             for _ in 1..n {
@@ -594,8 +948,9 @@ impl ApplicationHandler<ZEvent> for App {
             }
             ZEvent::Term(id, e) => (id, e),
         };
-        // the tab this event belongs to (it may have closed meanwhile)
-        let Some(tab) = self.tabs.iter().position(|t| t.id == id) else { return };
+        // the tab and pane this event belongs to (they may have closed meanwhile)
+        let Some(tab) = self.tabs.iter().position(|t| t.panes.iter().any(|p| p.id == id)) else { return };
+        let Some(pi) = self.tabs[tab].panes.iter().position(|p| p.id == id) else { return };
         let shown = tab == self.active;
         match ev {
             Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => {
@@ -604,27 +959,27 @@ impl ApplicationHandler<ZEvent> for App {
                 }
             }
             Event::Title(t) => {
-                self.tabs[tab].title = t;
+                self.tabs[tab].panes[pi].title = t;
                 self.show_title();
             }
             Event::ResetTitle => {
-                self.tabs[tab].title = "zash".into();
+                self.tabs[tab].panes[pi].title = "zash".into();
                 self.show_title();
             }
             Event::PtyWrite(s) => {
-                if let Some(sess) = Some(&self.tabs[tab].session) {
+                if let Some(sess) = Some(&self.tabs[tab].panes[pi].session) {
                     sess.write(s.into_bytes());
                 }
             }
             Event::ClipboardStore(ty, text) => clipboard_set(&text, matches!(ty, alacritty_terminal::term::ClipboardType::Selection)),
             Event::ClipboardLoad(ty, f) => {
                 let text = clipboard_get(matches!(ty, alacritty_terminal::term::ClipboardType::Selection));
-                if let Some(s) = Some(&self.tabs[tab].session) {
+                if let Some(s) = Some(&self.tabs[tab].panes[pi].session) {
                     s.write(f(&text).into_bytes());
                 }
             }
             Event::ColorRequest(i, f) => {
-                if let Some(s) = Some(&self.tabs[tab].session) {
+                if let Some(s) = Some(&self.tabs[tab].panes[pi].session) {
                     let p = &self.cfg.palette;
                     let c = match i {
                         256 => p.fg,
@@ -637,12 +992,12 @@ impl ApplicationHandler<ZEvent> for App {
                 }
             }
             Event::TextAreaSizeRequest(f) => {
-                if let Some(s) = Some(&self.tabs[tab].session) {
+                if let Some(s) = Some(&self.tabs[tab].panes[pi].session) {
                     let g = s.grid;
                     s.write(f(WindowSize { num_lines: g.rows as u16, num_cols: g.cols as u16, cell_width: g.cell_w as u16, cell_height: g.cell_h as u16 }).into_bytes());
                 }
             }
-            Event::ChildExit(_) | Event::Exit => self.close_tab(tab, el),
+            Event::ChildExit(_) | Event::Exit => self.close_pane(tab, id, el),
             Event::Bell => {}
         }
     }
@@ -667,7 +1022,7 @@ impl ApplicationHandler<ZEvent> for App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => self.key(&event),
             WindowEvent::Focused(f) => {
                 if self.mode().contains(TermMode::FOCUS_IN_OUT) {
-                    if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
+                    if let Some(s) = self.sess() {
                         s.write(if f { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
                     }
                 }
@@ -688,7 +1043,7 @@ impl ApplicationHandler<ZEvent> for App {
                 }
                 self.last_cell = cell;
                 if self.selecting {
-                    if let (Some((p, side)), Some(s)) = (self.point_at(position.x, position.y), self.tabs.get(self.active).map(|t| &t.session)) {
+                    if let (Some((p, side)), Some(s)) = (self.point_at(position.x, position.y), self.sess()) {
                         if let Some(sel) = s.term.lock().selection.as_mut() {
                             sel.update(p, side);
                         }
@@ -699,6 +1054,13 @@ impl ApplicationHandler<ZEvent> for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 let code = match button { MouseButton::Left => 0, MouseButton::Middle => 1, MouseButton::Right => 2, _ => return };
                 let pressed = state == ElementState::Pressed;
+                // a click in another pane gives it the keyboard first
+                if pressed {
+                    let hit = self.tabs.get(self.active).zip(self.area()).filter(|(t, _)| !t.zoom).and_then(|(t, ar)| t.layout.at(self.mouse.0 as f32, self.mouse.1 as f32, ar));
+                    if let Some(id) = hit {
+                        self.focus_pane(id);
+                    }
+                }
                 if self.app_mouse() {
                     let cell = self.cell_at(self.mouse.0, self.mouse.1);
                     self.mouse_btn = if pressed { Some(code) } else { None };
@@ -719,7 +1081,7 @@ impl ApplicationHandler<ZEvent> for App {
                         let same = self.clicks.0.elapsed() < std::time::Duration::from_millis(400) && self.clicks.2 == self.last_cell;
                         self.clicks = (now, if same { self.clicks.1 % 3 + 1 } else { 1 }, self.last_cell);
                         let ty = match self.clicks.1 { 2 => SelectionType::Semantic, 3 => SelectionType::Lines, _ => SelectionType::Simple };
-                        if let (Some((p, side)), Some(s)) = (self.point_at(self.mouse.0, self.mouse.1), self.tabs.get(self.active).map(|t| &t.session)) {
+                        if let (Some((p, side)), Some(s)) = (self.point_at(self.mouse.0, self.mouse.1), self.sess()) {
                             s.term.lock().selection = Some(Selection::new(ty, p, side));
                             self.selecting = true;
                             self.redraw();
@@ -728,7 +1090,7 @@ impl ApplicationHandler<ZEvent> for App {
                     (MouseButton::Left, false) => {
                         self.selecting = false;
                         // like every X/Wayland terminal: a selection is also the middle-click paste
-                        if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
+                        if let Some(s) = self.sess() {
                             let text = { let t = s.term.lock(); t.selection.as_ref().filter(|s| !s.is_empty()).and(t.selection_to_string()) };
                             if let Some(t) = text.filter(|t| !t.is_empty()) {
                                 std::thread::spawn(move || clipboard_set(&t, true));
@@ -764,10 +1126,10 @@ impl ApplicationHandler<ZEvent> for App {
                 } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
                     // full-screen programs without the mouse (less, man) get arrow keys
                     let key = if whole > 0 { if mode.contains(TermMode::APP_CURSOR) { "\x1bOA" } else { "\x1b[A" } } else if mode.contains(TermMode::APP_CURSOR) { "\x1bOB" } else { "\x1b[B" };
-                    if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
+                    if let Some(s) = self.sess() {
                         s.write(key.repeat(whole.unsigned_abs() as usize).into_bytes());
                     }
-                } else if let Some(s) = self.tabs.get(self.active).map(|t| &t.session) {
+                } else if let Some(s) = self.sess() {
                     s.term.lock().scroll_display(Scroll::Delta(whole));
                     self.redraw();
                 }

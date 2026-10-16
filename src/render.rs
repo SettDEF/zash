@@ -384,11 +384,6 @@ impl Renderer {
         (self.cell_h * 1.6).round()
     }
 
-    /// Cells that fit in a surface of this size.
-    pub fn grid_for(&self, width: u32, height: u32) -> (usize, usize) {
-        self.grid_in(width as f32, height as f32 - self.top)
-    }
-
     /// Cells that fit in a pane of this many pixels (padding inside it).
     pub fn grid_in(&self, w: f32, h: f32) -> (usize, usize) {
         let cols = ((w - 2.0 * self.pad) / self.cell_w).floor().max(2.0) as usize;

@@ -111,7 +111,7 @@ pub struct Keys {
 }
 
 /// One tmux command line → an action zash can do.
-fn action(cmd: &str) -> Option<Action> {
+pub fn action(cmd: &str) -> Option<Action> {
     let parts: Vec<Action> = cmd.split("\\;").filter_map(|c| one(c.trim())).collect();
     match parts.len() {
         0 => None,
