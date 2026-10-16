@@ -150,6 +150,19 @@ impl App {
         }
     }
 
+    /// The link under a window position: a real hyperlink (OSC 8) or a URL in the text.
+    fn link_at(&self, x: f64, y: f64) -> Option<String> {
+        let (p, _) = self.point_at(x, y)?;
+        let s = self.session.as_ref()?;
+        let t = s.term.lock();
+        if let Some(h) = t.grid()[p].hyperlink() {
+            return Some(h.uri().to_string());
+        }
+        let cols = t.grid().columns();
+        let line = t.bounds_to_string(Point::new(p.line, Column(0)), Point::new(p.line, Column(cols.saturating_sub(1))));
+        crate::links::url_at(&line, p.column.0)
+    }
+
     /// Scrolls so the previous (-1) or next (+1) prompt is at the top.
     fn jump_prompt(&mut self, dir: i32) {
         let Some(s) = &self.session else { return };
@@ -533,6 +546,13 @@ impl ApplicationHandler<ZEvent> for App {
                     self.mouse_btn = if pressed { Some(code) } else { None };
                     self.send_mouse(code, false, pressed, cell);
                     return;
+                }
+                // Ctrl+click: open the link under the pointer
+                if button == MouseButton::Left && pressed && self.mods.control_key() {
+                    if let Some(url) = self.link_at(self.mouse.0, self.mouse.1) {
+                        let _ = std::process::Command::new("xdg-open").arg(&url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+                        return;
+                    }
                 }
                 match (button, pressed) {
                     (MouseButton::Left, true) => {

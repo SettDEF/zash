@@ -8,6 +8,7 @@
 mod app;
 mod config;
 mod input;
+mod links;
 mod render;
 mod session;
 mod shell;
