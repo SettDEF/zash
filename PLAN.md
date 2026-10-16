@@ -1,0 +1,214 @@
+# zash — the plan
+
+**zash** (zett + shell): a terminal emulator written entirely in Rust, part of
+zett and usable on its own. Name chosen 2026-10-16; clear on the US register,
+EU/DPMA still to check by hand before anything permanent.
+
+## The idea in one paragraph
+
+One terminal that is correct, native-feeling, **among the fastest there are
+and perfectly smooth**, with images and precise keyboard input, Lua all the
+way down, sessions that never die, commands as blocks, a completion popup with
+previews, smart output, triggers and instant replay, and instant new windows —
+plus what no terminal has today: Vim everywhere, smart output from normal
+commands, per-pane power limits, commands as notes in a workspace, and agents
+you can watch. Local-first: no account, no cloud.
+
+## Principles
+
+1. **Correct first.** A terminal that draws one program wrong is broken.
+   vttest and esctest pass; Neovim, tmux, htop, btop, less, fzf, Claude Code,
+   mc, ssh and full-screen TUIs render exactly.
+2. **Fast and smooth, measured.** Budgets below, checked on every release.
+3. **Idle means idle.** Nothing changing = no frames, no timers, ~0 % CPU.
+4. **Customizable to the bone, beautiful by default.** Every key, colour,
+   animation, popup, layout and behaviour is a setting or a Lua function; a
+   fresh install already looks finished (the Doom rule).
+5. **Yours.** Local-first, no telemetry, no account. AI is optional and can be
+   fully local.
+
+## Features, by area
+
+### 1. The core terminal
+- VT/xterm emulation (vte parser, own grid), 24-bit colour, undercurl and
+  coloured underlines, hyperlinks (OSC 8), clipboard (OSC 52), cwd (OSC 7),
+  shell marks (OSC 133), notifications (OSC 9/777), synchronized output.
+- the **Kitty keyboard and graphics protocols** (the standards for precise keys and images), Sixel, iTerm2
+  images.
+- Reflow on resize, unlimited compressed scrollback.
+- Ligatures (rustybuzz), font fallback chains, emoji, Nerd Font symbols;
+  box drawing and powerline glyphs drawn pixel-perfect by zash, not the font.
+ 
+
+### 2. Speed and smoothness
+- wgpu renderer with a glyph atlas and damage tracking: only changed cells redraw.
+- Throughput and input latency among the best of any terminal (measured with vtebench and a latency probe).
+- **Server mode:** one zash process serves every window, so a new window opens
+  instantly.
+- Pixel-smooth scrolling with momentum, at the display refresh rate.
+- **Animated cursor**: a smooth trail, any curve, configurable or off.
+ 
+- Smooth resize and font zoom.
+
+### 3. Native feel
+- Native-looking window and tabs, tinct-themed live (changes with the
+  wallpaper), ii-decor window buttons, blur and transparency.
+- Ships many themes; any theme can follow tinct instead.
+- Zero config needed: good fonts, padding and keys out of the box.
+
+### 4. Blocks: commands as units
+- Shell integration (zsh first, bash and fish next) marks every prompt,
+  command and output: a **block**.
+- Jump between prompts, select or copy a whole output, collapse it, a sticky
+  header while it scrolls, exit status, duration and cwd on each block.
+- Rerun, edit-and-rerun, **compare two runs**, search all past output.
+- Send a block to a zett page, link it, share it as a snippet.
+
+### 5. The command line as an editor
+- The line you type is edited by **zett-edit**: real Vim grammar (or plain
+  editing for non-Vim users), with mouse selection, multi-line editing and
+  syntax highlighting of the command.
+- **Completion popup**: candidates from zsh's own completion system (every
+  `_git`, `_cargo`, `_docker` works), with descriptions, groups, icons, a
+  **preview pane** (file contents or image, branch log, the man-page line for a
+  flag), fuzzy filtering, multi-select. Position, size, columns, icons and
+  animation all styleable.
+- **Ghost text** from history, accepted with →.
+- Optional suggestions from an agent (local model or Claude), clearly marked.
+
+### 6. Smart output from normal commands
+- Recognised outputs become **tables you can sort, filter and click**: `ls`,
+  `ps`, `git log`, `git status`, `docker ps`, `kubectl get`, `df`, JSON, CSV.
+  The raw text is always one key away.
+- **Hints**: two keys grab or open any URL, path, hash, IP or `file:line`.
+ 
+- Hover a path for a preview (text, image, PDF page, directory).
+- **Error lens**: compiler and test errors are highlighted; one key opens the
+  line in zett (or Neovim), another hands the error to an agent.
+- Custom renderers in Lua: "when a command prints X, show it as Y".
+
+### 7. Scrollback and history
+- **Vim in the scrollback**: `v`, `y`, `/`, `n`, text objects over output.
+ 
+- **Instant replay / time travel**: scrub back through a session like a video
+  and see the screen at any moment.
+- Sessions **survive reboots**, scrollback included.
+
+### 8. Panes, tabs, sessions
+- Splits, tabs, workspaces, zoom a pane, swap and move panes, saved layouts
+  per project, all on the `SPC` leader (zett's which-key tree).
+- Background session server: closing the window never kills work; attach from
+  another window, the TUI, or over SSH.
+- **SSH that brings zash with it**: shell integration, completions and images
+  work on remote machines (nuke).
+- Broadcast input to several panes.
+- Drop-down (Quake) terminal, scratch panes, a floating pane pinned over the
+  desktop.
+
+### 9. Programmable
+- `term.lua` (part of zett's config): every setting, keymap, popup style,
+  status segment, theme rule, renderer, trigger and hook.
+- **Triggers**: a regex on output runs an action.
+- **Hooks**: `command.start`, `command.end` (notify when a long command
+  finishes while you are elsewhere), `cwd.changed`, `prompt`, `output`, `bell`.
+- **Remote control**: everything zash does is a zett command, so scripts,
+  keys, the palette and agents all drive it.
+- Plugins: Lua for quick ones, WASM for heavy ones (the same system as zett).
+
+### 10. What only zash has
+- **Vim everywhere**: scrollback, command line and popups, with the same engine
+  and keymaps as the zett editor.
+- **Per-pane Vitals**: a badge with each pane's CPU and watts; run a pane under
+  a preset (`background`, `quiet`) so a big build cannot make the desktop lag.
+- **Commands are notes**: blocks go into zett pages; a sequence of commands
+  becomes a runnable notebook page.
+- **Agents in a pane you watch**: an agent runs commands in a visible pane,
+  each step shown and, if you want, approved.
+- **Part of the desktop**: shell widgets (running jobs, last failure), a Dotos
+  task from a failed command, Quarry and Reel previews inline.
+
+## Starting config: from WezTerm
+
+zash's defaults start from the user's WezTerm setup (`~/.config/wezterm/`,
+about 1,500 lines across keys, fonts, glass, format, …), **important features
+only**: fonts and sizes, tinct colours, padding, opacity and blur, the key and
+pane/tab bindings, the tab/status bar look, the ii-decor button overlay. Not a
+line-by-line port: each feature is re-expressed the zash way, and WezTerm-only
+workarounds are dropped.
+
+## Architecture (all Rust)
+
+```
+crates/
+  zash-vt        VT state machine and grid: vte parser, scrollback
+                 (compressed), reflow, Kitty keyboard + graphics, sixel,
+                 OSC 7/8/9/52/133; no I/O; fully unit-tested
+  zash-pty       ptys and processes (rustix); the session server; attach/detach
+  zash-shell     shell integration plugins (zsh, bash, fish) and their socket
+                 protocol: marks, the edit buffer, completion candidates
+  zash-render    wgpu renderer: glyph atlas, shaping (rustybuzz), fallback,
+                 box drawing, damage tracking, smooth scroll, cursor animation
+  zash-ui        blocks, popups, hints, tables, previews, panes/tabs layout;
+                 all Lua-styleable
+  zash-smart     output recognisers (ls, ps, git, docker, JSON, CSV, errors)
+  zash           the standalone app (winit + wgpu) and server mode
+zett-app         embeds the same renderer as a pane in zett's window
+```
+
+The grid, the UI layer and the renderer are separate, so one terminal state
+draws in the standalone window, inside zett, and (simplified) in the TUI.
+
+## Performance budgets (checked on every release, on this laptop)
+
+| What | Budget |
+|---|---|
+| key → pixels | < 8 ms p99 |
+| throughput (vtebench) | among the best measured on this machine |
+| scrolling / cursor animation | 120 Hz, no dropped frames |
+| new window (server running) | < 50 ms |
+| cold start | < 150 ms |
+| completion popup after a key | < 30 ms |
+| memory per tab (10k lines of scrollback) | < 30 MB |
+| idle CPU | ~0 % |
+| correctness | vttest + esctest pass |
+
+## The bar
+
+Before each release zash is measured against the best terminals installed on
+this machine, on correctness (vttest, esctest, replayed sessions), throughput,
+input latency, frame times while scrolling, start time, memory and idle CPU.
+A release that is worse than the best on any of them is not done.
+
+## Milestones
+
+- **T0 — a correct terminal.** vte + grid + pty + wgpu text; true colour,
+  resize with reflow, scrollback; runs zsh, Neovim, tmux, htop, Claude Code
+  correctly; vttest core screens pass.
+- **T1 — fast and smooth.** Damage tracking, glyph atlas, ligatures, fallback,
+  box drawing; pixel scrolling, cursor animation; server mode. Budgets measured.
+- **T2 — native and themed.** tinct live theming, ii-decor overlay, tabs and
+  splits, the WezTerm-derived defaults (fonts, keys, look), themes.
+- **T3 — blocks.** zsh integration, marks, blocks, jump/select/collapse/rerun,
+  sticky headers, exit codes and durations, search past output.
+- **T4 — the command line.** zett-edit on the prompt, completion popup with
+  descriptions and preview, ghost text; bash and fish integration.
+- **T5 — smart output.** Hints, recognisers and tables, previews, error lens,
+  Lua renderers.
+- **T6 — programmable.** `term.lua`: everything configurable; triggers, hooks,
+  remote control, plugins.
+- **T7 — sessions.** Session server, attach, restore after reboot, SSH that
+  brings zash along, broadcast input, drop-down and floating panes, instant
+  replay.
+- **T8 — zett and the desktop.** zash panes and live terminal blocks in zett,
+  commands as notes, agents in watched panes, per-pane Vitals, shell widgets.
+
+T0–T2 make it a terminal you can switch to; T3–T5 make it the smartest one;
+T6–T8 make it something no other terminal is.
+
+## Testing
+
+- Unit tests on the grid and parser for every escape sequence handled.
+- **Replay tests**: recorded sessions (Neovim, htop, tmux, fzf) replayed into
+  zash's grid and compared cell by cell with a reference terminal's output.
+- vttest / esctest runs; budgets checked by a perf script, like zett's.
+- Visual checks headless (render to an image), never by capturing the screen.

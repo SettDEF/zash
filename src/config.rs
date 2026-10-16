@@ -1,0 +1,193 @@
+//! zash's settings: font, size, padding, colours.
+//!
+//! Defaults come from the user's WezTerm setup (docs/TERMINAL.md, "Starting
+//! config"): MonaspiceNe Nerd Font 11.5 with its stylistic sets, emoji
+//! fallback, no padding, and the colours tinct writes for WezTerm
+//! (~/.config/wezterm/tinct_colors.lua), so zash follows the wallpaper too.
+//! Overrides: ZASH_FONT, ZASH_FONT_SIZE (until `term.lua` lands).
+
+use std::path::PathBuf;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rgb(pub u8, pub u8, pub u8);
+
+impl Rgb {
+    pub fn hex(s: &str) -> Option<Rgb> {
+        let s = s.trim().trim_start_matches('#');
+        if s.len() != 6 {
+            return None;
+        }
+        let p = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).ok();
+        Some(Rgb(p(0)?, p(2)?, p(4)?))
+    }
+    pub fn f32(self) -> [f32; 4] {
+        // the surface is sRGB: shaders get linear values
+        let lin = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        [lin(self.0), lin(self.1), lin(self.2), 1.0]
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Palette {
+    pub fg: Rgb,
+    pub bg: Rgb,
+    pub cursor_bg: Rgb,
+    pub cursor_fg: Rgb,
+    pub selection_bg: Rgb,
+    pub selection_fg: Rgb,
+    /// 0–7 normal, 8–15 bright
+    pub ansi: [Rgb; 16],
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        // tinct's dark output on 2026-10-17, so a missing file still looks like home
+        let h = |s| Rgb::hex(s).unwrap();
+        Palette {
+            fg: h("#e3e2e5"),
+            bg: h("#181B1E"),
+            cursor_bg: h("#a8caeb"),
+            cursor_fg: h("#0b334e"),
+            selection_bg: h("#42474d"),
+            selection_fg: h("#c2c7ce"),
+            ansi: [
+                h("#181B1E"), h("#F0474D"), h("#14B861"), h("#F0CA0F"), h("#3F84F3"), h("#D140E7"), h("#0EAFD8"), h("#C9C5CA"),
+                h("#6F6B70"), h("#FB6065"), h("#33E686"), h("#FADB42"), h("#74A8FB"), h("#E46FF6"), h("#34CEF4"), h("#DDE3EF"),
+            ],
+        }
+    }
+}
+
+impl Palette {
+    /// Reads tinct's WezTerm colour file: `key = "#hex"` lines and the
+    /// `ansi = { … }` / `brights = { … }` lists. Anything missing keeps its default.
+    pub fn from_tinct_lua(src: &str) -> Palette {
+        let mut p = Palette::default();
+        let mut list: Option<(&str, usize)> = None;
+        for raw in src.lines() {
+            let line = raw.split("--").next().unwrap_or("").trim();
+            if let Some((name, idx)) = list.as_mut() {
+                if line.starts_with('}') {
+                    list = None;
+                    continue;
+                }
+                if let Some(c) = line.split('"').nth(1).and_then(Rgb::hex) {
+                    let base = if *name == "ansi" { 0 } else { 8 };
+                    if *idx < 8 {
+                        p.ansi[base + *idx] = c;
+                    }
+                    *idx += 1;
+                }
+                continue;
+            }
+            let Some((key, val)) = line.split_once('=') else { continue };
+            let key = key.trim();
+            if (key == "ansi" || key == "brights") && val.contains('{') {
+                list = Some((if key == "ansi" { "ansi" } else { "brights" }, 0));
+                continue;
+            }
+            let Some(c) = val.split('"').nth(1).and_then(Rgb::hex) else { continue };
+            match key {
+                "foreground" => p.fg = c,
+                "background" => p.bg = c,
+                "cursor_bg" => p.cursor_bg = c,
+                "cursor_fg" => p.cursor_fg = c,
+                "selection_bg" => p.selection_bg = c,
+                "selection_fg" => p.selection_fg = c,
+                _ => {}
+            }
+        }
+        p
+    }
+
+    pub fn tinct_file() -> PathBuf {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        home.join(".config/wezterm/tinct_colors.lua")
+    }
+
+    pub fn load() -> Palette {
+        std::fs::read_to_string(Self::tinct_file()).map(|s| Self::from_tinct_lua(&s)).unwrap_or_default()
+    }
+
+    /// The 256-colour table: 16 named, the 6×6×6 cube, 24 greys.
+    pub fn indexed(&self, i: u8) -> Rgb {
+        match i {
+            0..=15 => self.ansi[i as usize],
+            16..=231 => {
+                let i = i - 16;
+                let step = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+                Rgb(step(i / 36), step((i / 6) % 6), step(i % 6))
+            }
+            _ => {
+                let v = 8 + (i - 232) * 10;
+                Rgb(v, v, v)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub font_family: String,
+    /// points, as WezTerm counts them
+    pub font_size_pt: f32,
+    pub line_height: f32,
+    /// OpenType features, e.g. "ss04"
+    pub features: Vec<(String, u32)>,
+    pub padding: f32,
+    pub scrollback: usize,
+    pub palette: Palette,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            font_family: std::env::var("ZASH_FONT").unwrap_or_else(|_| "MonaspiceNe Nerd Font".into()),
+            font_size_pt: std::env::var("ZASH_FONT_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(11.5),
+            line_height: 1.2,
+            features: ["cv06", "cv14", "cv32", "ss04", "ss07", "ss09"].iter().map(|f| (f.to_string(), 1)).collect(),
+            padding: 0.0,
+            scrollback: 10_000,
+            palette: Palette::load(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_tinct_lua() {
+        let src = r##"return {
+    foreground    = "#e3e2e5",
+    background    = "#101112", -- a comment "#ffffff"
+    ansi = {
+        "#000001",
+        "#000002",
+    },
+    brights = {
+        "#000009",
+    },
+    tab_bar = { background = "#1a1c1e" },
+}"##;
+        let p = Palette::from_tinct_lua(src);
+        assert_eq!(p.bg, Rgb(0x10, 0x11, 0x12));
+        assert_eq!(p.ansi[0], Rgb(0, 0, 1));
+        assert_eq!(p.ansi[1], Rgb(0, 0, 2));
+        assert_eq!(p.ansi[8], Rgb(0, 0, 9));
+        assert_eq!(p.ansi[2], Palette::default().ansi[2], "missing entries keep their default");
+    }
+
+    #[test]
+    fn colour_cube() {
+        let p = Palette::default();
+        assert_eq!(p.indexed(16), Rgb(0, 0, 0));
+        assert_eq!(p.indexed(231), Rgb(255, 255, 255));
+        assert_eq!(p.indexed(232), Rgb(8, 8, 8));
+        assert_eq!(p.indexed(255), Rgb(238, 238, 238));
+    }
+}
