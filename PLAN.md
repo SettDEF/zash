@@ -152,6 +152,8 @@ draws it — without breaking the grid for everything else.
   running 0:12 · in the bottom pane`), updating to `✓` or a red `✗ exit N`,
   and a dropdown: `▸` unfolds the output inline (live, errors first), `▾`
   folds it; it jumps to the pane and back and stays in the scrollback.
+  The line has columns in the same small font: command left, status
+  right-aligned (the rich-rows feature: own font size per row, columns).
 - **Hooks**: `command.start`, `command.end` (notify when a long command
   finishes while you are elsewhere), `cwd.changed`, `prompt`, `output`, `bell`.
 - **Remote control**: everything zash does is a zett command, so scripts,
