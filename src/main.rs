@@ -9,6 +9,7 @@ mod app;
 mod config;
 mod dnd;
 mod graphics;
+mod web;
 mod input;
 mod keys;
 mod layout;
@@ -34,6 +35,30 @@ fn main() {
                 unsafe { std::env::set_var(var, v) };
             }
         }
+    }
+    // zash web ADDRESS [-r ROWS]: a web page here, in this terminal (zash draws it)
+    if args.first().map(String::as_str) == Some("web") {
+        let mut rows = 30usize;
+        let mut words = Vec::new();
+        let mut it = args[1..].iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "-r" | "--rows" => rows = it.next().and_then(|v| v.parse().ok()).unwrap_or(rows),
+                _ => words.push(a.clone()),
+            }
+        }
+        if words.is_empty() {
+            eprintln!("zash web ADDRESS [-r ROWS]   (a URL, a host, or words to search)");
+            std::process::exit(2);
+        }
+        if std::env::var("TERM_PROGRAM").ok().as_deref() != Some("zash") {
+            eprintln!("zash web: only inside a zash window");
+            std::process::exit(1);
+        }
+        let url = web::address(&words.join(" "));
+        print!("\x1b]7733;web;rows={rows};url={url}\x07{}", "\n".repeat(rows));
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        return;
     }
     let cfg = config::Config::load();
     // the configured shell, for zash and for everything started in it (zeit, scripts)

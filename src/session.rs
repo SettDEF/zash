@@ -92,6 +92,8 @@ pub struct Session {
     pub popup_style: Arc<Mutex<String>>,
     /// small two-column rows (zeit's job lines), by screen row
     pub ui_rows: Arc<Mutex<Vec<UiRow>>>,
+    /// keys the program in front claimed (it gets them, not zash)
+    pub claims: Arc<Mutex<Claims>>,
     /// images (Kitty graphics) and where they are placed
     pub graphics: Arc<Mutex<crate::graphics::Graphics>>,
     /// a cell in pixels (images are sized in cells)
@@ -125,6 +127,10 @@ pub enum Found {
     Rows(Vec<UiRow>),
     /// a Kitty graphics command: what follows `ESC _ G`
     Graphics(String),
+    /// a web area: OSC 7733;web;rows=N;url=…
+    Web(String),
+    /// keys a program wants for itself: OSC 7733;keys;all|none|claim=…|release=…
+    Keys(String),
     /// DECSCNM: the whole screen in reverse video (light background), on or off
     Reverse(bool),
     Popup(Option<Popup>),
@@ -244,6 +250,10 @@ impl MarkScanner {
                 }
             } else if let Some(look) = body.strip_prefix("7733;style;") {
                 out.push((at, Found::PopupStyle(look.to_string())));
+            } else if let Some(k) = body.strip_prefix("7733;keys;") {
+                out.push((at, Found::Keys(k.to_string())));
+            } else if let Some(w) = body.strip_prefix("7733;web;") {
+                out.push((at, Found::Web(w.to_string())));
             } else if let Some(list) = body.strip_prefix("7733;rows;").or_else(|| (body == "7733;rows").then_some("")) {
                 out.push((at, Found::Rows(UiRow::parse_list(list))));
             } else if let Some(sock) = body.strip_prefix("7733;nvim;") {
@@ -297,6 +307,17 @@ impl MarkScanner {
 }
 
 impl Session {
+    /// The program in front in this terminal (the pty's foreground process group).
+    pub fn foreground(&self) -> Option<String> {
+        use std::os::fd::AsRawFd;
+        let fd = self.pty.lock().ok()?.file().as_raw_fd();
+        let pg = unsafe { libc::tcgetpgrp(fd) };
+        if pg <= 0 {
+            return None;
+        }
+        std::fs::read_to_string(format!("/proc/{pg}/comm")).ok().map(|s| s.trim().to_string())
+    }
+
     /// Starts `cmd` (or the login shell) in a new pty, read by zash's own loop.
     pub fn spawn(cmd: Option<Vec<String>>, workdir: Option<std::path::PathBuf>, grid: Grid, scrollback: usize, sink: Sink) -> std::io::Result<Session> {
         let config = term::Config { scrolling_history: scrollback, kitty_keyboard: false, ..Default::default() };
@@ -329,9 +350,10 @@ impl Session {
         let graphics: Arc<Mutex<crate::graphics::Graphics>> = Arc::default();
         let cell_px = Arc::new(Mutex::new((grid.cell_w, grid.cell_h)));
         let (t, m, l, pp, rv, nv, ps, ur) = (term.clone(), marks.clone(), listener.clone(), popup.clone(), reverse.clone(), nvim_sock.clone(), popup_style.clone(), ui_rows.clone());
-        let (gr, cp) = (graphics.clone(), cell_px.clone());
-        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, rv, nv, ps, ur, gr, cp, l))?;
-        Ok(Session { term, writer, pty, grid, marks, popup, reverse, nvim_sock, popup_style, ui_rows, graphics, cell_px, pid })
+        let claims: Arc<Mutex<Claims>> = Arc::default();
+        let (gr, cp, cl) = (graphics.clone(), cell_px.clone(), claims.clone());
+        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, rv, nv, ps, ur, gr, cp, cl, l))?;
+        Ok(Session { term, writer, pty, grid, marks, popup, reverse, nvim_sock, popup_style, ui_rows, graphics, cell_px, claims, pid })
     }
 
     /// Bytes for the program, as if typed.
@@ -369,7 +391,7 @@ impl Session {
 }
 
 /// Reads the program's output, notes shell marks, feeds the parser.
-fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, popup: Arc<Mutex<Option<Popup>>>, reverse: Arc<std::sync::atomic::AtomicBool>, nvim_sock: Arc<Mutex<Option<String>>>, popup_style: Arc<Mutex<String>>, ui_rows: Arc<Mutex<Vec<UiRow>>>, graphics: Arc<Mutex<crate::graphics::Graphics>>, cell_px: Arc<Mutex<(f32, f32)>>, listener: Listener) {
+fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, popup: Arc<Mutex<Option<Popup>>>, reverse: Arc<std::sync::atomic::AtomicBool>, nvim_sock: Arc<Mutex<Option<String>>>, popup_style: Arc<Mutex<String>>, ui_rows: Arc<Mutex<Vec<UiRow>>>, graphics: Arc<Mutex<crate::graphics::Graphics>>, cell_px: Arc<Mutex<(f32, f32)>>, claims: Arc<Mutex<Claims>>, listener: Listener) {
     use alacritty_terminal::grid::Dimensions;
     let mut parser: alacritty_terminal::vte::ansi::Processor = alacritty_terminal::vte::ansi::Processor::new();
     let mut scanner = MarkScanner::default();
@@ -426,6 +448,27 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                     }
                     Found::Rows(rows) => {
                         *ui_rows.lock().unwrap() = rows;
+                        continue;
+                    }
+                    Found::Keys(body) => {
+                        claims.lock().unwrap().apply(&body);
+                        continue;
+                    }
+                    Found::Web(body) => {
+                        if let Some((rows, url)) = crate::web::parse(&body) {
+                            let at = (t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize, t.grid().cursor.point.column.0);
+                            let cols = t.grid().columns().saturating_sub(at.1).max(1);
+                            let (cw, ch) = *cell_px.lock().unwrap();
+                            let id = graphics.lock().unwrap().next_web_id();
+                            let wl = listener.clone();
+                            let wake: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                                use alacritty_terminal::event::EventListener;
+                                wl.send_event(alacritty_terminal::event::Event::Wakeup);
+                            });
+                            if let Some(v) = crate::web::View::open(id, &url, (cols as f32 * cw) as u32, (rows as f32 * ch) as u32, wake) {
+                                graphics.lock().unwrap().add_web(v, at, cols, rows);
+                            }
+                        }
                         continue;
                     }
                     Found::Graphics(body) => {
@@ -583,5 +626,53 @@ mod ui_row_tests {
         assert_eq!(r[1].cols[0].1, "⟳ 4s");
         let out = s.scan(b"\x1b]7733;rows;\x07");
         assert_eq!(out[0].1, Found::Rows(Vec::new()));
+    }
+}
+
+/// Keys the program in front wants for itself (OSC 7733;keys): `all` the multiplexer
+/// keys (prefix and no-prefix bindings), or single chords in tmux notation (`C-Space`, `M-h`).
+#[derive(Default, Debug, PartialEq)]
+pub struct Claims {
+    pub all: bool,
+    pub keys: std::collections::HashSet<String>,
+}
+
+impl Claims {
+    pub fn apply(&mut self, msg: &str) {
+        match msg {
+            "all" => self.all = true,
+            "none" => *self = Claims::default(),
+            m => {
+                let list = |s: &str| s.split(',').map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect::<Vec<_>>();
+                if let Some(l) = m.strip_prefix("claim=") {
+                    self.keys.extend(list(l));
+                } else if let Some(l) = m.strip_prefix("release=") {
+                    for k in list(l) {
+                        self.keys.remove(&k);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+
+    #[test]
+    fn claims_add_up_and_go() {
+        let mut s = MarkScanner::default();
+        let out = s.scan(b"\x1b]7733;keys;claim=M-h,C-Space\x07");
+        let Found::Keys(k) = &out[0].1 else { panic!() };
+        let mut c = Claims::default();
+        c.apply(k);
+        assert!(c.keys.contains("M-h") && c.keys.contains("C-Space") && !c.all);
+        c.apply("release=M-h");
+        assert!(!c.keys.contains("M-h"));
+        c.apply("all");
+        assert!(c.all);
+        c.apply("none");
+        assert_eq!(c, Claims::default());
     }
 }

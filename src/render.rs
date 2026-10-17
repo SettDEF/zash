@@ -1289,6 +1289,8 @@ fn powerline(c: char) -> Option<Powerline> {
 #[derive(Clone)]
 pub struct ImageView {
     pub img: crate::graphics::Image,
+    /// a live surface (a web area): its texture key and frame number
+    pub live: Option<(u64, u64)>,
     /// screen row of its top (negative: partly scrolled out above)
     pub row: i64,
     pub col: usize,
@@ -1306,8 +1308,14 @@ impl Frame {
             if row + p.rows as i64 <= 0 || row >= lines {
                 continue;
             }
-            if let Some(img) = g.images.get(&p.img) {
-                self.images.push(ImageView { img: img.clone(), row, col: p.col, cols: p.cols, rows: p.rows });
+            if let Some(v) = g.webs.get(&p.img) {
+                let frame = v.frame.lock().unwrap().clone();
+                if let Some(img) = frame {
+                    let generation = v.generation.load(std::sync::atomic::Ordering::Relaxed);
+                    self.images.push(ImageView { img, live: Some((p.img as u64 | 1 << 40, generation)), row, col: p.col, cols: p.cols, rows: p.rows });
+                }
+            } else if let Some(img) = g.images.get(&p.img) {
+                self.images.push(ImageView { img: img.clone(), live: None, row, col: p.col, cols: p.cols, rows: p.rows });
             }
         }
         self
@@ -1341,7 +1349,7 @@ pub(crate) struct Images {
     bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// by the pixels' address: (texture, its size)
-    textures: std::collections::HashMap<usize, (wgpu::Texture, (u32, u32))>,
+    textures: std::collections::HashMap<usize, (wgpu::Texture, (u32, u32), u64)>,
     /// this frame's draws: bind group and scissor rect
     draws: Vec<(wgpu::BindGroup, wgpu::Buffer, [u32; 4])>,
 }
@@ -1383,9 +1391,24 @@ impl Images {
         self.draws.clear();
         let mut seen = std::collections::HashSet::new();
         for (iv, rect, clip) in list {
-            let key = std::sync::Arc::as_ptr(&iv.img.rgba) as usize;
+            // a still image by its pixels; a live surface by its key, updated when its frame changes
+            let key = iv.live.map(|l| l.0 as usize).unwrap_or(std::sync::Arc::as_ptr(&iv.img.rgba) as usize);
+            let generation = iv.live.map(|l| l.1).unwrap_or(0);
             seen.insert(key);
             let (tw, th) = (iv.img.w, iv.img.h);
+            let stale = self.textures.get(&key).is_some_and(|t| t.1 != (tw, th));
+            if stale {
+                self.textures.remove(&key);
+            }
+            if let Some(t) = self.textures.get_mut(&key).filter(|t| t.2 != generation) {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: &t.0, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    &iv.img.rgba,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * tw), rows_per_image: Some(th) },
+                    wgpu::Extent3d { width: tw, height: th, depth_or_array_layers: 1 },
+                );
+                t.2 = generation;
+            }
             if !self.textures.contains_key(&key) {
                 let tex = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("zash image"),
@@ -1403,9 +1426,9 @@ impl Images {
                     wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * tw), rows_per_image: Some(th) },
                     wgpu::Extent3d { width: tw, height: th, depth_or_array_layers: 1 },
                 );
-                self.textures.insert(key, (tex, (tw, th)));
+                self.textures.insert(key, (tex, (tw, th), generation));
             }
-            let (tex, _) = &self.textures[&key];
+            let (tex, _, _) = &self.textures[&key];
             let view = tex.create_view(&Default::default());
             let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             queue.write_buffer(&ubuf, 0, &as_bytes(&[w as f32, h as f32, 0.0, 0.0, rect[0], rect[1], rect[2], rect[3]]));

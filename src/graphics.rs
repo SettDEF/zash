@@ -30,6 +30,8 @@ pub struct Graphics {
     next_auto: u32,
     /// bumped on every change, so the renderer knows when to look again
     pub generation: u64,
+    /// web areas (OSC 7733;web), by the id their placement carries
+    pub webs: HashMap<u32, Arc<crate::web::View>>,
 }
 
 /// What a command asks of the terminal after it was handled.
@@ -80,24 +82,7 @@ fn decode(keys: &HashMap<String, String>, data: Vec<u8>) -> Result<Image, String
         _ => data,
     };
     match num("f").unwrap_or(32) {
-        100 => {
-            let dec = png::Decoder::new(std::io::Cursor::new(data));
-            let mut r = dec.read_info().map_err(|e| format!("EBADPNG:{e}"))?;
-            let mut buf = vec![0; r.output_buffer_size()];
-            let info = r.next_frame(&mut buf).map_err(|e| format!("EBADPNG:{e}"))?;
-            let px = &buf[..info.buffer_size()];
-            let rgba: Vec<u8> = match info.color_type {
-                png::ColorType::Rgba => px.to_vec(),
-                png::ColorType::Rgb => px.chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
-                png::ColorType::GrayscaleAlpha => px.chunks(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
-                png::ColorType::Grayscale => px.iter().flat_map(|&g| [g, g, g, 255]).collect(),
-                png::ColorType::Indexed => return Err("EBADPNG:indexed colours".into()),
-            };
-            if info.bit_depth != png::BitDepth::Eight {
-                return Err("EBADPNG:only 8-bit".into());
-            }
-            Ok(Image { w: info.width, h: info.height, rgba: Arc::new(rgba) })
-        }
+        100 => decode_png(data),
         f @ (24 | 32) => {
             let (w, h) = (num("s").ok_or("EINVAL:no width")?, num("v").ok_or("EINVAL:no height")?);
             let n = (w * h) as usize;
@@ -109,6 +94,26 @@ fn decode(keys: &HashMap<String, String>, data: Vec<u8>) -> Result<Image, String
         }
         other => Err(format!("EINVAL:format {other}")),
     }
+}
+
+/// A PNG as RGBA pixels (8-bit; grey, RGB and their alpha forms).
+pub fn decode_png(data: Vec<u8>) -> Result<Image, String> {
+    let dec = png::Decoder::new(std::io::Cursor::new(data));
+    let mut r = dec.read_info().map_err(|e| format!("EBADPNG:{e}"))?;
+    let mut buf = vec![0; r.output_buffer_size()];
+    let info = r.next_frame(&mut buf).map_err(|e| format!("EBADPNG:{e}"))?;
+    if info.bit_depth != png::BitDepth::Eight {
+        return Err("EBADPNG:only 8-bit".into());
+    }
+    let px = &buf[..info.buffer_size()];
+    let rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => px.to_vec(),
+        png::ColorType::Rgb => px.chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => px.chunks(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
+        png::ColorType::Grayscale => px.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::Indexed => return Err("EBADPNG:indexed colours".into()),
+    };
+    Ok(Image { w: info.width, h: info.height, rgba: Arc::new(rgba) })
 }
 
 impl Graphics {
@@ -202,6 +207,18 @@ impl Graphics {
         self.generation += 1;
         let advance = (num("C") != Some(1)).then_some((rows.saturating_sub(1), cols));
         Outcome { reply: reply(num("i").unwrap_or(0), "OK", false), advance }
+    }
+
+    pub fn next_web_id(&mut self) -> u32 {
+        self.next_auto += 1;
+        0x6000_0000 + self.next_auto
+    }
+
+    /// A web area at the cursor: `cols`×`rows` cells showing the view's frames.
+    pub fn add_web(&mut self, view: Arc<crate::web::View>, at: (usize, usize), cols: usize, rows: usize) {
+        self.places.push(Placement { img: view.id, line: at.0, col: at.1, cols, rows });
+        self.webs.insert(view.id, view);
+        self.generation += 1;
     }
 
     /// Images no placement uses any more are freed.

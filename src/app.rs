@@ -76,6 +76,9 @@ struct App {
     mods: ModifiersState,
     font_pt: f32,
     mouse: (f64, f64),
+    /// the web area that has the keyboard (by its view id), and the held button
+    web_focus: Option<u32>,
+    web_btn: Option<&'static str>,
     selecting: bool,
     scroll_acc: f64,
     /// the button held down in a Neovim pane (for drags)
@@ -96,7 +99,7 @@ pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::Pat
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -218,6 +221,82 @@ impl App {
         let offset = s.term.lock().grid().display_offset() as i32;
         let side = if col_f.fract() < 0.5 { Side::Left } else { Side::Right };
         Some((Point::new(Line(row as i32 - offset), Column(col)), side))
+    }
+
+    /// The web area under a window position, and the position inside it (pixels).
+    fn web_hit(&self, x: f64, y: f64) -> Option<(std::sync::Arc<crate::web::View>, f32, f32)> {
+        let g = self.gpu.as_ref()?;
+        let s = self.sess()?;
+        let f = self.focus_rect()?;
+        let r = &g.renderer;
+        let (ox, oy) = r.origin(f.x, f.y, f.w, f.h);
+        let top = { let t = s.term.lock(); t.grid().history_size() as i64 - t.grid().display_offset() as i64 };
+        let gr = s.graphics.lock().unwrap();
+        gr.places.iter().rev().find_map(|p| {
+            let v = gr.webs.get(&p.img)?;
+            let (px, py) = (ox + p.col as f32 * r.cell_w, oy + (p.line as i64 - top) as f32 * r.cell_h);
+            let (lx, ly) = (x as f32 - px, y as f32 - py);
+            (lx >= 0.0 && ly >= 0.0 && lx < p.cols as f32 * r.cell_w && ly < p.rows as f32 * r.cell_h).then(|| (v.clone(), lx, ly))
+        })
+    }
+
+    fn web_focused(&self) -> Option<std::sync::Arc<crate::web::View>> {
+        let id = self.web_focus?;
+        self.sess()?.graphics.lock().unwrap().webs.get(&id).cloned()
+    }
+
+    /// A key for the web area that has the keyboard; false: not one of these.
+    fn web_key(&mut self, ev: &KeyEvent) -> bool {
+        let Some(v) = self.web_focused() else {
+            self.web_focus = None;
+            return false;
+        };
+        let m = self.mods;
+        let mods = u32::from(m.alt_key()) | u32::from(m.control_key()) << 1 | u32::from(m.shift_key()) << 3;
+        match &ev.logical_key {
+            // Esc gives the keyboard back to the terminal; Shift+Esc is Esc for the page
+            Key::Named(NamedKey::Escape) if !m.shift_key() => {
+                self.web_focus = None;
+                self.redraw();
+            }
+            Key::Named(NamedKey::Escape) => v.key("Escape", 0),
+            Key::Named(NamedKey::ArrowLeft) if m.alt_key() => v.back(),
+            Key::Named(NamedKey::F5) => v.reload(),
+            Key::Named(n) => {
+                let name = match n {
+                    NamedKey::Enter => "Enter",
+                    NamedKey::Backspace => "Backspace",
+                    NamedKey::Tab => "Tab",
+                    NamedKey::Delete => "Delete",
+                    NamedKey::ArrowLeft => "ArrowLeft",
+                    NamedKey::ArrowRight => "ArrowRight",
+                    NamedKey::ArrowUp => "ArrowUp",
+                    NamedKey::ArrowDown => "ArrowDown",
+                    NamedKey::Home => "Home",
+                    NamedKey::End => "End",
+                    NamedKey::PageUp => "PageUp",
+                    NamedKey::PageDown => "PageDown",
+                    NamedKey::Space => {
+                        v.text(" ");
+                        return true;
+                    }
+                    _ => return true,
+                };
+                v.key(name, mods);
+            }
+            Key::Character(c) => {
+                if m.control_key() && m.shift_key() && c.eq_ignore_ascii_case("v") {
+                    // the system clipboard into the page
+                    v.text(&clipboard_get(false));
+                } else if m.control_key() || m.alt_key() {
+                    v.key(c.as_str(), mods);
+                } else {
+                    v.text(ev.text.as_deref().unwrap_or(c.as_str()));
+                }
+            }
+            _ => {}
+        }
+        true
     }
 
     /// The focused pane's cell under a window position (0-based column, row).
@@ -679,6 +758,18 @@ impl App {
 
     /// Pane and tab keys (prefix, `-n` and repeat bindings). True when the key was used.
     fn tmux_key(&mut self, ev: &KeyEvent, mods: Mods) -> bool {
+        // keys the program in front claimed (OSC 7733;keys) are its own: zash steps aside;
+        // tmux sends no claims, so a multiplexer in front counts as claiming all
+        if !self.prefix {
+            let name = Self::chord(ev, mods).map(|c| format!("{}{}{}", if c.ctrl { "C-" } else { "" }, if c.alt { "M-" } else { "" }, c.key));
+            let claimed = self.sess().is_some_and(|s| {
+                let c = s.claims.lock().unwrap();
+                c.all || name.as_ref().is_some_and(|n| c.keys.contains(n))
+            });
+            if claimed || self.sess().and_then(|s| s.foreground()).is_some_and(|f| f == "zeit" || f.starts_with("tmux")) {
+                return false;
+            }
+        }
         let Some(chord) = Self::chord(ev, mods) else { return self.prefix }; // a modifier alone keeps the prefix waiting
         let now = std::time::Instant::now();
         if self.prefix {
@@ -724,6 +815,9 @@ impl App {
     fn key(&mut self, ev: &KeyEvent) {
         let m = self.mods;
         let mods = Mods { ctrl: m.control_key(), alt: m.alt_key(), shift: m.shift_key() };
+        if self.web_focus.is_some() && self.web_key(ev) {
+            return;
+        }
         if self.search.is_some() {
             return self.search_key(ev, mods);
         }
@@ -937,6 +1031,19 @@ impl App {
         let scroll_px = self.glide + frac_px;
         let cell_h = self.gpu.as_ref().map(|g| g.renderer.cell_h).unwrap_or(16.0);
         let Some(tab) = self.tabs.get(self.active) else { return };
+        // web areas follow their cells' size in pixels (the window, the font), at the screen's scale
+        if let Some(g) = self.gpu.as_ref() {
+            crate::web::set_scale(g.window.scale_factor() as f32);
+            let (cw, chh) = (g.renderer.cell_w, g.renderer.cell_h);
+            for p in &tab.panes {
+                let gr = p.session.graphics.lock().unwrap();
+                for pl in &gr.places {
+                    if let Some(v) = gr.webs.get(&pl.img) {
+                        v.resize((pl.cols as f32 * cw) as u32, (pl.rows as f32 * chh) as u32);
+                    }
+                }
+            }
+        }
         // every pane of the shown tab, copied out of its terminal
         let rects = self.pane_rects(self.active);
         let mut frames: Vec<(u64, Rect, Frame)> = Vec::new();
@@ -1243,6 +1350,12 @@ impl ApplicationHandler<ZEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
+                if self.web_focus.is_some() {
+                    if let Some((v, x, y)) = self.web_hit(position.x, position.y) {
+                        v.mouse("moved", x, y, self.web_btn.unwrap_or("none"), 0);
+                        return;
+                    }
+                }
                 let cell = self.cell_at(position.x, position.y);
                 if let (Some(n), Some(b)) = (self.pane().and_then(|p| p.nvim.as_ref()), self.nvim_btn) {
                     if cell != self.last_cell {
@@ -1281,6 +1394,25 @@ impl ApplicationHandler<ZEvent> for App {
                     if let Some(id) = hit {
                         self.focus_pane(id);
                     }
+                }
+                // a web area: the click is the page's, and the keyboard goes with it
+                if let Some((v, x, y)) = self.web_hit(self.mouse.0, self.mouse.1) {
+                    let b = match button { MouseButton::Left => "left", MouseButton::Right => "right", _ => "middle" };
+                    if pressed {
+                        let now = std::time::Instant::now();
+                        let double = self.clicks.0.elapsed() < std::time::Duration::from_millis(400) && self.web_focus == Some(v.id);
+                        self.clicks = (now, if double { 2 } else { 1 }, self.last_cell);
+                        self.web_focus = Some(v.id);
+                        self.web_btn = Some(b);
+                        v.mouse("pressed", x, y, b, self.clicks.1 as u32);
+                    } else {
+                        self.web_btn = None;
+                        v.mouse("released", x, y, b, self.clicks.1 as u32);
+                    }
+                    self.redraw();
+                    return;
+                } else if pressed {
+                    self.web_focus = None;
                 }
                 if let Some(n) = self.pane().and_then(|p| p.nvim.as_ref()) {
                     let (col, row) = self.cell_at(self.mouse.0, self.mouse.1);
@@ -1339,6 +1471,15 @@ impl ApplicationHandler<ZEvent> for App {
                     MouseScrollDelta::LineDelta(_, y) => y as f64 * 3.0,
                     MouseScrollDelta::PixelDelta(p) => p.y / cell_h,
                 };
+                // over a web area the wheel scrolls the page (in its own pixels)
+                if let Some((v, x, y)) = self.web_hit(self.mouse.0, self.mouse.1) {
+                    let px = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => -(y as f32) * 100.0,
+                        MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
+                    };
+                    v.wheel(x, y, px);
+                    return;
+                }
                 self.scroll_acc += lines;
                 let whole = self.scroll_acc.trunc() as i32;
                 if whole == 0 {
