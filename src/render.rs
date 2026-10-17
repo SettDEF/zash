@@ -640,7 +640,15 @@ impl Renderer {
             let clip = [p.x, p.y.max(self.top), p.w, p.y + p.h - p.y.max(self.top)];
             if let Some(z) = &p.frame.float {
                 // under the text: a soft shadow, the edge (the accent when it has the keyboard), the panel
-                let r = [ox + z.x as f32 * self.cell_w, oy + z.y as f32 * self.cell_h, z.w as f32 * self.cell_w, z.h as f32 * self.cell_h];
+                let mut r = [ox + z.x as f32 * self.cell_w, oy + z.y as f32 * self.cell_h, z.w as f32 * self.cell_w, z.h as f32 * self.cell_h];
+                // docked at the last column or row: out to the window's edge (cells rarely fill it)
+                let edge = 4.0;
+                if z.x + z.w >= p.frame.cols {
+                    r[2] = (p.x + p.w - edge - r[0]).max(r[2]);
+                }
+                if z.y + z.h >= p.frame.rows.len() {
+                    r[3] = (p.y + p.h - edge - r[1]).max(r[3]);
+                }
                 let rad = 12.0;
                 rects.push(Rect { xywh: [r[0] - 14.0, r[1] - 10.0, r[2] + 28.0, r[3] + 28.0], color: [0.0, 0.0, 0.0, 0.34], p: [rad, 14.0] });
                 let edge = if z.focus { let mut c = p.frame.cursor_color.f32(); c[3] = 0.85; c } else { let mut c = p.frame.fg.f32(); c[3] = 0.16; c };
