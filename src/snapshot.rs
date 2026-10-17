@@ -42,9 +42,23 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
         // give the program a moment to start, then type at a human-ish pace
         std::thread::sleep(Duration::from_millis(400));
         let app_cursor = session.term.lock().mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR);
-        // <Sleep:MS> pauses between keys (a program that needs time to get ready)
+        // <Sleep:MS> pauses between keys (a program that needs time to get ready);
+        // <Mouse:B;X;Y;M> sends one SGR mouse report whole (M press or motion, m release)
         let mut rest = keys.as_str();
         loop {
+            let next = [rest.find("<Sleep:"), rest.find("<Mouse:")].into_iter().flatten().min();
+            if let Some(i) = next.filter(|i| rest[*i..].starts_with("<Mouse:")) {
+                for b in crate::input::encode_notation(&rest[..i], app_cursor) {
+                    session.write(b);
+                    std::thread::sleep(Duration::from_millis(8));
+                }
+                let (spec, tail) = rest[i + 7..].split_once('>').unwrap_or((&rest[i + 7..], ""));
+                let (nums, kind) = spec.split_at(spec.len().saturating_sub(1));
+                session.write(format!("\x1b[<{}{kind}", nums.trim_end_matches(';')).into_bytes());
+                std::thread::sleep(Duration::from_millis(30));
+                rest = tail;
+                continue;
+            }
             let (now, after) = match rest.find("<Sleep:") {
                 Some(i) => (&rest[..i], Some(&rest[i + 7..])),
                 None => (rest, None),
