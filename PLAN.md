@@ -145,6 +145,9 @@ draws it — without breaking the grid for everything else.
   like a theme; `zash preset list`, `zash preset try NAME` previews one
   without touching the config.
 - **Triggers**: a regex on output runs an action.
+- **Command rules** (with zeit): Lua `z.on_command` decides where a typed
+  command runs (a bottom pane for builds that closes on success, a float for
+  servers, a new tab for ssh); the zsh integration asks before the line runs.
 - **Hooks**: `command.start`, `command.end` (notify when a long command
   finishes while you are elsewhere), `cwd.changed`, `prompt`, `output`, `bell`.
 - **Remote control**: everything zash does is a zett command, so scripts,
