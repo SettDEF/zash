@@ -80,7 +80,7 @@ pub struct Frame {
     /// images (Kitty graphics) on screen
     pub images: Vec<ImageView>,
     /// a multiplexer's app popup: zash draws its frame (the cells under it are blanked)
-    pub zelt: Option<crate::graphics::Zelt>,
+    pub float: Option<crate::graphics::Float>,
 }
 
 fn resolve(c: AColor, term_colors: &alacritty_terminal::term::color::Colors, p: &Palette, bold: bool) -> Rgb {
@@ -143,7 +143,7 @@ impl Frame {
                 }
             }
         }
-        Frame { zelt: None, popup_look: crate::config::PopupLook::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() }
+        Frame { float: None, popup_look: crate::config::PopupLook::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -629,13 +629,13 @@ impl Renderer {
         let (cur, animating) = self.cursor_motion(frame, fox, foy);
         let mut rects = Vec::new();
         let mut over = Vec::new();
-        // zelts (a multiplexer's app popups): their pixel rect, for the title and buttons later
-        let mut zelts: Vec<([f32; 4], crate::graphics::Zelt, Rgb, Rgb, Rgb)> = Vec::new();
+        // floats (a multiplexer's app popups): their pixel rect, for the title and buttons later
+        let mut floats: Vec<([f32; 4], crate::graphics::Float, Rgb, Rgb, Rgb)> = Vec::new();
         for p in panes {
             self.shape_rows(p.id, p.frame, p.w - 2.0 * self.pad);
             let (ox, oy) = self.origin(p.x, p.y, p.w, p.h);
             let clip = [p.x, p.y.max(self.top), p.w, p.y + p.h - p.y.max(self.top)];
-            if let Some(z) = &p.frame.zelt {
+            if let Some(z) = &p.frame.float {
                 // under the text: a soft shadow, the edge (the accent when it has the keyboard), the panel
                 let r = [ox + z.x as f32 * self.cell_w, oy + z.y as f32 * self.cell_h, z.w as f32 * self.cell_w, z.h as f32 * self.cell_h];
                 let rad = 12.0;
@@ -645,7 +645,7 @@ impl Renderer {
                 let mut panel = p.frame.bar_bg.f32();
                 panel[3] = 0.97;
                 rects.push(Rect { xywh: r, color: panel, p: [rad, 0.0] });
-                zelts.push((r, z.clone(), p.frame.fg, p.frame.cursor_color, p.frame.fail_color));
+                floats.push((r, z.clone(), p.frame.fg, p.frame.cursor_color, p.frame.fail_color));
             }
             rects.extend(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy, clip));
             over.extend(self.overlay_list(p.frame, ox, oy, clip));
@@ -690,8 +690,8 @@ impl Renderer {
             let w = b.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
             (b, w)
         };
-        // the zelts' title bars: the name, and the buttons on the cells the multiplexer reads clicks from
-        for (r, z, fg, accent, fail) in &zelts {
+        // the floats' title bars: the name, and the buttons on the cells the multiplexer reads clicks from
+        for (r, z, fg, accent, fail) in &floats {
             let dim = dim6(*fg);
             let (b, _) = label(&mut self.font_system, &self.family, &z.title, if z.focus { *fg } else { dim }, self.font_px, self.cell_h);
             labels.push((b, r[0] + self.cell_w * 1.5, r[1]));
@@ -1352,8 +1352,8 @@ impl Frame {
                 }
             }
         }
-        // a zelt: its frame ring of cells is zash's to draw (the text frame the multiplexer drew goes)
-        if let Some(z) = g.zelt.clone().filter(|_| term.grid().display_offset() == 0) {
+        // a float: its frame ring of cells is zash's to draw (the text frame the multiplexer drew goes)
+        if let Some(z) = g.float.clone().filter(|_| term.grid().display_offset() == 0) {
             for (y, row) in self.rows.iter_mut().enumerate().skip(z.y).take(z.h) {
                 for (x, c) in row.iter_mut().enumerate().skip(z.x).take(z.w) {
                     if y == z.y || y + 1 == z.y + z.h || x == z.x || x + 1 == z.x + z.w {
@@ -1365,7 +1365,7 @@ impl Frame {
                     }
                 }
             }
-            self.zelt = Some(z);
+            self.float = Some(z);
         }
         let top = term.grid().history_size() as i64 - term.grid().display_offset() as i64;
         let lines = self.rows.len() as i64;
