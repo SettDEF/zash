@@ -334,6 +334,8 @@ pub struct Renderer {
     pub cursor_trail: bool,
     /// background opacity (pre-multiplied into the clear colour)
     pub opacity: f32,
+    /// where the mouse is (pixels), for hover on what zash draws itself (zfloat buttons)
+    pub pointer: Option<(f32, f32)>,
     anim: Option<CursorAnim>,
     /// text placement: centred in the leftover space, and moved by an offset (pixels)
     pub center: bool,
@@ -390,6 +392,7 @@ impl Renderer {
             cursor_ms: cfg.cursor_ms,
             cursor_trail: cfg.cursor_trail,
             opacity: cfg.opacity,
+            pointer: None,
             anim: None,
             blur: None,
             format,
@@ -645,6 +648,12 @@ impl Renderer {
                 let mut panel = p.frame.bar_bg.f32();
                 panel[3] = 0.97;
                 rects.push(Rect { xywh: r, color: panel, p: [rad, 0.0] });
+                // the title bar: a slightly lighter band on its row (square under it), a hairline below
+                let f = p.frame.fg.f32();
+                let band = [panel[0] * 0.93 + f[0] * 0.07, panel[1] * 0.93 + f[1] * 0.07, panel[2] * 0.93 + f[2] * 0.07, panel[3]];
+                rects.push(Rect { xywh: [r[0], r[1], r[2], self.cell_h + rad], color: band, p: [rad, 0.0] });
+                rects.push(Rect { xywh: [r[0], r[1] + self.cell_h, r[2], rad], color: panel, p: [0.0, 0.0] });
+                rects.push(Rect { xywh: [r[0] + 1.0, r[1] + self.cell_h - 1.0, r[2] - 2.0, 1.0], color: [f[0], f[1], f[2], 0.10], p: [0.0, 0.0] });
                 floats.push((r, z.clone(), p.frame.fg, p.frame.cursor_color, p.frame.fail_color));
             }
             rects.extend(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy, clip));
@@ -699,8 +708,10 @@ impl Renderer {
             for (k, glyph) in [(1.0, "⌄"), (3.0, "–"), (5.0, "×")].into_iter().filter(|_| z.buttons) {
                 let cx = bx + (k + 0.5) * self.cell_w;
                 let cy = r[1] + self.cell_h * 0.5;
-                let d = self.cell_h * 0.78;
-                let col = if glyph == "×" { let mut c = fail.f32(); c[3] = if z.focus { 0.85 } else { 0.35 }; c } else { let mut c = fg.f32(); c[3] = 0.12; c };
+                // under the pointer: a little larger and stronger
+                let hot = self.pointer.is_some_and(|(px, py)| (px - cx).hypot(py - cy) < self.cell_h * 0.6);
+                let d = self.cell_h * if hot { 0.86 } else { 0.74 };
+                let col = if glyph == "×" { let mut c = fail.f32(); c[3] = if hot { 1.0 } else if z.focus { 0.85 } else { 0.35 }; c } else { let mut c = fg.f32(); c[3] = if hot { 0.30 } else { 0.12 }; c };
                 over.push(Rect { xywh: [cx - d / 2.0, cy - d / 2.0, d, d], color: col, p: [d / 2.0, 0.0] });
                 let (b, w) = label(&mut self.font_system, &self.family, glyph, if glyph == "×" { Rgb(255, 255, 255) } else { *fg }, self.font_px * 0.9, self.cell_h);
                 labels.push((b, cx - w / 2.0, r[1]));

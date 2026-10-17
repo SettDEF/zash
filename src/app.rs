@@ -1469,6 +1469,13 @@ impl ApplicationHandler<ZEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
+                // hover on the zfloat buttons zash draws: only a redraw when there is a zfloat
+                if let Some(g) = self.gpu.as_mut() {
+                    g.renderer.pointer = Some((position.x as f32, position.y as f32));
+                }
+                if self.sess().is_some_and(|s| s.graphics.lock().unwrap().float.is_some()) {
+                    self.redraw();
+                }
                 if self.web_focus.is_some() {
                     if let Some((v, x, y)) = self.web_hit(position.x, position.y) {
                         v.mouse("moved", x, y, self.web_btn.unwrap_or("none"), 0);
