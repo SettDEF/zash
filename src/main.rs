@@ -5,6 +5,15 @@
 //!   zash --snapshot [out.png] [--size 100x30] [--wait MS] -- CMD…
 //!                                 headless: run CMD, print the screen, render a PNG
 
+// std's eprintln! panics when stderr is a closed pipe (started by a launcher
+// that went away): zash died on its first message. This one drops the message.
+macro_rules! eprintln {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($t)*);
+    }};
+}
+
 mod app;
 mod watchdog;
 mod cli;
