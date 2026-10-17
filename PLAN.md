@@ -131,8 +131,19 @@ draws it — without breaking the grid for everything else.
   desktop.
 
 ### 9. Programmable
-- `term.lua` (part of zett's config): every setting, keymap, popup style,
-  status segment, theme rule, renderer, trigger and hook.
+- `~/.config/zash/init.lua`, Lua like Neovim, in the same shape as zeit's:
+  a **preset** as the starting point, a Doom-style **module list** (words and
+  +flags), `setup{…}` for details. Every setting, keymap, popup style, status
+  segment, theme rule, renderer, trigger and hook. (zash.toml keeps working
+  for the basics until init.lua lands.)
+- **Presets are starting points, not modes**: a named bundle of modules and
+  settings, loaded first, then changed line by line below. Shipped: *plain*
+  (fast and quiet), *glass* (blur, tinct, centred text, the blurred popup,
+  gliding cursor and scroll: today's look), *focus* (no chrome, larger text),
+  *retro* (CRT scanlines and glow, amber or green), *ide* (splits, the Neovim
+  UI, zeit and zett panes). Anyone can write one (one Lua file) and share it
+  like a theme; `zash preset list`, `zash preset try NAME` previews one
+  without touching the config.
 - **Triggers**: a regex on output runs an action.
 - **Hooks**: `command.start`, `command.end` (notify when a long command
   finishes while you are elsewhere), `cwd.changed`, `prompt`, `output`, `bell`.
