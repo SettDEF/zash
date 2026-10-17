@@ -1314,6 +1314,12 @@ impl ApplicationHandler<ZEvent> for App {
         let mut watched = vec![self.cfg.colors_file.clone()];
         watched.extend(self.cfg.glass_file.clone());
         watch_theme(self.proxy.clone(), watched);
+        // the settings: what can change in a running window does (all but the font family)
+        let mut settings = vec![crate::config::Config::file_path()];
+        if let Some(n) = std::env::var("ZASH_PRESET").ok().filter(|n| !n.is_empty()) {
+            settings.push(crate::config::Config::preset_path(&n));
+        }
+        watch_files(self.proxy.clone(), settings, || ZEvent::Settings);
         self.redraw();
     }
 
@@ -1322,6 +1328,28 @@ impl ApplicationHandler<ZEvent> for App {
             ZEvent::Drop(paths, x, y) => {
                 let scale = self.gpu.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0);
                 self.drop_files(paths, Some((x * scale, y * scale)));
+                return;
+            }
+            ZEvent::Settings => {
+                let new = crate::config::Config::load();
+                let font = (new.font_size_pt, new.line_height, new.padding) != (self.cfg.font_size_pt, self.cfg.line_height, self.cfg.padding);
+                // the palette stays tinct's; a new font family takes a new window
+                let keep = (self.cfg.palette.clone(), self.cfg.font_family.clone());
+                self.cfg = crate::config::Config { palette: keep.0, font_family: keep.1, ..new };
+                // the glass setting (the shell's Glass panel) keeps its say over the opacity
+                if let Some(o) = self.cfg.glass_file.as_ref().and_then(|g| crate::config::Config::read_glass(g)) {
+                    self.cfg.opacity = o;
+                }
+                if let Some(g) = self.gpu.as_mut() {
+                    g.renderer.opacity = self.cfg.opacity;
+                    g.renderer.cursor_ms = self.cfg.cursor_ms;
+                    g.renderer.cursor_trail = self.cfg.cursor_trail;
+                    g.renderer.invalidate();
+                }
+                if font {
+                    self.set_font(self.cfg.font_size_pt);
+                }
+                self.redraw();
                 return;
             }
             ZEvent::Theme => {
@@ -1599,6 +1627,10 @@ fn _assert_dims<T: Dimensions>(_: &T) {}
 /// One stat every two seconds on a background thread: negligible, and no frames
 /// are drawn unless the file really changed.
 fn watch_theme(proxy: EventLoopProxy<ZEvent>, paths: Vec<std::path::PathBuf>) {
+    watch_files(proxy, paths, || ZEvent::Theme)
+}
+
+fn watch_files(proxy: EventLoopProxy<ZEvent>, paths: Vec<std::path::PathBuf>, ev: fn() -> ZEvent) {
     std::thread::spawn(move || {
         let stamp = || paths.iter().map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect::<Vec<_>>();
         let mut last = stamp();
@@ -1607,7 +1639,7 @@ fn watch_theme(proxy: EventLoopProxy<ZEvent>, paths: Vec<std::path::PathBuf>) {
             let now = stamp();
             if now != last {
                 last = now;
-                if proxy.send_event(ZEvent::Theme).is_err() {
+                if proxy.send_event(ev()).is_err() {
                     return;
                 }
             }

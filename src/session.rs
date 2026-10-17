@@ -17,6 +17,8 @@ pub enum ZEvent {
     Term(u64, Event),
     /// tinct wrote new colours
     Theme,
+    /// the settings file (or the preset) changed
+    Settings,
     /// files dropped on the window (Wayland), and where (logical pixels)
     Drop(Vec<std::path::PathBuf>, f64, f64),
 }
