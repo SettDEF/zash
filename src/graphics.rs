@@ -39,13 +39,15 @@ pub struct Graphics {
     pub pinned: HashMap<u32, (Option<(usize, usize, usize, usize)>, bool)>,
     /// focus changes the multiplexer asked for: (id, focused)
     pub pin_focus: Vec<(u32, bool)>,
-    /// a multiplexer's app popup (OSC 7733;float): zash draws its frame, title and buttons
+    /// a multiplexer's app popup (OSC 7733;zfloat): zash draws its frame, title and buttons
     pub float: Option<ZFloat>,
 }
 
 /// Where a float is (cells, frame included), whether it has the keyboard, its name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ZFloat {
+    /// the preset, hide and close buttons (a zfloat's settings can leave them out)
+    pub buttons: bool,
     pub x: usize,
     pub y: usize,
     pub w: usize,
@@ -241,7 +243,7 @@ impl Graphics {
             let (head, title) = body.split_once(";title=").unwrap_or((body, ""));
             let kv: HashMap<&str, &str> = head.split(';').filter_map(|p| p.split_once('=')).collect();
             let n = |k: &str| kv.get(k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-            self.float = Some(ZFloat { x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
+            self.float = Some(ZFloat { buttons: kv.get("buttons") != Some(&"0"), x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
             self.generation += 1;
             return;
         }

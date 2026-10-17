@@ -696,7 +696,7 @@ impl Renderer {
             let (b, _) = label(&mut self.font_system, &self.family, &z.title, if z.focus { *fg } else { dim }, self.font_px, self.cell_h);
             labels.push((b, r[0] + self.cell_w * 1.5, r[1]));
             let bx = r[0] + (z.w as f32 - 9.0) * self.cell_w;
-            for (k, glyph) in [(1.0, "⌄"), (3.0, "–"), (5.0, "×")] {
+            for (k, glyph) in [(1.0, "⌄"), (3.0, "–"), (5.0, "×")].into_iter().filter(|_| z.buttons) {
                 let cx = bx + (k + 0.5) * self.cell_w;
                 let cy = r[1] + self.cell_h * 0.5;
                 let d = self.cell_h * 0.78;
