@@ -234,9 +234,10 @@ impl App {
         let f = self.focus_rect()?;
         let r = &g.renderer;
         let (ox, oy) = r.origin(f.x, f.y, f.w, f.h);
-        let top = { let t = s.term.lock(); t.grid().history_size() as i64 - t.grid().display_offset() as i64 };
+        // the terminal first, then the graphics, one lock each: the reader takes them in this
+        // order, and a second lock of the same graphics froze zash on every click
+        let (top, offset) = { let t = s.term.lock(); (t.grid().history_size() as i64 - t.grid().display_offset() as i64, t.grid().display_offset()) };
         let gr = s.graphics.lock().unwrap();
-        let offset = s.term.lock().grid().display_offset();
         if offset == 0 {
             for (id, (rect, _)) in &gr.pinned {
                 let (Some((cx, cy, cw, ch)), Some(v)) = (rect, gr.webs.get(id)) else { continue };
@@ -247,7 +248,6 @@ impl App {
                 }
             }
         }
-        let gr = s.graphics.lock().unwrap();
         gr.places.iter().rev().find_map(|p| {
             let v = gr.webs.get(&p.img)?;
             let (px, py) = (ox + p.col as f32 * r.cell_w, oy + (p.line as i64 - top) as f32 * r.cell_h);

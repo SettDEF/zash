@@ -57,6 +57,7 @@ pub fn start() {
                 reported = since;
                 let what = WHAT.lock().map(|w| *w).unwrap_or("");
                 log(&format!("stalled {} s while {what}", (now_ms() - since) / 1000));
+                stacks();
             }
         }
     });
@@ -71,10 +72,34 @@ mod tests {
         super::start();
         {
             let _b = super::busy("testing a stall");
-            std::thread::sleep(std::time::Duration::from_millis(4300));
+            std::thread::sleep(std::time::Duration::from_millis(9000));
         }
         let log = std::fs::read_to_string(home.join(".local/state/zash/zash.log")).unwrap_or_default();
+        let stacks = std::fs::read_to_string(home.join(format!(".local/state/zash/stall-{}.txt", std::process::id()))).unwrap_or_default();
         let _ = std::fs::remove_dir_all(&home);
         assert!(log.contains("stalled") && log.contains("testing a stall"), "{log:?}");
+        // with gdb about, the stacks show the stalled thread asleep in this test
+        if std::path::Path::new("/usr/bin/gdb").exists() {
+            assert!(stacks.contains("a_stall_is_logged"), "no stacks: {}", &stacks[..stacks.len().min(400)]);
+        }
+    }
+}
+
+/// Where every thread is, written beside the log (gdb, if there is one): the next freeze
+/// tells its own cause. ptrace is limited to parents here, so gdb is allowed in just for this.
+fn stacks() {
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let out = std::path::PathBuf::from(home).join(format!(".local/state/zash/stall-{}.txt", std::process::id()));
+    const PR_SET_PTRACER: libc::c_int = 0x5961_6d61;
+    unsafe { libc::prctl(PR_SET_PTRACER, libc::c_ulong::MAX, 0, 0, 0) };
+    let r = std::process::Command::new("gdb")
+        .args(["-p", &std::process::id().to_string(), "-batch", "-ex", "thread apply all bt 30"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    unsafe { libc::prctl(PR_SET_PTRACER, 0, 0, 0, 0) };
+    if let Ok(o) = r {
+        let _ = std::fs::write(&out, o.stdout);
+        log(&format!("thread stacks: {}", out.display()));
     }
 }
