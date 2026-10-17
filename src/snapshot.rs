@@ -99,7 +99,7 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
     if let Some((lines, _)) = glide {
         session.term.lock().scroll_display(alacritty_terminal::grid::Scroll::Delta(lines));
     }
-    let mut frame = { let t = session.term.lock(); Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &session.ui_rows.lock().unwrap()) };
+    let mut frame = { let t = session.term.lock(); Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &session.ui_rows.lock().unwrap()).with_images(&t, &session.graphics.lock().unwrap()) };
     if let Some((_, px)) = glide {
         let t = session.term.lock();
         frame = frame.with_scroll(&t, &pal, px, cfg_cell_h(cfg));

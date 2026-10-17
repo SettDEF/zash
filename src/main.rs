@@ -8,6 +8,7 @@
 mod app;
 mod config;
 mod dnd;
+mod graphics;
 mod input;
 mod keys;
 mod layout;

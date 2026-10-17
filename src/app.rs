@@ -966,7 +966,7 @@ impl App {
                 let t = s.term.lock();
                 let marks = s.marks.lock().unwrap();
                 let pal = if s.reverse.load(std::sync::atomic::Ordering::Relaxed) { self.cfg.palette.reversed() } else { self.cfg.palette.clone() };
-                let f = Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &s.ui_rows.lock().unwrap());
+                let f = Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &s.ui_rows.lock().unwrap()).with_images(&t, &s.graphics.lock().unwrap());
                 if id == tab.focus { f.with_scroll(&t, &pal, scroll_px, cell_h) } else { f }
             };
             if id == tab.focus {

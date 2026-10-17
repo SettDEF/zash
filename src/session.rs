@@ -92,6 +92,10 @@ pub struct Session {
     pub popup_style: Arc<Mutex<String>>,
     /// small two-column rows (zeit's job lines), by screen row
     pub ui_rows: Arc<Mutex<Vec<UiRow>>>,
+    /// images (Kitty graphics) and where they are placed
+    pub graphics: Arc<Mutex<crate::graphics::Graphics>>,
+    /// a cell in pixels (images are sized in cells)
+    pub cell_px: Arc<Mutex<(f32, f32)>>,
     pub term: Arc<FairMutex<Term<Listener>>>,
     writer: Arc<Mutex<File>>,
     pty: Arc<Mutex<tty::Pty>>,
@@ -119,6 +123,8 @@ pub enum Found {
     PopupStyle(String),
     /// rows another program (zeit) draws as small two-column lines: OSC 7733;rows;…
     Rows(Vec<UiRow>),
+    /// a Kitty graphics command: what follows `ESC _ G`
+    Graphics(String),
     /// DECSCNM: the whole screen in reverse video (light background), on or off
     Reverse(bool),
     Popup(Option<Popup>),
@@ -249,6 +255,26 @@ impl MarkScanner {
             }
             i = end + 1;
         }
+        // Kitty graphics (APC G … ESC \): images; one cut across reads waits for its end
+        let mut j = 0;
+        while let Some(p) = data[j..].windows(3).position(|w| w == b"\x1b_G") {
+            let start = j + p + 3;
+            match data[start..].windows(2).position(|w| w == b"\x1b\\") {
+                Some(e) => {
+                    let body = String::from_utf8_lossy(&data[start..start + e]).to_string();
+                    let after = start + e + 2;
+                    out.push((after.saturating_sub(carried).min(chunk.len()), Found::Graphics(body)));
+                    j = after;
+                }
+                None => {
+                    if data.len() - (j + p) < 1 << 20 {
+                        self.carry = data[j + p..].to_vec();
+                    }
+                    out.sort_by_key(|(at, _)| *at);
+                    return out;
+                }
+            }
+        }
         // DECSCNM (CSI ? 5 h / l), which the emulator does not keep: zash swaps the colours itself
         for (pat, on) in [(&b"\x1b[?5h"[..], true), (&b"\x1b[?5l"[..], false)] {
             let mut from = 0;
@@ -300,9 +326,12 @@ impl Session {
         let popup_style = Arc::new(Mutex::new(String::new()));
 
         let ui_rows = Arc::new(Mutex::new(Vec::new()));
+        let graphics: Arc<Mutex<crate::graphics::Graphics>> = Arc::default();
+        let cell_px = Arc::new(Mutex::new((grid.cell_w, grid.cell_h)));
         let (t, m, l, pp, rv, nv, ps, ur) = (term.clone(), marks.clone(), listener.clone(), popup.clone(), reverse.clone(), nvim_sock.clone(), popup_style.clone(), ui_rows.clone());
-        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, rv, nv, ps, ur, l))?;
-        Ok(Session { term, writer, pty, grid, marks, popup, reverse, nvim_sock, popup_style, ui_rows, pid })
+        let (gr, cp) = (graphics.clone(), cell_px.clone());
+        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, rv, nv, ps, ur, gr, cp, l))?;
+        Ok(Session { term, writer, pty, grid, marks, popup, reverse, nvim_sock, popup_style, ui_rows, graphics, cell_px, pid })
     }
 
     /// Bytes for the program, as if typed.
@@ -327,6 +356,7 @@ impl Session {
     }
 
     pub fn resize(&mut self, grid: Grid) {
+        *self.cell_px.lock().unwrap() = (grid.cell_w, grid.cell_h);
         if grid.cols == self.grid.cols && grid.rows == self.grid.rows {
             self.grid = grid;
             return;
@@ -339,7 +369,7 @@ impl Session {
 }
 
 /// Reads the program's output, notes shell marks, feeds the parser.
-fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, popup: Arc<Mutex<Option<Popup>>>, reverse: Arc<std::sync::atomic::AtomicBool>, nvim_sock: Arc<Mutex<Option<String>>>, popup_style: Arc<Mutex<String>>, ui_rows: Arc<Mutex<Vec<UiRow>>>, listener: Listener) {
+fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, popup: Arc<Mutex<Option<Popup>>>, reverse: Arc<std::sync::atomic::AtomicBool>, nvim_sock: Arc<Mutex<Option<String>>>, popup_style: Arc<Mutex<String>>, ui_rows: Arc<Mutex<Vec<UiRow>>>, graphics: Arc<Mutex<crate::graphics::Graphics>>, cell_px: Arc<Mutex<(f32, f32)>>, listener: Listener) {
     use alacritty_terminal::grid::Dimensions;
     let mut parser: alacritty_terminal::vte::ansi::Processor = alacritty_terminal::vte::ansi::Processor::new();
     let mut scanner = MarkScanner::default();
@@ -396,6 +426,24 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                     }
                     Found::Rows(rows) => {
                         *ui_rows.lock().unwrap() = rows;
+                        continue;
+                    }
+                    Found::Graphics(body) => {
+                        let at = (t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize, t.grid().cursor.point.column.0);
+                        let cell = *cell_px.lock().unwrap();
+                        let o = graphics.lock().unwrap().command(&body, cell, at);
+                        if let Some(r) = o.reply {
+                            use alacritty_terminal::event::EventListener;
+                            listener.send_event(alacritty_terminal::event::Event::PtyWrite(r));
+                        }
+                        // past the image, as Kitty does: to its last row, after its last column
+                        if let Some((down, right)) = o.advance {
+                            let mut seq = "\n".repeat(down);
+                            if right > 0 {
+                                seq.push_str(&format!("\x1b[{right}C"));
+                            }
+                            parser.advance(&mut *t, seq.as_bytes());
+                        }
                         continue;
                     }
                     Found::Mark(k, e) => (k, e),

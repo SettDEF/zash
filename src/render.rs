@@ -77,6 +77,8 @@ pub struct Frame {
     pub small: Vec<crate::session::UiRow>,
     /// the tones of those columns: good, bad, running, accent
     pub tones: [Rgb; 4],
+    /// images (Kitty graphics) on screen
+    pub images: Vec<ImageView>,
 }
 
 fn resolve(c: AColor, term_colors: &alacritty_terminal::term::color::Colors, p: &Palette, bold: bool) -> Rgb {
@@ -139,7 +141,7 @@ impl Frame {
                 }
             }
         }
-        Frame { popup_look: crate::config::PopupLook::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]] }
+        Frame { popup_look: crate::config::PopupLook::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -312,6 +314,7 @@ pub struct Renderer {
     /// height of the tab bar above the rows (0 with one tab)
     pub top: f32,
     rects: Rects,
+    images: Images,
     /// drawn after the text: marks that must stay visible over glyphs
     overlay: Rects,
     /// shaped rows per pane (by pane id)
@@ -364,6 +367,7 @@ impl Renderer {
         }
         let mut r = Renderer {
             rects: Rects::new(device, format),
+            images: Images::new(device, format),
             overlay: Rects::new(device, format),
             font_system: { let _ = &mut font_system; font_system },
             swash: SwashCache::new(),
@@ -648,6 +652,18 @@ impl Renderer {
             }
         }
         self.rects.upload(device, queue, &rects, width as f32, height as f32);
+        // images: placed in their pane's cells, clipped to the pane
+        let mut imgs = Vec::new();
+        for p in panes {
+            let (ox, oy) = self.origin(p.x, p.y, p.w, p.h);
+            let oy = oy + p.frame.scroll_px;
+            for iv in &p.frame.images {
+                let rect = [ox + iv.col as f32 * self.cell_w, oy + iv.row as f32 * self.cell_h, iv.cols as f32 * self.cell_w, iv.rows as f32 * self.cell_h];
+                let top = p.y.max(self.top);
+                imgs.push((iv.clone(), rect, [p.x, top, p.w, p.y + p.h - top]));
+            }
+        }
+        self.images.prepare(device, queue, &imgs, width, height);
         // labels drawn above everything: the tab bar, the popup and the search bar
         let mut labels: Vec<(Buffer, f32, f32)> = Vec::new();
         let label = |fs: &mut FontSystem, family: &str, txt: &str, fg: Rgb, px: f32, h: f32| {
@@ -845,6 +861,7 @@ impl Renderer {
                 // the usual frame: one pass
                 let mut p = pass(&mut enc, view, wgpu::LoadOp::Clear(clear));
                 self.rects.draw(&mut p);
+                self.images.draw(&mut p, width, height);
                 let _ = self.text.render(&self.atlas, &self.viewport, &mut p);
                 self.overlay.draw(&mut p);
                 let _ = self.text2.render(&self.atlas, &self.viewport, &mut p);
@@ -857,6 +874,7 @@ impl Renderer {
                 {
                     let mut p = pass(&mut enc, scene, wgpu::LoadOp::Clear(clear));
                     self.rects.draw(&mut p);
+                    self.images.draw(&mut p, width, height);
                     let _ = self.text.render(&self.atlas, &self.viewport, &mut p);
                 }
                 let (w, h) = (width as f32, height as f32);
@@ -1262,5 +1280,166 @@ fn powerline(c: char) -> Option<Powerline> {
         '\u{e0b4}' => Some(Powerline::RoundRight),
         '\u{e0b6}' => Some(Powerline::RoundLeft),
         _ => None,
+    }
+}
+
+// ── images (Kitty graphics) ──
+
+/// An image on screen: its pixels (shared), and where in the pane's cells.
+#[derive(Clone)]
+pub struct ImageView {
+    pub img: crate::graphics::Image,
+    /// screen row of its top (negative: partly scrolled out above)
+    pub row: i64,
+    pub col: usize,
+    pub cols: usize,
+    pub rows: usize,
+}
+
+impl Frame {
+    /// The placements that show on the screen, given the scroll position.
+    pub fn with_images<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, g: &crate::graphics::Graphics) -> Frame {
+        let top = term.grid().history_size() as i64 - term.grid().display_offset() as i64;
+        let lines = self.rows.len() as i64;
+        for p in &g.places {
+            let row = p.line as i64 - top;
+            if row + p.rows as i64 <= 0 || row >= lines {
+                continue;
+            }
+            if let Some(img) = g.images.get(&p.img) {
+                self.images.push(ImageView { img: img.clone(), row, col: p.col, cols: p.cols, rows: p.rows });
+            }
+        }
+        self
+    }
+}
+
+const IMAGE_WGSL: &str = r#"
+struct U { screen: vec4<f32>, rect: vec4<f32> };
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var smp: sampler;
+struct V { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> V {
+    var corners = array<vec2<f32>, 6>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0));
+    let c = corners[i];
+    let px = u.rect.xy + c * u.rect.zw;
+    var o: V;
+    o.pos = vec4(px.x / u.screen.x * 2.0 - 1.0, 1.0 - px.y / u.screen.y * 2.0, 0.0, 1.0);
+    o.uv = c;
+    return o;
+}
+@fragment fn fs(v: V) -> @location(0) vec4<f32> {
+    let c = textureSample(tex, smp, v.uv);
+    return vec4(c.rgb * c.a, c.a);
+}
+"#;
+
+/// Textured quads for images; a texture per image, kept while it shows.
+pub(crate) struct Images {
+    pipeline: wgpu::RenderPipeline,
+    bgl: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// by the pixels' address: (texture, its size)
+    textures: std::collections::HashMap<usize, (wgpu::Texture, (u32, u32))>,
+    /// this frame's draws: bind group and scissor rect
+    draws: Vec<(wgpu::BindGroup, wgpu::Buffer, [u32; 4])>,
+}
+
+impl Images {
+    pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Images {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("zash images"), source: wgpu::ShaderSource::Wgsl(IMAGE_WGSL.into()) });
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], ..Default::default() });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("zash images"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
+        Images { pipeline, bgl, sampler, textures: Default::default(), draws: Vec::new() }
+    }
+
+    /// This frame's images: textures made for new ones, unused ones dropped.
+    pub(crate) fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, list: &[(ImageView, [f32; 4], [f32; 4])], w: u32, h: u32) {
+        self.draws.clear();
+        let mut seen = std::collections::HashSet::new();
+        for (iv, rect, clip) in list {
+            let key = std::sync::Arc::as_ptr(&iv.img.rgba) as usize;
+            seen.insert(key);
+            let (tw, th) = (iv.img.w, iv.img.h);
+            if !self.textures.contains_key(&key) {
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("zash image"),
+                    size: wgpu::Extent3d { width: tw.max(1), height: th.max(1), depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    &iv.img.rgba,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * tw), rows_per_image: Some(th) },
+                    wgpu::Extent3d { width: tw, height: th, depth_or_array_layers: 1 },
+                );
+                self.textures.insert(key, (tex, (tw, th)));
+            }
+            let (tex, _) = &self.textures[&key];
+            let view = tex.create_view(&Default::default());
+            let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            queue.write_buffer(&ubuf, 0, &as_bytes(&[w as f32, h as f32, 0.0, 0.0, rect[0], rect[1], rect[2], rect[3]]));
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            // the pane's rectangle, inside the window
+            let x0 = clip[0].max(0.0) as u32;
+            let y0 = clip[1].max(0.0) as u32;
+            let x1 = ((clip[0] + clip[2]).min(w as f32)).max(0.0) as u32;
+            let y1 = ((clip[1] + clip[3]).min(h as f32)).max(0.0) as u32;
+            if x1 > x0 && y1 > y0 {
+                self.draws.push((bind, ubuf, [x0, y0, x1 - x0, y1 - y0]));
+            }
+        }
+        self.textures.retain(|k, _| seen.contains(k));
+    }
+
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass, w: u32, h: u32) {
+        if self.draws.is_empty() {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        for (bind, _, s) in &self.draws {
+            pass.set_scissor_rect(s[0], s[1], s[2], s[3]);
+            pass.set_bind_group(0, bind, &[]);
+            pass.draw(0..6, 0..1);
+        }
+        pass.set_scissor_rect(0, 0, w, h);
     }
 }

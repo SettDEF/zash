@@ -412,6 +412,7 @@ impl State {
             fail_color: p.ansi[1],
             small: Vec::new(),
             tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]],
+            images: Vec::new(),
         }
     }
 }
