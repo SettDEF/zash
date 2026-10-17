@@ -411,7 +411,9 @@ impl Config {
             Some(v) => c.opacity = v.clamp(0.1, 1.0),
             None => {
                 let home = std::env::var("HOME").unwrap_or_default();
-                let g = PathBuf::from(home).join(".config/wezterm/glass.lua");
+                // the shell's Glass panel writes zash's own file; WezTerm's until it has
+                let mine = PathBuf::from(&home).join(".config/zash/glass.lua");
+                let g = if mine.exists() { mine } else { PathBuf::from(&home).join(".config/wezterm/glass.lua") };
                 if let Some(o) = Self::read_glass(&g) { c.opacity = o; }
                 c.glass_file = Some(g);
             }
