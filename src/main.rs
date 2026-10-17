@@ -6,6 +6,7 @@
 //!                                 headless: run CMD, print the screen, render a PNG
 
 mod app;
+mod cli;
 mod config;
 mod dnd;
 mod graphics;
@@ -36,38 +37,66 @@ fn main() {
             }
         }
     }
-    // zash --web URL: a window that is the page (links opened with zash, the "Open with" portal)
-    if let Some(i) = args.iter().position(|a| a == "--web") {
-        let url = args.get(i + 1).cloned().unwrap_or_else(|| "about:blank".into());
+    if matches!(args.first().map(String::as_str), Some("-V" | "--version" | "version")) {
+        println!("zash {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if matches!(args.first().map(String::as_str), Some("-h" | "--help" | "help")) {
+        cli::print(&cli::HELP.replace("{version}", env!("CARGO_PKG_VERSION")));
+        return;
+    }
+    // zash open ADDRESS (also --web): a window that is the page
+    if matches!(args.first().map(String::as_str), Some("open" | "--web")) {
+        if args.iter().any(|a| a == "-h" || a == "--help") {
+            return cli::print(&format!("Open a web page in a window of its own.\n\n{}\n\n  <address>   a URL, a host (wikipedia.org) or words to search", cli::OPEN_USAGE));
+        }
+        let typed = args[1..].join(" ");
+        let url = if typed.trim().is_empty() { "about:blank".to_string() } else { web::address(&typed) };
         let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "zash".into());
         let cmd = vec![exe, "web".into(), "--fill".into(), url];
         if let Err(e) = app::run(config::Config::load(), Some(cmd), None) {
             eprintln!("zash: {e}");
+            std::process::exit(1);
         }
         return;
     }
-    // zash web ADDRESS [-r ROWS]: a web page here, in this terminal (zash draws it)
+    // zash web ADDRESS: a web page here (inside zeit: a zeit pane)
     if args.first().map(String::as_str) == Some("web") {
         let mut rows = 30usize;
-        let mut fill = false;
+        let (mut fill, mut beside) = (false, false);
         let mut words = Vec::new();
         let mut it = args[1..].iter();
         while let Some(a) = it.next() {
             match a.as_str() {
-                "-r" | "--rows" => rows = it.next().and_then(|v| v.parse().ok()).unwrap_or(rows),
+                "-h" | "--help" => return cli::print(cli::WEB_HELP),
+                "-r" | "--rows" => match it.next().and_then(|v| v.parse::<usize>().ok()) {
+                    Some(r) if (4..=200).contains(&r) => rows = r,
+                    _ => cli::fail("-r wants a number of rows from 4 to 200", cli::WEB_USAGE, "zash web --help"),
+                },
+                "-s" | "--split" => beside = true,
                 "--fill" => fill = true,
+                o if o.starts_with('-') && o.len() > 1 => cli::fail(&format!("unknown option '{o}'"), cli::WEB_USAGE, "zash web --help"),
                 _ => words.push(a.clone()),
             }
         }
         if words.is_empty() {
-            eprintln!("zash web ADDRESS [-r ROWS]   (a URL, a host, or words to search)");
-            std::process::exit(2);
-        }
-        if std::env::var("TERM_PROGRAM").ok().as_deref() != Some("zash") {
-            eprintln!("zash web: only inside a zash window");
-            std::process::exit(1);
+            cli::fail("an address is needed", cli::WEB_USAGE, "zash web --help");
         }
         let url = web::address(&words.join(" "));
+        // inside zeit the page is a zeit pane: it follows the layout, windows and detaching
+        if std::env::var_os("ZEIT_PANE").is_some() && !fill {
+            let mut c = std::process::Command::new("zeit");
+            c.arg("web");
+            if beside {
+                c.arg("-h");
+            }
+            let ok = c.arg(&url).status().is_ok_and(|s| s.success());
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        if std::env::var("TERM_PROGRAM").ok().as_deref() != Some("zash") {
+            eprintln!("zash web: this terminal cannot show web pages. Try: zash open {url}");
+            std::process::exit(1);
+        }
         if fill {
             // the whole window: the page from the top, and this program stays so the window does
             let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
@@ -97,7 +126,7 @@ fn main() {
         }
     }
 
-    if args.first().map(String::as_str) == Some("--snapshot") {
+    if matches!(args.first().map(String::as_str), Some("--snapshot" | "snapshot")) {
         let mut o = snapshot::Opts { png: None, cols: 100, rows: 30, wait: Duration::from_secs(5), cmd: Vec::new(), keys: None, workdir: workdir.clone(), search: None, older: 0, nvim: false };
         let mut it = args.into_iter().skip(1);
         while let Some(a) = it.next() {
@@ -157,12 +186,8 @@ fn main() {
         }
         // `zash PROGRAM ARGS…`
         Some(p) if !p.starts_with('-') => Some(args.clone()),
-        Some("-h") | Some("--help") => {
-            println!("zash — the zett terminal\n\n  zash               your shell in a window\n  zash -e CMD …      run CMD in a window (also: zash CMD …, zash -e 'a command line')\n  zash -d DIR        start in DIR (command = '…' in the settings: what a plain zash runs)
-  zash --preset NAME a preset on top of your settings (~/.config/zash/presets/NAME.toml; also $ZASH_PRESET)
-  zash --config FILE another settings file (also $ZASH_CONFIG)\n  zash --snapshot [out.png] [--size 100x30] [--wait MS] [-- CMD …]   (no CMD: your shell)\n                     headless: run CMD, print the screen, optionally render a PNG\n\nKeys: Ctrl+Shift+C/V copy/paste · Ctrl+Shift+Up/Down previous/next prompt · Ctrl+Shift+O copy the last output · Ctrl+Shift+F search · Ctrl+click open a link · Ctrl+Shift+T/W new/close tab · Ctrl+Tab next tab · Ctrl+= / Ctrl+- / Ctrl+0 font size · Shift+PageUp/PageDown scroll\n\nSettings: ~/.config/zash/zash.toml (written on first start, with comments)");
-            return;
-        }
+        Some("--exec") => Some(args[1..].to_vec()).filter(|c| !c.is_empty()),
+        Some(o) if o.starts_with('-') => cli::fail(&format!("unknown option '{o}'"), "**Usage:** `zash` [<options>] [-- <command> …]", "zash --help"),
         _ => None,
     };
     // a plain `zash` runs the configured command (command = "zeit new"), else the shell

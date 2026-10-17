@@ -34,6 +34,11 @@ pub struct Graphics {
     pub webs: HashMap<u32, Arc<crate::web::View>>,
     /// a web area that asked for the keyboard (zash --web)
     pub autofocus: Option<u32>,
+    /// web areas a multiplexer (zeit) pins to screen cells: their rect (x, y, w, h) while
+    /// shown, and whether the multiplexer has them focused
+    pub pinned: HashMap<u32, (Option<(usize, usize, usize, usize)>, bool)>,
+    /// focus changes the multiplexer asked for: (id, focused)
+    pub pin_focus: Vec<(u32, bool)>,
 }
 
 /// What a command asks of the terminal after it was handled.
@@ -209,6 +214,62 @@ impl Graphics {
         self.generation += 1;
         let advance = (num("C") != Some(1)).then_some((rows.saturating_sub(1), cols));
         Outcome { reply: reply(num("i").unwrap_or(0), "OK", false), advance }
+    }
+
+    /// OSC 7733;webrect|webhide|webclose from a multiplexer: `id=N;x=;y=;w=;h=;focus=;url=…`.
+    pub fn pin(&mut self, kind: &str, body: &str, cell: (f32, f32), wake: Box<dyn Fn() + Send + Sync>) {
+        let mut kv: HashMap<&str, &str> = HashMap::new();
+        let mut rest = body;
+        while let Some((k, v)) = rest.split_once('=') {
+            if k == "url" {
+                kv.insert(k, v);
+                break;
+            }
+            let (v, more) = v.split_once(';').unwrap_or((v, ""));
+            kv.insert(k, v);
+            rest = more;
+            if more.is_empty() {
+                break;
+            }
+        }
+        let num = |k: &str| kv.get(k).and_then(|v| v.parse::<usize>().ok());
+        let Some(id) = num("id").map(|i| i as u32) else { return };
+        match kind {
+            "webclose" => {
+                if let Some(v) = self.webs.remove(&id) {
+                    v.close();
+                }
+                self.pinned.remove(&id);
+            }
+            "webhide" => {
+                if let Some(p) = self.pinned.get_mut(&id) {
+                    p.0 = None;
+                    if p.1 {
+                        p.1 = false;
+                        self.pin_focus.push((id, false));
+                    }
+                }
+            }
+            _ => {
+                let (Some(x), Some(y), Some(w), Some(h)) = (num("x"), num("y"), num("w"), num("h")) else { return };
+                let focus = num("focus") == Some(1);
+                if !self.webs.contains_key(&id) {
+                    let url = kv.get("url").copied().unwrap_or("about:blank");
+                    match crate::web::View::open(id, url, (w as f32 * cell.0) as u32, (h as f32 * cell.1) as u32, wake) {
+                        Some(v) => {
+                            self.webs.insert(id, v);
+                        }
+                        None => return,
+                    }
+                }
+                let was = self.pinned.get(&id).map(|p| p.1).unwrap_or(false);
+                if focus != was {
+                    self.pin_focus.push((id, focus));
+                }
+                self.pinned.insert(id, (Some((x, y, w, h)), focus));
+            }
+        }
+        self.generation += 1;
     }
 
     pub fn next_web_id(&mut self) -> u32 {

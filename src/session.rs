@@ -129,6 +129,8 @@ pub enum Found {
     Graphics(String),
     /// a web area: OSC 7733;web;rows=N;url=…
     Web(String),
+    /// a web area pinned to screen cells by a multiplexer: webrect, webhide or webclose, and the rest
+    WebPin(String, String),
     /// keys a program wants for itself: OSC 7733;keys;all|none|claim=…|release=…
     Keys(String),
     /// DECSCNM: the whole screen in reverse video (light background), on or off
@@ -252,6 +254,8 @@ impl MarkScanner {
                 out.push((at, Found::PopupStyle(look.to_string())));
             } else if let Some(k) = body.strip_prefix("7733;keys;") {
                 out.push((at, Found::Keys(k.to_string())));
+            } else if let Some((kind, rest)) = body.strip_prefix("7733;").and_then(|b| b.split_once(';')).filter(|(k, _)| matches!(*k, "webrect" | "webhide" | "webclose")) {
+                out.push((at, Found::WebPin(kind.to_string(), rest.to_string())));
             } else if let Some(w) = body.strip_prefix("7733;web;") {
                 out.push((at, Found::Web(w.to_string())));
             } else if let Some(list) = body.strip_prefix("7733;rows;").or_else(|| (body == "7733;rows").then_some("")) {
@@ -452,6 +456,16 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                     }
                     Found::Keys(body) => {
                         claims.lock().unwrap().apply(&body);
+                        continue;
+                    }
+                    Found::WebPin(kind, body) => {
+                        let cell = *cell_px.lock().unwrap();
+                        let wl = listener.clone();
+                        let wake: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                            use alacritty_terminal::event::EventListener;
+                            wl.send_event(alacritty_terminal::event::Event::Wakeup);
+                        });
+                        graphics.lock().unwrap().pin(&kind, &body, cell, wake);
                         continue;
                     }
                     Found::Web(body) => {

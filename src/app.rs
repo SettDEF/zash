@@ -236,6 +236,18 @@ impl App {
         let (ox, oy) = r.origin(f.x, f.y, f.w, f.h);
         let top = { let t = s.term.lock(); t.grid().history_size() as i64 - t.grid().display_offset() as i64 };
         let gr = s.graphics.lock().unwrap();
+        let offset = s.term.lock().grid().display_offset();
+        if offset == 0 {
+            for (id, (rect, _)) in &gr.pinned {
+                let (Some((cx, cy, cw, ch)), Some(v)) = (rect, gr.webs.get(id)) else { continue };
+                let (px, py) = (ox + *cx as f32 * r.cell_w, oy + *cy as f32 * r.cell_h);
+                let (lx, ly) = (x as f32 - px, y as f32 - py);
+                if lx >= 0.0 && ly >= 0.0 && lx < *cw as f32 * r.cell_w && ly < *ch as f32 * r.cell_h {
+                    return Some((v.clone(), lx, ly));
+                }
+            }
+        }
+        let gr = s.graphics.lock().unwrap();
         gr.places.iter().rev().find_map(|p| {
             let v = gr.webs.get(&p.img)?;
             let (px, py) = (ox + p.col as f32 * r.cell_w, oy + (p.line as i64 - top) as f32 * r.cell_h);
@@ -1076,6 +1088,14 @@ impl App {
                 if let Some(id) = p.session.graphics.lock().unwrap().autofocus.take() {
                     self.web_focus = Some(id);
                 }
+                // a multiplexer moved its focus onto a web pane (or away from it)
+                for (id, on) in std::mem::take(&mut p.session.graphics.lock().unwrap().pin_focus) {
+                    if on {
+                        self.web_focus = Some(id);
+                    } else if self.web_focus == Some(id) {
+                        self.web_focus = None;
+                    }
+                }
             }
             // the page's title in the window's, while it has the keyboard
             if let Some(v) = self.web_focused() {
@@ -1091,6 +1111,11 @@ impl App {
                 for pl in &gr.places {
                     if let Some(v) = gr.webs.get(&pl.img) {
                         v.resize((pl.cols as f32 * cw) as u32, (pl.rows as f32 * chh) as u32);
+                    }
+                }
+                for (id, (rect, _)) in &gr.pinned {
+                    if let (Some((_, _, w, h)), Some(v)) = (rect, gr.webs.get(id)) {
+                        v.resize((*w as f32 * cw) as u32, (*h as f32 * chh) as u32);
                     }
                 }
             }

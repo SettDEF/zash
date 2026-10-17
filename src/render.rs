@@ -1301,6 +1301,24 @@ pub struct ImageView {
 impl Frame {
     /// The placements that show on the screen, given the scroll position.
     pub fn with_images<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, g: &crate::graphics::Graphics) -> Frame {
+        // pinned to screen cells by a multiplexer: there while the screen is not scrolled back
+        if term.grid().display_offset() == 0 {
+            for (id, (rect, _)) in &g.pinned {
+                let (Some((x, y, w, h)), Some(v)) = (rect, g.webs.get(id)) else { continue };
+                // the page covers its cells (whatever text the multiplexer drew there)
+                for row in self.rows.iter_mut().skip(*y).take(*h) {
+                    for c in row.iter_mut().skip(*x).take(*w) {
+                        c.ch = ' ';
+                        c.zw = None;
+                    }
+                }
+                let frame = v.frame.lock().unwrap().clone();
+                if let Some(img) = frame {
+                    let generation = v.generation.load(std::sync::atomic::Ordering::Relaxed);
+                    self.images.push(ImageView { img, live: Some((*id as u64 | 1 << 40, generation)), row: *y as i64, col: *x, cols: *w, rows: *h });
+                }
+            }
+        }
         let top = term.grid().history_size() as i64 - term.grid().display_offset() as i64;
         let lines = self.rows.len() as i64;
         for p in &g.places {
