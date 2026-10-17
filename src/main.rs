@@ -35,6 +35,10 @@ fn main() {
         }
     }
     let cfg = config::Config::load();
+    // the configured shell, for zash and for everything started in it (zeit, scripts)
+    if let Some(s) = &cfg.shell {
+        unsafe { std::env::set_var("SHELL", s) };
+    }
     // -d DIR: start in that folder
     let mut workdir = None;
     if let Some(i) = args.iter().position(|a| a == "-d" || a == "--dir") {
@@ -105,13 +109,15 @@ fn main() {
         // `zash PROGRAM ARGS…`
         Some(p) if !p.starts_with('-') => Some(args.clone()),
         Some("-h") | Some("--help") => {
-            println!("zash — the zett terminal\n\n  zash               your shell in a window\n  zash -e CMD …      run CMD in a window (also: zash CMD …, zash -e 'a command line')\n  zash -d DIR        start in DIR
+            println!("zash — the zett terminal\n\n  zash               your shell in a window\n  zash -e CMD …      run CMD in a window (also: zash CMD …, zash -e 'a command line')\n  zash -d DIR        start in DIR (command = '…' in the settings: what a plain zash runs)
   zash --preset NAME a preset on top of your settings (~/.config/zash/presets/NAME.toml; also $ZASH_PRESET)
   zash --config FILE another settings file (also $ZASH_CONFIG)\n  zash --snapshot [out.png] [--size 100x30] [--wait MS] [-- CMD …]   (no CMD: your shell)\n                     headless: run CMD, print the screen, optionally render a PNG\n\nKeys: Ctrl+Shift+C/V copy/paste · Ctrl+Shift+Up/Down previous/next prompt · Ctrl+Shift+O copy the last output · Ctrl+Shift+F search · Ctrl+click open a link · Ctrl+Shift+T/W new/close tab · Ctrl+Tab next tab · Ctrl+= / Ctrl+- / Ctrl+0 font size · Shift+PageUp/PageDown scroll\n\nSettings: ~/.config/zash/zash.toml (written on first start, with comments)");
             return;
         }
         _ => None,
     };
+    // a plain `zash` runs the configured command (command = "zeit new"), else the shell
+    let cmd = cmd.or_else(|| cfg.command.clone().filter(|c| !c.trim().is_empty()).map(|c| vec!["sh".into(), "-c".into(), format!("exec {c}")]));
     if let Err(e) = app::run(cfg, cmd, workdir) {
         eprintln!("zash: {e}");
         std::process::exit(1);

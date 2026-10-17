@@ -669,8 +669,13 @@ impl Renderer {
             for sr in &p.frame.small {
                 let y = oy + sr.row as f32 * ch;
                 let x0 = ox + sr.col as f32 * cw;
-                let x1 = ox + (sr.col + sr.width) as f32 * cw;
+                let first_button = sr.buttons.iter().map(|b| b.0).min().unwrap_or(sr.width);
+                let x1 = ox + (sr.col + first_button) as f32 * cw;
                 let mut right = x1 - cw * 0.6;
+                for (at, glyph) in &sr.buttons {
+                    let (b, w) = label(&mut self.font_system, &self.family, glyph, p.frame.tone('a'), self.font_px, ch);
+                    labels.push((b, ox + (sr.col + at) as f32 * cw + (cw - w) / 2.0, y));
+                }
                 for (tone, text) in sr.cols.iter().rev() {
                     let (b, w) = label(&mut self.font_system, &self.family, text, p.frame.tone(*tone), px, ch);
                     right -= w;

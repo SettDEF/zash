@@ -137,6 +137,8 @@ pub struct UiRow {
     pub cols: Vec<(char, String)>,
     /// 0..1, drawn as a thin bar under the row
     pub progress: Option<f32>,
+    /// buttons at fixed cells (offset from `col`), so a click lands where they show
+    pub buttons: Vec<(usize, String)>,
 }
 
 impl UiRow {
@@ -150,6 +152,13 @@ impl UiRow {
                 for c in f.iter().skip(4) {
                     match c.split_once(':') {
                         Some(("%", v)) => r.progress = v.parse::<f32>().ok().map(|p| p.clamp(0.0, 1.0)),
+                        Some(("@", v)) => {
+                            if let Some((at, glyph)) = v.split_once(':') {
+                                if let Ok(at) = at.parse() {
+                                    r.buttons.push((at, glyph.to_string()));
+                                }
+                            }
+                        }
                         Some((t, text)) if t.chars().count() == 1 => r.cols.push((t.chars().next().unwrap(), text.to_string())),
                         _ => r.cols.push((' ', c.to_string())),
                     }
@@ -519,6 +528,9 @@ mod ui_row_tests {
         assert_eq!((r[0].row, r[0].col, r[0].width), (3, 0, 80));
         assert_eq!(r[0].cols, vec![('m', "bottom".to_string()), ('g', "✓ 3.2s".to_string())]);
         assert_eq!(r[1].progress, Some(0.5));
+        let b = UiRow::parse_list("1\x1f0\x1f40\x1fx\x1fg:ok\x1f@:36:■\x1f@:38:⇢");
+        assert_eq!(b[0].buttons, vec![(36, "■".to_string()), (38, "⇢".to_string())]);
+        assert_eq!(b[0].cols.len(), 1);
         assert_eq!(r[0].left, "▸ cargo build");
         assert_eq!(r[1].cols[0].1, "⟳ 4s");
         let out = s.scan(b"\x1b]7733;rows;\x07");
