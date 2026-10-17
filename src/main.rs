@@ -11,6 +11,7 @@ mod input;
 mod keys;
 mod layout;
 mod links;
+mod nvim;
 mod search;
 mod render;
 mod session;
@@ -33,7 +34,7 @@ fn main() {
     }
 
     if args.first().map(String::as_str) == Some("--snapshot") {
-        let mut o = snapshot::Opts { png: None, cols: 100, rows: 30, wait: Duration::from_secs(5), cmd: Vec::new(), keys: None, workdir: workdir.clone(), search: None, older: 0 };
+        let mut o = snapshot::Opts { png: None, cols: 100, rows: 30, wait: Duration::from_secs(5), cmd: Vec::new(), keys: None, workdir: workdir.clone(), search: None, older: 0, nvim: false };
         let mut it = args.into_iter().skip(1);
         while let Some(a) = it.next() {
             match a.as_str() {
@@ -44,6 +45,7 @@ fn main() {
                     }
                 }
                 "--keys" => o.keys = it.next(),
+                "--nvim" => o.nvim = true,
                 "--search" => o.search = it.next(),
                 "--older" => o.older = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
                 "--wait" => o.wait = Duration::from_millis(it.next().and_then(|s| s.parse().ok()).unwrap_or(5000)),

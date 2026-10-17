@@ -36,6 +36,8 @@ struct Pane {
     id: u64,
     session: Session,
     title: String,
+    /// Neovim drawn by zash while it runs in this pane
+    nvim: Option<crate::nvim::Nvim>,
 }
 
 /// One tab: its panes, how they are split, and which one has the keyboard.
@@ -76,6 +78,8 @@ struct App {
     mouse: (f64, f64),
     selecting: bool,
     scroll_acc: f64,
+    /// the button held down in a Neovim pane (for drags)
+    nvim_btn: Option<&'static str>,
     /// the button held down for a program that wants the mouse
     mouse_btn: Option<u8>,
     last_cell: (usize, usize),
@@ -92,7 +96,7 @@ pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::Pat
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -175,6 +179,9 @@ impl App {
                 if let Some(grid) = self.grid_in(r) {
                     if let Some(p) = self.tabs[ti].panes.iter_mut().find(|p| p.id == id) {
                         p.session.resize(grid);
+                        if let Some(n) = &p.nvim {
+                            n.resize(grid.cols, grid.rows);
+                        }
                     }
                 }
             }
@@ -219,6 +226,41 @@ impl App {
         let col = (((x as f32 - f.x - r.pad) / r.cell_w).max(0.0) as usize).min(s.grid.cols.saturating_sub(1));
         let row = (((y as f32 - f.y - r.pad) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
         (col, row)
+    }
+
+    /// Modifiers held, for Neovim's mouse input ("CS", "A", "").
+    fn nvim_mods(&self) -> String {
+        let m = self.mods;
+        format!("{}{}{}", if m.control_key() { "C" } else { "" }, if m.alt_key() { "A" } else { "" }, if m.shift_key() { "S" } else { "" })
+    }
+
+    /// Neovim in a pane: attach when the shell announced a server, let go when it quit.
+    fn nvim_check(&mut self, tab: usize, pi: usize) {
+        let cell_h = self.gpu.as_ref().map(|g| g.renderer.cell_h).unwrap_or(16.0);
+        let glide = self.cfg.smooth_scroll_ms;
+        let proxy = self.proxy.clone();
+        let p = &mut self.tabs[tab].panes[pi];
+        if let Some(sock) = p.session.nvim_sock.lock().unwrap().take() {
+            let id = p.id;
+            let wake = Box::new(move || {
+                let _ = proxy.send_event(ZEvent::Term(id, Event::Wakeup));
+            });
+            match crate::nvim::Nvim::connect(&sock, p.session.grid.cols, p.session.grid.rows, cell_h, glide, wake) {
+                Ok(n) => p.nvim = Some(n),
+                Err(e) => eprintln!("zash: could not reach nvim at {sock}: {e}"),
+            }
+        }
+        let quit = p.nvim.as_ref().is_some_and(|n| n.state.lock().unwrap().closed);
+        if quit {
+            p.nvim = None;
+        }
+        let title = p.nvim.as_ref().and_then(|n| n.state.lock().unwrap().title.clone());
+        if let Some(t) = title {
+            if p.title != t {
+                p.title = t;
+                self.show_title();
+            }
+        }
     }
 
     /// Scrolls the focused pane's view; with smooth scrolling the move glides from where it was.
@@ -268,8 +310,10 @@ impl App {
             }
         };
         tell(t.focused(), false);
+        if let Some(n) = t.focused().and_then(|p| p.nvim.as_ref()) { n.focus(false); }
         t.focus = id;
         tell(t.focused(), true);
+        if let Some(n) = t.focused().and_then(|p| p.nvim.as_ref()) { n.focus(true); }
         if t.zoom {
             t.zoom = false;
             self.sync_size();
@@ -376,7 +420,7 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         let session = Session::spawn(cmd, dir, grid, self.cfg.scrollback, Sink::Window(self.proxy.clone(), id))?;
-        Ok(Pane { id, session, title: "zash".into() })
+        Ok(Pane { id, session, title: "zash".into(), nvim: None })
     }
 
     /// The tab bar shows from the second tab: the space below it changes.
@@ -699,6 +743,10 @@ impl App {
                     }
                     "v" => {
                         let text = clipboard_get(false);
+                        if let Some(n) = self.pane().and_then(|p| p.nvim.as_ref()) {
+                            n.paste(&text);
+                            return;
+                        }
                         let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
                         self.write(input::paste(&text, bracketed));
                         return;
@@ -740,6 +788,45 @@ impl App {
                     _ => {}
                 }
             }
+        }
+        // Neovim in the pane: every other key goes to it, in its notation
+        if let Some(n) = self.pane().and_then(|p| p.nvim.as_ref()) {
+            let named = match &ev.logical_key {
+                Key::Named(k) => Some(match k {
+                    NamedKey::Enter => "CR",
+                    NamedKey::Tab => "Tab",
+                    NamedKey::Backspace => "BS",
+                    NamedKey::Escape => "Esc",
+                    NamedKey::Space => "Space",
+                    NamedKey::ArrowUp => "Up",
+                    NamedKey::ArrowDown => "Down",
+                    NamedKey::ArrowLeft => "Left",
+                    NamedKey::ArrowRight => "Right",
+                    NamedKey::Home => "Home",
+                    NamedKey::End => "End",
+                    NamedKey::PageUp => "PageUp",
+                    NamedKey::PageDown => "PageDown",
+                    NamedKey::Insert => "Insert",
+                    NamedKey::Delete => "Del",
+                    NamedKey::F1 => "F1", NamedKey::F2 => "F2", NamedKey::F3 => "F3", NamedKey::F4 => "F4",
+                    NamedKey::F5 => "F5", NamedKey::F6 => "F6", NamedKey::F7 => "F7", NamedKey::F8 => "F8",
+                    NamedKey::F9 => "F9", NamedKey::F10 => "F10", NamedKey::F11 => "F11", NamedKey::F12 => "F12",
+                    _ => return,
+                }),
+                _ => None,
+            };
+            // Space without modifiers is just a space; with Ctrl it is <C-Space>
+            let named = if named == Some("Space") && !mods.ctrl && !mods.alt { None } else { named };
+            let text = match &ev.logical_key {
+                Key::Character(c) if mods.ctrl || mods.alt => Some(c.as_str()),
+                Key::Named(NamedKey::Space) => Some(" "),
+                _ => ev.text.as_deref(),
+            };
+            // letters carry their shift already (A, not <S-a>); named keys say it (<S-Tab>)
+            if let Some(k) = crate::nvim::notation(named, text, mods.ctrl, mods.alt, mods.shift && named.is_some()) {
+                n.input(&k);
+            }
+            return;
         }
         if mods.shift && !mods.ctrl {
             let page = match ev.logical_key {
@@ -826,9 +913,28 @@ impl App {
         // every pane of the shown tab, copied out of its terminal
         let rects = self.pane_rects(self.active);
         let mut frames: Vec<(u64, Rect, Frame)> = Vec::new();
+        let mut nvim_moving = false;
         for (id, r) in rects {
             let Some(p) = tab.panes.iter().find(|p| p.id == id) else { continue };
             let s = &p.session;
+            // Neovim in the pane: its own screen, drawn by zash
+            if let Some(n) = &p.nvim {
+                let mut st = n.state.lock().unwrap();
+                if st.settle() {
+                    nvim_moving = true;
+                }
+                let mut frame = st.frame(&self.cfg.palette);
+                if id == tab.focus {
+                    frame.tabs = self.tabs.iter().enumerate().map(|(i, t)| (Self::tab_title(t), i == self.active)).collect();
+                    if self.prefix {
+                        frame.bar = Some(self.prefix_hint());
+                    }
+                } else {
+                    frame.cursor = None;
+                }
+                frames.push((id, r, frame));
+                continue;
+            }
             let mut frame = {
                 let t = s.term.lock();
                 let marks = s.marks.lock().unwrap();
@@ -871,7 +977,7 @@ impl App {
         let animating = g.renderer.render(&g.device, &g.queue, &view, g.config.width, g.config.height, &panes);
         g.queue.present(tex);
         // another frame only while the cursor is still gliding: idle stays idle
-        if animating || self.glide != 0.0 {
+        if animating || self.glide != 0.0 || nvim_moving {
             g.window.request_redraw();
         }
     }
@@ -1009,6 +1115,7 @@ impl ApplicationHandler<ZEvent> for App {
         let shown = tab == self.active;
         match ev {
             Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => {
+                self.nvim_check(tab, pi);
                 if shown {
                     self.redraw();
                 }
@@ -1076,6 +1183,9 @@ impl ApplicationHandler<ZEvent> for App {
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => self.key(&event),
             WindowEvent::Focused(f) => {
+                if let Some(n) = self.pane().and_then(|p| p.nvim.as_ref()) {
+                    n.focus(f);
+                }
                 if self.mode().contains(TermMode::FOCUS_IN_OUT) {
                     if let Some(s) = self.sess() {
                         s.write(if f { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() });
@@ -1085,6 +1195,13 @@ impl ApplicationHandler<ZEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
                 let cell = self.cell_at(position.x, position.y);
+                if let (Some(n), Some(b)) = (self.pane().and_then(|p| p.nvim.as_ref()), self.nvim_btn) {
+                    if cell != self.last_cell {
+                        n.mouse(b, "drag", &self.nvim_mods(), cell.1, cell.0);
+                    }
+                    self.last_cell = cell;
+                    return;
+                }
                 if self.app_mouse() {
                     // drags (and plain motion, if asked) go to the program, once per cell
                     let mode = self.mode();
@@ -1115,6 +1232,13 @@ impl ApplicationHandler<ZEvent> for App {
                     if let Some(id) = hit {
                         self.focus_pane(id);
                     }
+                }
+                if let Some(n) = self.pane().and_then(|p| p.nvim.as_ref()) {
+                    let (col, row) = self.cell_at(self.mouse.0, self.mouse.1);
+                    let b = match button { MouseButton::Left => "left", MouseButton::Right => "right", _ => "middle" };
+                    n.mouse(b, if pressed { "press" } else { "release" }, &self.nvim_mods(), row, col);
+                    self.nvim_btn = pressed.then_some(b);
+                    return;
                 }
                 if self.app_mouse() {
                     let cell = self.cell_at(self.mouse.0, self.mouse.1);
@@ -1172,6 +1296,13 @@ impl ApplicationHandler<ZEvent> for App {
                     return;
                 }
                 self.scroll_acc -= whole as f64;
+                if let Some(n) = self.pane().and_then(|p| p.nvim.as_ref()) {
+                    let (col, row) = self.cell_at(self.mouse.0, self.mouse.1);
+                    for _ in 0..whole.unsigned_abs() {
+                        n.mouse("wheel", if whole > 0 { "up" } else { "down" }, &self.nvim_mods(), row, col);
+                    }
+                    return;
+                }
                 let mode = self.mode();
                 if self.app_mouse() {
                     let cell = self.cell_at(self.mouse.0, self.mouse.1);

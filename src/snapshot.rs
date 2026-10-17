@@ -24,10 +24,15 @@ pub struct Opts {
     /// search the scrollback for this, `older` steps back (tests)
     pub search: Option<String>,
     pub older: usize,
+    /// Neovim drawn by zash (as in a pane): the command's arguments go to `nvim --headless --listen`
+    pub nvim: bool,
 }
 
 /// Runs the command until it exits (or `wait` passes) and returns the screen.
 pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
+    if o.nvim {
+        return capture_nvim(o, cfg);
+    }
     let (tx, rx) = mpsc::channel();
     let grid = Grid { cols: o.cols, rows: o.rows, cell_w: 9.0, cell_h: 18.0 };
     // no command: the login shell, with zash's shell integration (as in the window)
@@ -152,4 +157,38 @@ pub fn render_png(frame: &Frame, cfg: &Config, path: &str) -> Result<(u32, u32),
 /// The cell height the offscreen renderer will use (scale 1), for test hooks.
 fn cfg_cell_h(cfg: &Config) -> f32 {
     (cfg.font_size_pt * 96.0 / 72.0 * cfg.line_height).round()
+}
+
+/// `--nvim`: Neovim as a server, zash attached as its screen; keys go in as Neovim input.
+/// ZASH_TEST_GLIDE=MS keeps a scroll glide frozen MS milliseconds in (tests).
+fn capture_nvim(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
+    let sock = std::env::temp_dir().join(format!("zash-snap-nvim-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let mut child = std::process::Command::new("nvim")
+        .arg("--headless")
+        .arg("--listen")
+        .arg(&sock)
+        .args(&o.cmd)
+        .current_dir(o.workdir.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default()))
+        .stdin(std::process::Stdio::null())
+        .spawn()?;
+    let cell_h = cfg_cell_h(cfg);
+    let n = crate::nvim::Nvim::connect(&sock.to_string_lossy(), o.cols, o.rows, cell_h, cfg.smooth_scroll_ms.max(1.0), Box::new(|| {}))?;
+    std::thread::sleep(Duration::from_millis(600));
+    if let Some(keys) = &o.keys {
+        n.input(keys);
+    }
+    let glide_at = std::env::var("ZASH_TEST_GLIDE").ok().and_then(|v| v.parse::<u64>().ok());
+    if let Some(ms) = glide_at {
+        std::thread::sleep(Duration::from_millis(ms));
+    } else {
+        std::thread::sleep(o.wait);
+    }
+    let frame = {
+        let st = n.state.lock().unwrap();
+        st.frame(&cfg.palette)
+    };
+    let _ = child.kill();
+    let _ = std::fs::remove_file(&sock);
+    Ok(frame)
 }

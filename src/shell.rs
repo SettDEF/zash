@@ -28,6 +28,16 @@ if [[ -o interactive ]]; then
   _zash_preexec() { _zash_ran=1; print -n "\e]133;C\a" }
   add-zsh-hook precmd _zash_precmd
   add-zsh-hook preexec _zash_preexec
+  # nvim in zash: zash is its screen (smooth scrolling, a flying cursor), as Neovide does.
+  # Inside tmux, in pipes, or with ZASH_NO_NVIM_UI set it is plain nvim.
+  if [[ -z "$ZASH_NO_NVIM_UI" ]]; then
+    nvim() {
+      if [[ -n "$TMUX" || ! -t 0 || ! -t 1 ]]; then command nvim "$@"; return; fi
+      local sock="${XDG_RUNTIME_DIR:-/tmp}/zash-nvim-$$-$RANDOM.sock"
+      print -n "\e]7733;nvim;$sock\a"
+      command nvim --headless --listen "$sock" "$@"
+    }
+  fi
   # the completion popup (the same file a .zshrc can load; it never loads twice)
   source "${${(%):-%x}:A:h}/zash-popup.plugin.zsh"
 fi

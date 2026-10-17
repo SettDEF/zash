@@ -27,6 +27,7 @@ pub struct Style2 {
     pub italic: bool,
 }
 
+#[derive(Clone)]
 pub struct CellView {
     pub ch: char,
     pub zw: Option<Vec<char>>,
@@ -38,7 +39,18 @@ pub struct CellView {
     pub spacer: bool,
 }
 
+/// A part of the screen whose scroll is gliding (Neovim's grid_scroll): rows `top..bot` are
+/// drawn `px` from their place, and the rows that left (nearest first) fill the edge.
+#[derive(Clone)]
+pub struct Region {
+    pub top: usize,
+    pub bot: usize,
+    pub px: f32,
+    pub old: Vec<Vec<CellView>>,
+}
+
 pub struct Frame {
+    pub region: Option<Region>,
     /// smooth scrolling: rows just above and below the screen (nearest first), and how
     /// far the content is drawn shifted (pixels, + = down) while a scroll glides
     pub above: Vec<Vec<CellView>>,
@@ -122,7 +134,7 @@ impl Frame {
                 }
             }
         }
-        Frame { above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
+        Frame { region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -378,8 +390,7 @@ impl Renderer {
         let mut old = self.rows.remove(&pane).unwrap_or_default();
         let mut cache: std::collections::HashMap<u64, Buffer> = std::collections::HashMap::with_capacity(frame.rows.len() + 4);
         let mut order = Vec::with_capacity(frame.rows.len() + frame.above.len() + frame.below.len());
-        let all = frame.above.iter().rev().chain(frame.rows.iter()).chain(frame.below.iter());
-        for row in all {
+        for (row, _, _) in placed(frame, 0.0, self.cell_h) {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             self.font_px.to_bits().hash(&mut h);
             width.to_bits().hash(&mut h);
@@ -451,17 +462,17 @@ impl Renderer {
 
     fn rect_list(&self, frame: &Frame, cur: Option<((f32, f32), (f32, f32))>, ox: f32, oy: f32, clip: [f32; 4]) -> Vec<Rect> {
         let (cw, ch, pad) = (self.cell_w, self.cell_h, ox);
-        // while a scroll glides everything is drawn shifted; rows beyond the screen fill the edge
-        let oy = oy + frame.scroll_px;
-        let cur = cur.map(|((hx, hy), (tx, ty))| ((hx, hy + frame.scroll_px), (tx, ty + frame.scroll_px)));
-        let mut out = Vec::new();
-        let first = -(frame.above.len() as i64);
-        let all = frame.above.iter().rev().chain(frame.rows.iter()).chain(frame.below.iter());
-        for (k, row) in all.enumerate() {
-            let y = oy + (first + k as i64) as f32 * ch;
+        // while a scroll glides rows are drawn shifted; rows beyond the screen (or a region's
+        // old rows) fill the edge, each cut to its band
+        let shift = frame.scroll_px + frame.region.as_ref().filter(|g| frame.cursor.is_some_and(|(r, _, _)| r >= g.top && r < g.bot)).map(|g| g.px).unwrap_or(0.0);
+        let cur = cur.map(|((hx, hy), (tx, ty))| ((hx, hy + shift), (tx, ty + shift)));
+        let mut out_all: Vec<Rect> = Vec::new();
+        for (row, y, band) in placed(frame, oy, ch) {
             if y + ch < clip[1] || y > clip[1] + clip[3] {
                 continue;
             }
+            let mut out_row: Vec<Rect> = Vec::new();
+            let out = &mut out_row;
             // backgrounds, merged across cells of one colour
             let mut run: Option<(usize, usize, Rgb)> = None;
             for (c, cell) in row.iter().enumerate() {
@@ -487,9 +498,14 @@ impl Renderer {
             if let Some((s, e, col)) = run {
                 out.push(Rect { xywh: [pad + s as f32 * cw, y, (e - s) as f32 * cw, ch], color: col.f32() });
             }
+            match band {
+                Some((b0, b1)) => out_all.extend(clipped(out_row, [clip[0], b0, clip[2], b1 - b0])),
+                None => out_all.extend(out_row),
+            }
         }
+        let mut out = out_all;
         if let Some((r, c, shape)) = frame.cursor {
-            let (x, y) = cur.map(|c| c.0).unwrap_or((pad + c as f32 * cw, oy + r as f32 * ch));
+            let (x, y) = cur.map(|c| c.0).unwrap_or((pad + c as f32 * cw, oy + r as f32 * ch + shift));
             // the smear: from the lagging tail to the head, along one line only
             if let Some((_, (tx, ty))) = cur.filter(|_| self.cursor_trail) {
                 if (ty - y).abs() < 1.0 && (tx - x).abs() > 1.0 {
@@ -652,16 +668,19 @@ impl Renderer {
         let mut areas: Vec<TextArea> = Vec::new();
         for p in panes {
             let (Some(cache), Some(order)) = (self.rows.get(&p.id), self.order.get(&p.id)) else { continue };
-            let (ox, oy) = (p.x + self.pad, p.y + self.pad + p.frame.scroll_px);
-            let first = -(p.frame.above.len() as i64);
-            // each pane's text stays inside its pane (and out of the tab bar)
-            let bounds = TextBounds { left: p.x as i32, top: (p.y.max(self.top)) as i32, right: (p.x + p.w) as i32, bottom: (p.y + p.h) as i32 };
-            areas.extend(order.iter().enumerate().filter_map(|(i, key)| cache.get(key).map(|b| (i, b))).map(|(i, b)| TextArea {
+            let (ox, oy) = (p.x + self.pad, p.y + self.pad);
+            // each pane's text stays inside its pane (and out of the tab bar); a gliding region's rows inside the region
+            let pane_top = p.y.max(self.top);
+            let places = placed(p.frame, oy, ch);
+            areas.extend(order.iter().zip(places).filter_map(|(key, (_, y, band))| cache.get(key).map(|b| (b, y, band))).map(|(b, y, band)| TextArea {
                 buffer: b,
                 left: ox,
-                top: oy + (first + i as i64) as f32 * ch,
+                top: y,
                 scale: 1.0,
-                bounds,
+                bounds: {
+                    let (t, bo) = band.map(|(b0, b1)| (b0.max(pane_top), b1.min(p.y + p.h))).unwrap_or((pane_top, p.y + p.h));
+                    TextBounds { left: p.x as i32, top: t as i32, right: (p.x + p.w) as i32, bottom: bo as i32 }
+                },
                 default_color: Color::rgb(255, 255, 255),
                 custom_glyphs: &[],
             }));
@@ -862,4 +881,34 @@ fn clipped(rects: Vec<Rect>, clip: [f32; 4]) -> Vec<Rect> {
             (x1 > x0 && y1 > y0).then_some(Rect { xywh: [x0, y0, x1 - x0, y1 - y0], color: r.color })
         })
         .collect()
+}
+
+/// Every row to draw, top to bottom, with its y and (for a gliding region) the band it
+/// is cut to: rows above the screen, the screen, rows below it, then a region's old rows.
+fn placed(frame: &Frame, oy: f32, ch: f32) -> Vec<(&Vec<CellView>, f32, Option<(f32, f32)>)> {
+    let oy = oy + frame.scroll_px;
+    let mut out = Vec::with_capacity(frame.rows.len() + frame.above.len() + frame.below.len());
+    let n = frame.above.len() as f32;
+    for (k, row) in frame.above.iter().rev().enumerate() {
+        out.push((row, oy + (k as f32 - n) * ch, None));
+    }
+    let region = frame.region.as_ref().filter(|g| g.top < g.bot && g.bot <= frame.rows.len());
+    let band = region.map(|g| (oy + g.top as f32 * ch, oy + g.bot as f32 * ch));
+    for (r, row) in frame.rows.iter().enumerate() {
+        match region {
+            Some(g) if r >= g.top && r < g.bot => out.push((row, oy + r as f32 * ch + g.px, band)),
+            _ => out.push((row, oy + r as f32 * ch, None)),
+        }
+    }
+    for (k, row) in frame.below.iter().enumerate() {
+        out.push((row, oy + (frame.rows.len() + k) as f32 * ch, None));
+    }
+    if let Some(g) = region {
+        for (k, row) in g.old.iter().enumerate() {
+            // content moved down (px > 0): the old rows sit above the region's top, else below its bottom
+            let y = if g.px > 0.0 { oy + (g.top as f32 - 1.0 - k as f32) * ch + g.px } else { oy + (g.bot + k) as f32 * ch + g.px };
+            out.push((row, y, band));
+        }
+    }
+    out
 }

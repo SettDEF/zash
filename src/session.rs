@@ -84,6 +84,8 @@ pub struct Session {
     pub popup: Arc<Mutex<Option<Popup>>>,
     /// DECSCNM: reverse video for the whole screen
     pub reverse: Arc<std::sync::atomic::AtomicBool>,
+    /// a Neovim server the shell started, waiting for zash to attach
+    pub nvim_sock: Arc<Mutex<Option<String>>>,
     pub term: Arc<FairMutex<Term<Listener>>>,
     writer: Arc<Mutex<File>>,
     pty: Arc<Mutex<tty::Pty>>,
@@ -105,6 +107,8 @@ pub struct MarkScanner {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Found {
     Mark(char, Option<i32>),
+    /// the shell started Neovim as a server on this socket: zash becomes its screen
+    Nvim(String),
     /// DECSCNM: the whole screen in reverse video (light background), on or off
     Reverse(bool),
     Popup(Option<Popup>),
@@ -175,6 +179,8 @@ impl MarkScanner {
                     let exit = if kind == 'D' { parts.next().and_then(|v| v.parse().ok()) } else { None };
                     out.push((at, Found::Mark(kind, exit)));
                 }
+            } else if let Some(sock) = body.strip_prefix("7733;nvim;") {
+                out.push((at, Found::Nvim(sock.to_string())));
             } else if let Some(m) = body.strip_prefix("7733;") {
                 if let Some(p) = Popup::parse(m) {
                     out.push((at, Found::Popup(p)));
@@ -229,10 +235,11 @@ impl Session {
         let marks = Arc::new(Mutex::new(Vec::new()));
         let popup = Arc::new(Mutex::new(None));
         let reverse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let nvim_sock = Arc::new(Mutex::new(None));
 
-        let (t, m, l, pp, rv) = (term.clone(), marks.clone(), listener.clone(), popup.clone(), reverse.clone());
-        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, rv, l))?;
-        Ok(Session { term, writer, pty, grid, marks, popup, reverse, pid })
+        let (t, m, l, pp, rv, nv) = (term.clone(), marks.clone(), listener.clone(), popup.clone(), reverse.clone(), nvim_sock.clone());
+        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, rv, nv, l))?;
+        Ok(Session { term, writer, pty, grid, marks, popup, reverse, nvim_sock, pid })
     }
 
     /// Bytes for the program, as if typed.
@@ -269,7 +276,7 @@ impl Session {
 }
 
 /// Reads the program's output, notes shell marks, feeds the parser.
-fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, popup: Arc<Mutex<Option<Popup>>>, reverse: Arc<std::sync::atomic::AtomicBool>, listener: Listener) {
+fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, popup: Arc<Mutex<Option<Popup>>>, reverse: Arc<std::sync::atomic::AtomicBool>, nvim_sock: Arc<Mutex<Option<String>>>, listener: Listener) {
     use alacritty_terminal::grid::Dimensions;
     let mut parser: alacritty_terminal::vte::ansi::Processor = alacritty_terminal::vte::ansi::Processor::new();
     let mut scanner = MarkScanner::default();
@@ -313,6 +320,10 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                     }
                     Found::Reverse(on) => {
                         reverse.store(on, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                    Found::Nvim(sock) => {
+                        *nvim_sock.lock().unwrap() = Some(sock);
                         continue;
                     }
                     Found::Mark(k, e) => (k, e),
