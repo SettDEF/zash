@@ -230,6 +230,31 @@ impl App {
         (col, row)
     }
 
+    /// Files dropped on the window: the pane under the drop takes them (a shell gets their
+    /// paths, quoted; Neovim opens them).
+    fn drop_files(&mut self, paths: Vec<std::path::PathBuf>, at: Option<(f64, f64)>) {
+        if let (Some((x, y)), Some(area)) = (at, self.area()) {
+            let hit = self.tabs.get(self.active).filter(|t| !t.zoom).and_then(|t| t.layout.at(x as f32, y as f32, area));
+            if let Some(id) = hit {
+                self.focus_pane(id);
+            }
+        }
+        if let Some(n) = self.pane().and_then(|p| p.nvim.as_ref()) {
+            for path in &paths {
+                let p = path.display().to_string().replace('\\', "\\\\").replace(' ', "\\ ").replace('<', "<lt>");
+                n.input(&format!("<Esc>:e {p}<CR>"));
+            }
+        } else {
+            let words: Vec<String> = paths.iter().map(|p| shell_quote(&p.display().to_string())).collect();
+            let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
+            self.write(input::paste(&format!("{} ", words.join(" ")), bracketed));
+        }
+        if let Some(g) = &self.gpu {
+            g.window.focus_window();
+        }
+        self.redraw();
+    }
+
     /// Modifiers held, for Neovim's mouse input ("CS", "A", "").
     fn nvim_mods(&self) -> String {
         let m = self.mods;
@@ -1088,6 +1113,19 @@ impl ApplicationHandler<ZEvent> for App {
                 let _ = self.new_tab(None, None);
             }
         }
+        // files dropped on the window: winit has no drag and drop on Wayland, zash listens itself
+        if let Some(g) = &self.gpu {
+            use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+            if let Ok(RawDisplayHandle::Wayland(h)) = g.window.display_handle().map(|d| d.as_raw()) {
+                let proxy = self.proxy.clone();
+                let on_drop: crate::dnd::OnDrop = Box::new(move |paths, x, y| {
+                    let _ = proxy.send_event(ZEvent::Drop(paths, x, y));
+                });
+                if let Err(e) = crate::dnd::listen(h.display.as_ptr(), on_drop) {
+                    eprintln!("zash: no drag and drop: {e}");
+                }
+            }
+        }
         let mut watched = vec![self.cfg.colors_file.clone()];
         watched.extend(self.cfg.glass_file.clone());
         watch_theme(self.proxy.clone(), watched);
@@ -1096,6 +1134,11 @@ impl ApplicationHandler<ZEvent> for App {
 
     fn user_event(&mut self, el: &ActiveEventLoop, ev: ZEvent) {
         let (id, ev) = match ev {
+            ZEvent::Drop(paths, x, y) => {
+                let scale = self.gpu.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0);
+                self.drop_files(paths, Some((x * scale, y * scale)));
+                return;
+            }
             ZEvent::Theme => {
                 if let Ok(s) = std::fs::read_to_string(&self.cfg.colors_file) {
                     self.cfg.palette = crate::config::Palette::from_tinct_lua(&s);
@@ -1185,6 +1228,7 @@ impl ApplicationHandler<ZEvent> for App {
                 self.set_font(pt);
             }
             WindowEvent::RedrawRequested => self.render(),
+            WindowEvent::DroppedFile(path) => self.drop_files(vec![path], None),
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => self.key(&event),
             WindowEvent::Focused(f) => {
@@ -1352,3 +1396,23 @@ fn watch_theme(proxy: EventLoopProxy<ZEvent>, paths: Vec<std::path::PathBuf>) {
     });
 }
 
+
+/// A path as one shell word: plain when it is safe, else in single quotes.
+fn shell_quote(s: &str) -> String {
+    let safe = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+,:@%=~".contains(c));
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(test)]
+mod quote_tests {
+    #[test]
+    fn quoting() {
+        assert_eq!(super::shell_quote("/tmp/a.txt"), "/tmp/a.txt");
+        assert_eq!(super::shell_quote("/tmp/my file.png"), "'/tmp/my file.png'");
+        assert_eq!(super::shell_quote("it's"), "'it'\\''s'");
+    }
+}

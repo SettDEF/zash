@@ -17,6 +17,8 @@ pub enum ZEvent {
     Term(u64, Event),
     /// tinct wrote new colours
     Theme,
+    /// files dropped on the window (Wayland), and where (logical pixels)
+    Drop(Vec<std::path::PathBuf>, f64, f64),
 }
 
 /// Where the terminal's events go: the window's event loop, or a channel

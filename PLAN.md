@@ -204,6 +204,23 @@ this machine, on correctness (vttest, esctest, replayed sessions), throughput,
 input latency, frame times while scrolling, start time, memory and idle CPU.
 A release that is worse than the best on any of them is not done.
 
+## Status (2026-10-17)
+
+Done: T0 (vttest screens checked), most of T1 (pixel scrolling, cursor glide, a
+cache keyed by row content), T2 (tinct, glass, tabs, splits with the user's tmux
+keys, centring/offset), T3 basics (marks, failed-command bars, jump, copy last
+output, search), the T4 popup (zsh's completions + history, Tab cycles, blur and
+a look set from zstyle or zash.toml), the Neovim mode (zash as Neovim's screen,
+gliding scrolls), files dropped on the window (own Wayland data device: paths
+into a shell, `:e` in Neovim, the pane under the drop). zash is the desktop's
+terminal.
+
+**Later, after the zett editor (and its PDF viewer) are done:**
+- images: the Kitty graphics protocol (icat, yazi, image.nvim), then sixel
+- dragging out: a selection or a file name from the screen into other apps
+  (a Wayland data source on the same data device as the drops)
+- sessions that outlive the window (T7), then Kitty keyboard protocol
+
 ## Milestones
 
 - **T0 — a correct terminal.** vte + grid + pty + wgpu text; true colour,
