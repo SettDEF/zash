@@ -129,6 +129,16 @@ _zash_capture() {
   return 0
 }
 
+# the capture as a completion run, with what others drew on the line kept: running it cleared
+# the autosuggestion's colour (region_highlight), so the grey suggestion turned as bright as typing
+_zash_cap_quiet() {
+  local pd=$POSTDISPLAY
+  local -a rh=("${region_highlight[@]}")
+  zle _zash_cap 2>/dev/null
+  POSTDISPLAY=$pd
+  region_highlight=("${rh[@]}")
+}
+
 _zash_redraw() {
   # never inside another completion (Tab's own menu, a listing): zsh cannot nest them, and
   # trying once crashed the shell. Nor while our own capture runs.
@@ -147,7 +157,7 @@ _zash_redraw() {
   # only while typing a word at the end of the line, in insert mode
   if [[ $KEYMAP == vicmd || -n $RBUFFER || -z $LBUFFER || $LBUFFER == *[[:space:]] || $#BUFFER -gt 400 ]]; then _zash_close; return; fi
   _zash_busy=1
-  zle _zash_cap 2>/dev/null
+  _zash_cap_quiet
   _zash_busy=0
   _zash_history
   if (( $#_zash_ins == 0 )) || { (( $#_zash_ins == 1 )) && [[ ${_zash_ins[1]} == "${LBUFFER[_zash_wstart+1,-1]}" ]] }; then _zash_close; return; fi
@@ -173,7 +183,7 @@ _zash_step() {
 _zash_tab() { if (( _zash_open )); then _zash_step 1; else
   if [[ $_zash_trigger == tab ]]; then
     _zash_busy=1
-    zle _zash_cap 2>/dev/null
+    _zash_cap_quiet
     _zash_busy=0
     _zash_history
     if (( $#_zash_ins > 1 )); then _zash_sel=0; _zash_popup; _zash_step 1; return; fi

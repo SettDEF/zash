@@ -712,7 +712,8 @@ impl Renderer {
             let dim = dim6(*fg);
             let (b, _) = label(&mut self.font_system, &self.family, &z.title, if z.focus { *fg } else { dim }, self.font_px, self.cell_h);
             labels.push((b, r[0] + self.cell_w * 1.5, r[1]));
-            let bx = r[0] + (z.w as f32 - 9.0) * self.cell_w;
+            // from the frame's right edge (a docked frame reaches past its last cell to the window's)
+            let bx = r[0] + r[2] - 9.0 * self.cell_w + self.cell_w * 0.25;
             for (k, glyph) in [(1.0, "⌄"), (3.0, "–"), (5.0, "×")].into_iter().filter(|_| z.buttons) {
                 let cx = bx + (k + 0.5) * self.cell_w;
                 let cy = r[1] + self.cell_h * 0.5;
@@ -789,6 +790,7 @@ impl Renderer {
         }
         let mut backdrop: Option<([f32; 4], f32, f32)> = None;
         if let (Some(pp), Some((cr, cc, _))) = (&frame.popup, frame.cursor) {
+            let cr = pp.row.unwrap_or(cr);
             // the completion popup: under the word being completed, above it when there is no room
             let look = frame.popup_look;
             let n = pp.items.len();
@@ -811,7 +813,7 @@ impl Renderer {
             let footer_w = if more { 34 } else { 0 };
             let pw = ((widest.max(12).max(footer_w) + 3) as f32 * self.cell_w).min(width as f32 - 2.0 * self.pad);
             let ph = rows.len() as f32 * row_h + self.cell_h * 0.5 + if more { row_h } else { 0.0 };
-            let wx = fox + cc.saturating_sub(pp.word) as f32 * self.cell_w - self.cell_w;
+            let wx = fox + pp.col.unwrap_or_else(|| cc.saturating_sub(pp.word)) as f32 * self.cell_w - self.cell_w;
             let x = wx.clamp(left.min(width as f32 - pw - self.pad).max(self.pad), (right.max(left + pw) - pw).min(width as f32 - pw - self.pad).max(self.pad));
             let below = line_y + self.cell_h + 2.0;
             let y = if below + ph <= bottom || below_px >= above_px { below } else { (line_y - ph - 4.0).max(self.top) };

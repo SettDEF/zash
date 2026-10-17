@@ -195,6 +195,11 @@ pub struct Popup {
     pub sel: Option<usize>,
     /// how many columns the word being completed already has: the popup lines up with its start
     pub word: usize,
+    /// the column the word starts at, taken when the popup came (the live cursor wanders while
+    /// the shell redraws the line: the popup followed it and jumped)
+    pub col: Option<usize>,
+    /// the screen row it came on (the same: zeit repaints with the cursor elsewhere for a moment)
+    pub row: Option<usize>,
 }
 
 impl Popup {
@@ -211,7 +216,7 @@ impl Popup {
         if items.is_empty() {
             return Some(None);
         }
-        Some(Some(Popup { sel: sel.checked_sub(1).filter(|s| *s < items.len()), word, items, line: None }))
+        Some(Some(Popup { sel: sel.checked_sub(1).filter(|s| *s < items.len()), word, items, line: None, col: None, row: None }))
     }
 }
 
@@ -427,7 +432,8 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                 let (kind, exit) = match what {
                     Found::Popup(p) => {
                         let line = t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize;
-                        *popup.lock().unwrap() = p.map(|p| Popup { line: Some(line), ..p });
+                        let col = t.grid().cursor.point.column.0.saturating_sub(p.as_ref().map_or(0, |p| p.word));
+                        *popup.lock().unwrap() = p.map(|p| Popup { line: Some(line), col: Some(col), row: Some(t.grid().cursor.point.line.0.max(0) as usize), ..p });
                         continue;
                     }
                     Found::Reverse(on) => {
@@ -539,9 +545,9 @@ mod mark_tests {
     fn popup_messages() {
         let mut s = MarkScanner::default();
         let out = s.scan(b"\x1b]7733;popup;2;3;Documents/\x1fDownloads/\x07x\x1b]7733;close\x07");
-        assert_eq!(out[0].1, Found::Popup(Some(Popup { items: vec!["Documents/".into(), "Downloads/".into()], sel: Some(1), word: 3, line: None })));
+        assert_eq!(out[0].1, Found::Popup(Some(Popup { items: vec!["Documents/".into(), "Downloads/".into()], sel: Some(1), word: 3, line: None, col: None, row: None })));
         assert_eq!(out[1].1, Found::Popup(None));
-        assert_eq!(Popup::parse("popup;0;1;a"), Some(Some(Popup { items: vec!["a".into()], sel: None, word: 1, line: None })));
+        assert_eq!(Popup::parse("popup;0;1;a"), Some(Some(Popup { items: vec!["a".into()], sel: None, word: 1, line: None, col: None, row: None })));
         assert_eq!(Popup::parse("nonsense"), None);
     }
 
