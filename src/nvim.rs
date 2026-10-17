@@ -410,6 +410,8 @@ impl State {
             bg,
             cursor_color: p.cursor_bg,
             fail_color: p.ansi[1],
+            small: Vec::new(),
+            tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]],
         }
     }
 }

@@ -90,6 +90,8 @@ pub struct Session {
     pub nvim_sock: Arc<Mutex<Option<String>>>,
     /// the popup's look as this pane's shell set it (zstyle), over zash.toml
     pub popup_style: Arc<Mutex<String>>,
+    /// small two-column rows (zeit's job lines), by screen row
+    pub ui_rows: Arc<Mutex<Vec<UiRow>>>,
     pub term: Arc<FairMutex<Term<Listener>>>,
     writer: Arc<Mutex<File>>,
     pty: Arc<Mutex<tty::Pty>>,
@@ -115,12 +117,49 @@ pub enum Found {
     Nvim(String),
     /// the popup's look from the shell's zstyles (`opacity=0.8,blur=yes`)
     PopupStyle(String),
+    /// rows another program (zeit) draws as small two-column lines: OSC 7733;rows;…
+    Rows(Vec<UiRow>),
     /// DECSCNM: the whole screen in reverse video (light background), on or off
     Reverse(bool),
     Popup(Option<Popup>),
 }
 
 /// The completion popup the shell plugin shows (OSC 7733).
+/// A row drawn small (zeit's job line): the command on the left, any number of
+/// columns right-aligned, each with its tone, and an optional progress bar.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct UiRow {
+    pub row: usize,
+    pub col: usize,
+    pub width: usize,
+    pub left: String,
+    /// (tone, text), drawn from the right edge leftwards in reverse order
+    pub cols: Vec<(char, String)>,
+    /// 0..1, drawn as a thin bar under the row
+    pub progress: Option<f32>,
+}
+
+impl UiRow {
+    /// `ROW␟COL␟WIDTH␟LEFT␟TONE:TEXT␟…␟%:0.42`, rows split by ␞. Tones: g(ood),
+    /// b(ad), r(unning), m(uted), a(ccent), or anything else for plain.
+    pub fn parse_list(s: &str) -> Vec<UiRow> {
+        s.split('\x1e')
+            .filter_map(|item| {
+                let f: Vec<&str> = item.split('\x1f').collect();
+                let mut r = UiRow { row: f.first()?.parse().ok()?, col: f.get(1)?.parse().ok()?, width: f.get(2)?.parse().ok()?, left: f.get(3).unwrap_or(&"").to_string(), ..Default::default() };
+                for c in f.iter().skip(4) {
+                    match c.split_once(':') {
+                        Some(("%", v)) => r.progress = v.parse::<f32>().ok().map(|p| p.clamp(0.0, 1.0)),
+                        Some((t, text)) if t.chars().count() == 1 => r.cols.push((t.chars().next().unwrap(), text.to_string())),
+                        _ => r.cols.push((' ', c.to_string())),
+                    }
+                }
+                Some(r)
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Popup {
     pub items: Vec<String>,
@@ -190,6 +229,8 @@ impl MarkScanner {
                 }
             } else if let Some(look) = body.strip_prefix("7733;style;") {
                 out.push((at, Found::PopupStyle(look.to_string())));
+            } else if let Some(list) = body.strip_prefix("7733;rows;").or_else(|| (body == "7733;rows").then_some("")) {
+                out.push((at, Found::Rows(UiRow::parse_list(list))));
             } else if let Some(sock) = body.strip_prefix("7733;nvim;") {
                 out.push((at, Found::Nvim(sock.to_string())));
             } else if let Some(m) = body.strip_prefix("7733;") {
@@ -249,9 +290,10 @@ impl Session {
         let nvim_sock = Arc::new(Mutex::new(None));
         let popup_style = Arc::new(Mutex::new(String::new()));
 
-        let (t, m, l, pp, rv, nv, ps) = (term.clone(), marks.clone(), listener.clone(), popup.clone(), reverse.clone(), nvim_sock.clone(), popup_style.clone());
-        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, rv, nv, ps, l))?;
-        Ok(Session { term, writer, pty, grid, marks, popup, reverse, nvim_sock, popup_style, pid })
+        let ui_rows = Arc::new(Mutex::new(Vec::new()));
+        let (t, m, l, pp, rv, nv, ps, ur) = (term.clone(), marks.clone(), listener.clone(), popup.clone(), reverse.clone(), nvim_sock.clone(), popup_style.clone(), ui_rows.clone());
+        std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, rv, nv, ps, ur, l))?;
+        Ok(Session { term, writer, pty, grid, marks, popup, reverse, nvim_sock, popup_style, ui_rows, pid })
     }
 
     /// Bytes for the program, as if typed.
@@ -288,7 +330,7 @@ impl Session {
 }
 
 /// Reads the program's output, notes shell marks, feeds the parser.
-fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, popup: Arc<Mutex<Option<Popup>>>, reverse: Arc<std::sync::atomic::AtomicBool>, nvim_sock: Arc<Mutex<Option<String>>>, popup_style: Arc<Mutex<String>>, listener: Listener) {
+fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<Mutex<Vec<Mark>>>, popup: Arc<Mutex<Option<Popup>>>, reverse: Arc<std::sync::atomic::AtomicBool>, nvim_sock: Arc<Mutex<Option<String>>>, popup_style: Arc<Mutex<String>>, ui_rows: Arc<Mutex<Vec<UiRow>>>, listener: Listener) {
     use alacritty_terminal::grid::Dimensions;
     let mut parser: alacritty_terminal::vte::ansi::Processor = alacritty_terminal::vte::ansi::Processor::new();
     let mut scanner = MarkScanner::default();
@@ -341,6 +383,10 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                     }
                     Found::Nvim(sock) => {
                         *nvim_sock.lock().unwrap() = Some(sock);
+                        continue;
+                    }
+                    Found::Rows(rows) => {
+                        *ui_rows.lock().unwrap() = rows;
                         continue;
                     }
                     Found::Mark(k, e) => (k, e),
@@ -457,5 +503,25 @@ mod tests {
         assert_eq!(e["COLORTERM"], "truecolor");
         assert_eq!(e["TERM_PROGRAM"], "zash");
         assert!(FOREIGN.contains(&"TMUX") && FOREIGN.contains(&"WEZTERM_PANE"));
+    }
+}
+
+#[cfg(test)]
+mod ui_row_tests {
+    use super::*;
+
+    #[test]
+    fn rows_message() {
+        let mut s = MarkScanner::default();
+        let out = s.scan(b"\x1b]7733;rows;3\x1f0\x1f80\x1f\xe2\x96\xb8 cargo build\x1fm:bottom\x1fg:\xe2\x9c\x93 3.2s\x1e9\x1f40\x1f40\x1fmake\x1fr:\xe2\x9f\xb3 4s\x1f%:0.5\x07");
+        let Found::Rows(r) = &out[0].1 else { panic!("{out:?}") };
+        assert_eq!(r.len(), 2);
+        assert_eq!((r[0].row, r[0].col, r[0].width), (3, 0, 80));
+        assert_eq!(r[0].cols, vec![('m', "bottom".to_string()), ('g', "✓ 3.2s".to_string())]);
+        assert_eq!(r[1].progress, Some(0.5));
+        assert_eq!(r[0].left, "▸ cargo build");
+        assert_eq!(r[1].cols[0].1, "⟳ 4s");
+        let out = s.scan(b"\x1b]7733;rows;\x07");
+        assert_eq!(out[0].1, Found::Rows(Vec::new()));
     }
 }

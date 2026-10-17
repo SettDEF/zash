@@ -73,6 +73,10 @@ pub struct Frame {
     pub bg: Rgb,
     pub cursor_color: Rgb,
     pub fail_color: Rgb,
+    /// rows drawn small with columns (zeit's job lines); their cells are blanked
+    pub small: Vec<crate::session::UiRow>,
+    /// the tones of those columns: good, bad, running, accent
+    pub tones: [Rgb; 4],
 }
 
 fn resolve(c: AColor, term_colors: &alacritty_terminal::term::color::Colors, p: &Palette, bold: bool) -> Rgb {
@@ -135,7 +139,7 @@ impl Frame {
                 }
             }
         }
-        Frame { popup_look: crate::config::PopupLook::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
+        Frame { popup_look: crate::config::PopupLook::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]] }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -654,6 +658,41 @@ impl Renderer {
             let w = b.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
             (b, w)
         };
+        // small rows: the command left, its columns right-aligned, a progress bar under it
+        for p in panes {
+            if p.frame.small.is_empty() {
+                continue;
+            }
+            let (ox, oy) = self.origin(p.x, p.y, p.w, p.h);
+            let (cw, ch) = (self.cell_w, self.cell_h);
+            let px = (self.font_px * 0.8).round();
+            for sr in &p.frame.small {
+                let y = oy + sr.row as f32 * ch;
+                let x0 = ox + sr.col as f32 * cw;
+                let x1 = ox + (sr.col + sr.width) as f32 * cw;
+                let mut right = x1 - cw * 0.6;
+                for (tone, text) in sr.cols.iter().rev() {
+                    let (b, w) = label(&mut self.font_system, &self.family, text, p.frame.tone(*tone), px, ch);
+                    right -= w;
+                    labels.push((b, right, y));
+                    right -= cw * 1.4;
+                }
+                // the command gets what is left (about 0.8 cells a character at this size)
+                let room = (((right - x0) / (cw * 0.8)) as usize).saturating_sub(2);
+                let mut left: String = sr.left.chars().take(room).collect();
+                if sr.left.chars().count() > room && room > 1 {
+                    left.pop();
+                    left.push('…');
+                }
+                let (b, _) = label(&mut self.font_system, &self.family, &left, p.frame.fg, px, ch);
+                labels.push((b, x0 + cw * 0.3, y));
+                if let Some(pr) = sr.progress {
+                    let mut c = p.frame.tone('r').f32();
+                    c[3] = 0.9;
+                    over.push(Rect { xywh: [x0 + cw * 0.3, y + ch - 2.0, (x1 - x0 - cw * 0.6) * pr, 2.0], color: c, p: [0.0, 0.0] });
+                }
+            }
+        }
         if frame.tabs.len() > 1 {
             // the tab bar: one pill per tab, the active one lifted
             let h = self.top;
@@ -897,6 +936,36 @@ pub fn prompts(marks: &[crate::session::Mark]) -> Vec<(usize, Option<i32>)> {
         }
     }
     out
+}
+
+impl Frame {
+    /// Small rows (OSC 7733;rows) over the live screen: their cells give way to them.
+    pub fn with_rows<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, rows: &[crate::session::UiRow]) -> Frame {
+        if term.grid().display_offset() != 0 {
+            return self;
+        }
+        for r in rows {
+            if let Some(row) = self.rows.get_mut(r.row) {
+                for c in row.iter_mut().skip(r.col).take(r.width) {
+                    c.ch = ' ';
+                    c.zw = None;
+                }
+                self.small.push(r.clone());
+            }
+        }
+        self
+    }
+
+    pub fn tone(&self, t: char) -> Rgb {
+        match t {
+            'g' => self.tones[0],
+            'b' => self.tones[1],
+            'r' => self.tones[2],
+            'a' => self.tones[3],
+            'm' => dim6(self.fg),
+            _ => self.fg,
+        }
+    }
 }
 
 impl Frame {
