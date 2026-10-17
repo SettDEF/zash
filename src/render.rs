@@ -173,6 +173,14 @@ struct VOut {
 }
 // p.x: corner radius, p.y: edge softness (a shadow is a large softness); both 0: a plain box
 @fragment fn fs(i: VOut) -> @location(0) vec4<f32> {
+    // p.y -1: a triangle pointing right, -2: pointing left (powerline separators)
+    if (i.p.y < -0.5) {
+        let uv = i.local / (2.0 * i.half) + vec2(0.5);
+        var inside = (1.0 - uv.x) - abs(uv.y * 2.0 - 1.0);
+        if (i.p.y < -1.5) { inside = uv.x - abs(uv.y * 2.0 - 1.0); }
+        let a = clamp(inside * i.half.x * 2.0 + 0.5, 0.0, 1.0);
+        return vec4(i.color.rgb, i.color.a * a);
+    }
     if (i.p.x <= 0.0 && i.p.y <= 0.0) { return i.color; }
     let soft = max(i.p.y, 0.6);
     let r = min(i.p.x + i.p.y, min(i.half.x, i.half.y));
@@ -460,7 +468,8 @@ impl Renderer {
             let mut spans: Vec<(String, Style2)> = Vec::new();
             for c in row.iter().filter(|c| !c.spacer) {
                 let mut s = String::new();
-                s.push(if c.ch == '\0' { ' ' } else { c.ch });
+                // powerline shapes are drawn as rectangles (rect_list), not as glyphs
+                s.push(if c.ch == '\0' || powerline(c.ch).is_some() { ' ' } else { c.ch });
                 if let Some(z) = &c.zw {
                     s.extend(z.iter());
                 }
@@ -533,6 +542,19 @@ impl Renderer {
                     }
                 }
                 let fg = Rgb(cell.style.fg.0, cell.style.fg.1, cell.style.fg.2).f32();
+                // powerline shapes, drawn here at the full cell height (the font's glyphs are only as
+                // tall as the font, so a pill's ends would stop short of its middle)
+                if let Some(shape) = powerline(cell.ch) {
+                    let x = pad + c as f32 * cw;
+                    let r = (ch / 2.0).min(cw);
+                    out.push(match shape {
+                        // a rounded end reaches into the next cell (the pill's body, same colour)
+                        Powerline::RoundLeft => Rect { xywh: [x, y, 2.0 * cw, ch], color: fg, p: [r, 0.0] },
+                        Powerline::RoundRight => Rect { xywh: [x - cw, y, 2.0 * cw, ch], color: fg, p: [r, 0.0] },
+                        Powerline::TriRight => Rect { xywh: [x, y, cw, ch], color: fg, p: [0.0, -1.0] },
+                        Powerline::TriLeft => Rect { xywh: [x, y, cw, ch], color: fg, p: [0.0, -2.0] },
+                    });
+                }
                 let w = if cell.wide { 2.0 * cw } else { cw };
                 let thick = (self.font_px / 14.0).max(1.0).round();
                 if cell.underline {
@@ -1149,4 +1171,22 @@ fn fullscreen(enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, pipeli
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bind, &[]);
     pass.draw(0..3, 0..1);
+}
+
+enum Powerline {
+    RoundLeft,
+    RoundRight,
+    TriRight,
+    TriLeft,
+}
+
+/// The powerline separators zash draws itself (U+E0B0 , U+E0B2 , U+E0B4 , U+E0B6 ).
+fn powerline(c: char) -> Option<Powerline> {
+    match c {
+        '\u{e0b0}' => Some(Powerline::TriRight),
+        '\u{e0b2}' => Some(Powerline::TriLeft),
+        '\u{e0b4}' => Some(Powerline::RoundRight),
+        '\u{e0b6}' => Some(Powerline::RoundLeft),
+        _ => None,
+    }
 }
