@@ -256,7 +256,7 @@ impl MarkScanner {
                 out.push((at, Found::PopupStyle(look.to_string())));
             } else if let Some(k) = body.strip_prefix("7733;keys;") {
                 out.push((at, Found::Keys(k.to_string())));
-            } else if let Some((kind, rest)) = body.strip_prefix("7733;").and_then(|b| b.split_once(';')).filter(|(k, _)| matches!(*k, "webrect" | "webhide" | "webclose" | "float" | "floatclose")) {
+            } else if let Some((kind, rest)) = body.strip_prefix("7733;").and_then(|b| b.split_once(';')).filter(|(k, _)| matches!(*k, "webrect" | "webhide" | "webclose" | "zfloat" | "zfloatclose")) {
                 out.push((at, Found::WebPin(kind.to_string(), rest.to_string())));
             } else if let Some(w) = body.strip_prefix("7733;web;") {
                 out.push((at, Found::Web(w.to_string())));

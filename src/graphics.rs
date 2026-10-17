@@ -40,12 +40,12 @@ pub struct Graphics {
     /// focus changes the multiplexer asked for: (id, focused)
     pub pin_focus: Vec<(u32, bool)>,
     /// a multiplexer's app popup (OSC 7733;float): zash draws its frame, title and buttons
-    pub float: Option<Float>,
+    pub float: Option<ZFloat>,
 }
 
 /// Where a float is (cells, frame included), whether it has the keyboard, its name.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Float {
+pub struct ZFloat {
     pub x: usize,
     pub y: usize,
     pub w: usize,
@@ -232,16 +232,16 @@ impl Graphics {
     /// OSC 7733;webrect|webhide|webclose from a multiplexer: `id=N;x=;y=;w=;h=;focus=;url=…`.
     pub fn pin(&mut self, kind: &str, body: &str, cell: (f32, f32), wake: Box<dyn Fn() + Send + Sync>) {
         // the float: id=;x=;y=;w=;h=;focus=;title=… (title last), or floatclose
-        if kind == "floatclose" {
+        if kind == "zfloatclose" {
             self.float = None;
             self.generation += 1;
             return;
         }
-        if kind == "float" {
+        if kind == "zfloat" {
             let (head, title) = body.split_once(";title=").unwrap_or((body, ""));
             let kv: HashMap<&str, &str> = head.split(';').filter_map(|p| p.split_once('=')).collect();
             let n = |k: &str| kv.get(k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-            self.float = Some(Float { x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
+            self.float = Some(ZFloat { x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
             self.generation += 1;
             return;
         }

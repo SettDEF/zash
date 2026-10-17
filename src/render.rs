@@ -80,7 +80,7 @@ pub struct Frame {
     /// images (Kitty graphics) on screen
     pub images: Vec<ImageView>,
     /// a multiplexer's app popup: zash draws its frame (the cells under it are blanked)
-    pub float: Option<crate::graphics::Float>,
+    pub float: Option<crate::graphics::ZFloat>,
 }
 
 fn resolve(c: AColor, term_colors: &alacritty_terminal::term::color::Colors, p: &Palette, bold: bool) -> Rgb {
@@ -630,7 +630,7 @@ impl Renderer {
         let mut rects = Vec::new();
         let mut over = Vec::new();
         // floats (a multiplexer's app popups): their pixel rect, for the title and buttons later
-        let mut floats: Vec<([f32; 4], crate::graphics::Float, Rgb, Rgb, Rgb)> = Vec::new();
+        let mut floats: Vec<([f32; 4], crate::graphics::ZFloat, Rgb, Rgb, Rgb)> = Vec::new();
         for p in panes {
             self.shape_rows(p.id, p.frame, p.w - 2.0 * self.pad);
             let (ox, oy) = self.origin(p.x, p.y, p.w, p.h);
