@@ -219,7 +219,7 @@ terminal.
 - images: the Kitty graphics protocol (icat, yazi, image.nvim), then sixel
 - dragging out: a selection or a file name from the screen into other apps
   (a Wayland data source on the same data device as the drops)
-- sessions that outlive the window (T7), then Kitty keyboard protocol
+- sessions that outlive the window: **zeit** (its own project, /mnt/storage/dev/projects/zeit), then Kitty keyboard protocol
 
 ## Milestones
 
