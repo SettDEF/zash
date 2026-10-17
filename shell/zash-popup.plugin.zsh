@@ -75,6 +75,8 @@ _zash_popup() {
     local IFS=$'\x1f'
     # the look from zstyle, once per shell (zash keeps it for this pane)
     if [[ -n $_zash_look && -z $_zash_look_sent ]]; then _zash_send "style;$_zash_look"; typeset -g _zash_look_sent=1; fi
+    # the line first: the popup lines up with the cursor zash sees (a stale one made it jump)
+    zle -R 2>/dev/null
     _zash_send "popup;$_zash_sel;$(( CURSOR - _zash_wstart ));${_zash_show[*]}"
   else
     _zash_text
