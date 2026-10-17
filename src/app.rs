@@ -1324,6 +1324,12 @@ impl ApplicationHandler<ZEvent> for App {
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, ev: ZEvent) {
+        let _busy = crate::watchdog::busy(match &ev {
+            ZEvent::Term(..) => "handling terminal output",
+            ZEvent::Theme => "reloading colours",
+            ZEvent::Settings => "reloading settings",
+            ZEvent::Drop(..) => "taking dropped files",
+        });
         let (id, ev) = match ev {
             ZEvent::Drop(paths, x, y) => {
                 let scale = self.gpu.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0);
@@ -1426,6 +1432,13 @@ impl ApplicationHandler<ZEvent> for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, ev: WindowEvent) {
+        let _busy = crate::watchdog::busy(match &ev {
+            WindowEvent::RedrawRequested => "drawing",
+            WindowEvent::KeyboardInput { .. } => "handling a key",
+            WindowEvent::Resized(_) => "resizing",
+            WindowEvent::MouseInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::MouseWheel { .. } => "handling the mouse",
+            _ => "handling a window event",
+        });
         match ev {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Resized(size) => {

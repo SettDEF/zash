@@ -6,6 +6,7 @@
 //!                                 headless: run CMD, print the screen, render a PNG
 
 mod app;
+mod watchdog;
 mod cli;
 mod config;
 mod dnd;
@@ -26,6 +27,7 @@ use std::time::Duration;
 
 fn main() {
     session::scrub_environment();
+    watchdog::start();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // --preset NAME and --config FILE: as variables, so the shells inside see them too
     for (flag, var) in [("--preset", "ZASH_PRESET"), ("--config", "ZASH_CONFIG")] {

@@ -79,6 +79,8 @@ pub struct Frame {
     pub tones: [Rgb; 4],
     /// images (Kitty graphics) on screen
     pub images: Vec<ImageView>,
+    /// a multiplexer's app popup: zash draws its frame (the cells under it are blanked)
+    pub zelt: Option<crate::graphics::Zelt>,
 }
 
 fn resolve(c: AColor, term_colors: &alacritty_terminal::term::color::Colors, p: &Palette, bold: bool) -> Rgb {
@@ -141,7 +143,7 @@ impl Frame {
                 }
             }
         }
-        Frame { popup_look: crate::config::PopupLook::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() }
+        Frame { zelt: None, popup_look: crate::config::PopupLook::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -627,10 +629,24 @@ impl Renderer {
         let (cur, animating) = self.cursor_motion(frame, fox, foy);
         let mut rects = Vec::new();
         let mut over = Vec::new();
+        // zelts (a multiplexer's app popups): their pixel rect, for the title and buttons later
+        let mut zelts: Vec<([f32; 4], crate::graphics::Zelt, Rgb, Rgb, Rgb)> = Vec::new();
         for p in panes {
             self.shape_rows(p.id, p.frame, p.w - 2.0 * self.pad);
             let (ox, oy) = self.origin(p.x, p.y, p.w, p.h);
             let clip = [p.x, p.y.max(self.top), p.w, p.y + p.h - p.y.max(self.top)];
+            if let Some(z) = &p.frame.zelt {
+                // under the text: a soft shadow, the edge (the accent when it has the keyboard), the panel
+                let r = [ox + z.x as f32 * self.cell_w, oy + z.y as f32 * self.cell_h, z.w as f32 * self.cell_w, z.h as f32 * self.cell_h];
+                let rad = 12.0;
+                rects.push(Rect { xywh: [r[0] - 14.0, r[1] - 10.0, r[2] + 28.0, r[3] + 28.0], color: [0.0, 0.0, 0.0, 0.34], p: [rad, 14.0] });
+                let edge = if z.focus { let mut c = p.frame.cursor_color.f32(); c[3] = 0.85; c } else { let mut c = p.frame.fg.f32(); c[3] = 0.16; c };
+                rects.push(Rect { xywh: [r[0] - 1.0, r[1] - 1.0, r[2] + 2.0, r[3] + 2.0], color: edge, p: [rad + 1.0, 0.0] });
+                let mut panel = p.frame.bar_bg.f32();
+                panel[3] = 0.97;
+                rects.push(Rect { xywh: r, color: panel, p: [rad, 0.0] });
+                zelts.push((r, z.clone(), p.frame.fg, p.frame.cursor_color, p.frame.fail_color));
+            }
             rects.extend(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy, clip));
             over.extend(self.overlay_list(p.frame, ox, oy, clip));
         }
@@ -674,6 +690,23 @@ impl Renderer {
             let w = b.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
             (b, w)
         };
+        // the zelts' title bars: the name, and the buttons on the cells the multiplexer reads clicks from
+        for (r, z, fg, accent, fail) in &zelts {
+            let dim = dim6(*fg);
+            let (b, _) = label(&mut self.font_system, &self.family, &z.title, if z.focus { *fg } else { dim }, self.font_px, self.cell_h);
+            labels.push((b, r[0] + self.cell_w * 1.5, r[1]));
+            let bx = r[0] + (z.w as f32 - 9.0) * self.cell_w;
+            for (k, glyph) in [(1.0, "⌄"), (3.0, "–"), (5.0, "×")] {
+                let cx = bx + (k + 0.5) * self.cell_w;
+                let cy = r[1] + self.cell_h * 0.5;
+                let d = self.cell_h * 0.78;
+                let col = if glyph == "×" { let mut c = fail.f32(); c[3] = if z.focus { 0.85 } else { 0.35 }; c } else { let mut c = fg.f32(); c[3] = 0.12; c };
+                over.push(Rect { xywh: [cx - d / 2.0, cy - d / 2.0, d, d], color: col, p: [d / 2.0, 0.0] });
+                let (b, w) = label(&mut self.font_system, &self.family, glyph, if glyph == "×" { Rgb(255, 255, 255) } else { *fg }, self.font_px * 0.9, self.cell_h);
+                labels.push((b, cx - w / 2.0, r[1]));
+            }
+            let _ = accent;
+        }
         // small rows: the command left, its columns right-aligned, a progress bar under it
         for p in panes {
             if p.frame.small.is_empty() {
@@ -1318,6 +1351,21 @@ impl Frame {
                     self.images.push(ImageView { img, live: Some((*id as u64 | 1 << 40, generation)), row: *y as i64, col: *x, cols: *w, rows: *h });
                 }
             }
+        }
+        // a zelt: its frame ring of cells is zash's to draw (the text frame the multiplexer drew goes)
+        if let Some(z) = g.zelt.clone().filter(|_| term.grid().display_offset() == 0) {
+            for (y, row) in self.rows.iter_mut().enumerate().skip(z.y).take(z.h) {
+                for (x, c) in row.iter_mut().enumerate().skip(z.x).take(z.w) {
+                    if y == z.y || y + 1 == z.y + z.h || x == z.x || x + 1 == z.x + z.w {
+                        c.ch = ' ';
+                        c.zw = None;
+                        c.bg = None;
+                        c.underline = false;
+                        c.strike = false;
+                    }
+                }
+            }
+            self.zelt = Some(z);
         }
         let top = term.grid().history_size() as i64 - term.grid().display_offset() as i64;
         let lines = self.rows.len() as i64;

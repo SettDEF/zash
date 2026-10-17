@@ -393,6 +393,7 @@ impl State {
             }
         }
         Frame {
+            zelt: None,
             above: Vec::new(),
             below: Vec::new(),
             scroll_px: 0.0,
