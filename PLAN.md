@@ -148,6 +148,10 @@ draws it — without breaking the grid for everything else.
 - **Command rules** (with zeit): Lua `z.on_command` decides where a typed
   command runs (a bottom pane for builds that closes on success, a float for
   servers, a new tab for ssh); the zsh integration asks before the line runs.
+  Where it was typed, a compact small-font line stays (`▸ cargo build ·
+  running 0:12 · in the bottom pane`), updating to `✓` or a red `✗ exit N`,
+  and a dropdown: `▸` unfolds the output inline (live, errors first), `▾`
+  folds it; it jumps to the pane and back and stays in the scrollback.
 - **Hooks**: `command.start`, `command.end` (notify when a long command
   finishes while you are elsewhere), `cwd.changed`, `prompt`, `output`, `bell`.
 - **Remote control**: everything zash does is a zett command, so scripts,
