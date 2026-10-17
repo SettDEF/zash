@@ -211,9 +211,10 @@ impl App {
         let s = self.sess()?;
         let f = self.focus_rect()?;
         let r = &g.renderer;
-        let col_f = ((x as f32 - f.x - r.pad) / r.cell_w).max(0.0);
+        let (ox, oy) = r.origin(f.x, f.y, f.w, f.h);
+        let col_f = ((x as f32 - ox) / r.cell_w).max(0.0);
         let col = (col_f as usize).min(s.grid.cols.saturating_sub(1));
-        let row = (((y as f32 - f.y - r.pad) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
+        let row = (((y as f32 - oy) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
         let offset = s.term.lock().grid().display_offset() as i32;
         let side = if col_f.fract() < 0.5 { Side::Left } else { Side::Right };
         Some((Point::new(Line(row as i32 - offset), Column(col)), side))
@@ -223,8 +224,9 @@ impl App {
     fn cell_at(&self, x: f64, y: f64) -> (usize, usize) {
         let (Some(g), Some(s), Some(f)) = (self.gpu.as_ref(), self.sess(), self.focus_rect()) else { return (0, 0) };
         let r = &g.renderer;
-        let col = (((x as f32 - f.x - r.pad) / r.cell_w).max(0.0) as usize).min(s.grid.cols.saturating_sub(1));
-        let row = (((y as f32 - f.y - r.pad) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
+        let (ox, oy) = r.origin(f.x, f.y, f.w, f.h);
+        let col = (((x as f32 - ox) / r.cell_w).max(0.0) as usize).min(s.grid.cols.saturating_sub(1));
+        let row = (((y as f32 - oy) / r.cell_h).max(0.0) as usize).min(s.grid.rows.saturating_sub(1));
         (col, row)
     }
 

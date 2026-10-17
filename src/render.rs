@@ -318,6 +318,9 @@ pub struct Renderer {
     /// background opacity (pre-multiplied into the clear colour)
     pub opacity: f32,
     anim: Option<CursorAnim>,
+    /// text placement: centred in the leftover space, and moved by an offset (pixels)
+    pub center: bool,
+    pub offset: (f32, f32),
     /// the backdrop blur stage, made the first time a popup asks for it
     blur: Option<Blur>,
     format: wgpu::TextureFormat,
@@ -372,6 +375,8 @@ impl Renderer {
             anim: None,
             blur: None,
             format,
+            center: cfg.center,
+            offset: cfg.offset,
         };
         r.set_font(cfg.font_size_pt, cfg.line_height, cfg.padding, scale);
         r
@@ -405,9 +410,24 @@ impl Renderer {
 
     /// Cells that fit in a pane of this many pixels (padding inside it).
     pub fn grid_in(&self, w: f32, h: f32) -> (usize, usize) {
-        let cols = ((w - 2.0 * self.pad) / self.cell_w).floor().max(2.0) as usize;
-        let rows = ((h - 2.0 * self.pad) / self.cell_h).floor().max(1.0) as usize;
+        let (dx, dy) = (self.offset.0.max(0.0), self.offset.1.max(0.0));
+        let cols = ((w - 2.0 * self.pad - dx) / self.cell_w).floor().max(2.0) as usize;
+        let rows = ((h - 2.0 * self.pad - dy) / self.cell_h).floor().max(1.0) as usize;
         (cols, rows)
+    }
+
+    /// Where a pane's first cell starts: after the padding and the offset, and (centred)
+    /// with the space the cells do not fill shared on both sides.
+    pub fn origin(&self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32) {
+        let (cols, rows) = self.grid_in(w, h);
+        let (mut ox, mut oy) = (x + self.pad + self.offset.0, y + self.pad + self.offset.1);
+        if self.center {
+            let spare_x = w - 2.0 * self.pad - self.offset.0.max(0.0) - cols as f32 * self.cell_w;
+            let spare_y = h - 2.0 * self.pad - self.offset.1.max(0.0) - rows as f32 * self.cell_h;
+            ox += (spare_x / 2.0).max(0.0).floor();
+            oy += (spare_y / 2.0).max(0.0).floor();
+        }
+        (ox, oy)
     }
 
     /// Shapes the rows of a pane: above the screen, the screen, below it (top to bottom).
@@ -573,13 +593,13 @@ impl Renderer {
         // shaped rows of panes that are gone are dropped
         self.rows.retain(|id, _| panes.iter().any(|p| p.id == *id));
         self.order.retain(|id, _| panes.iter().any(|p| p.id == *id));
-        let (fox, foy) = (focus.x + self.pad, focus.y + self.pad);
+        let (fox, foy) = self.origin(focus.x, focus.y, focus.w, focus.h);
         let (cur, animating) = self.cursor_motion(frame, fox, foy);
         let mut rects = Vec::new();
         let mut over = Vec::new();
         for p in panes {
             self.shape_rows(p.id, p.frame, p.w - 2.0 * self.pad);
-            let (ox, oy) = (p.x + self.pad, p.y + self.pad);
+            let (ox, oy) = self.origin(p.x, p.y, p.w, p.h);
             let clip = [p.x, p.y.max(self.top), p.w, p.y + p.h - p.y.max(self.top)];
             rects.extend(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy, clip));
             over.extend(self.overlay_list(p.frame, ox, oy, clip));
@@ -710,7 +730,7 @@ impl Renderer {
         let mut areas: Vec<TextArea> = Vec::new();
         for p in panes {
             let (Some(cache), Some(order)) = (self.rows.get(&p.id), self.order.get(&p.id)) else { continue };
-            let (ox, oy) = (p.x + self.pad, p.y + self.pad);
+            let (ox, oy) = self.origin(p.x, p.y, p.w, p.h);
             // each pane's text stays inside its pane (and out of the tab bar); a gliding region's rows inside the region
             let pane_top = p.y.max(self.top);
             let places = placed(p.frame, oy, ch);

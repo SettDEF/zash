@@ -150,6 +150,9 @@ pub struct Config {
     pub smooth_scroll_ms: f32,
     pub cursor_trail: bool,
     pub popup: PopupLook,
+    /// the text centred in the space whole cells do not fill (else top-left), and moved by an offset
+    pub center: bool,
+    pub offset: (f32, f32),
     pub palette: Palette,
     /// the colour file followed live
     pub colors_file: PathBuf,
@@ -182,6 +185,8 @@ impl Default for Config {
             smooth_scroll_ms: 80.0,
             cursor_trail: true,
             popup: PopupLook::default(),
+            center: true,
+            offset: (0.0, 0.0),
             palette: Palette::load(),
             colors_file: Palette::tinct_file(),
             opacity: 1.0,
@@ -244,6 +249,10 @@ struct File {
     opacity: Option<f32>,
     /// a tinct/WezTerm-style colour file to follow instead of the default
     colors: Option<String>,
+    /// "center" or "top-left"
+    align: Option<String>,
+    /// [right, down] in pixels
+    offset: Option<[f32; 2]>,
     /// the completion popup's look
     popup: Option<PopupFile>,
 }
@@ -314,6 +323,11 @@ line_height = 1.2
 features = ["cv06", "cv14", "cv32", "ss04", "ss07", "ss09"]
 # Space around the text, in pixels.
 padding = 0
+# Where the text sits when the window is not a whole number of cells: "center" shares
+# the leftover space on all sides, "top-left" leaves it at the bottom and right.
+align = "center"
+# Moves the text right and down by this many pixels (with "top-left": a margin).
+offset = [0, 0]
 # Lines kept for scrolling back.
 scrollback = 10000
 # The cursor glides to where it goes (milliseconds; 0 = it jumps), with a short smear.
@@ -378,6 +392,12 @@ impl Config {
         if let Some(v) = f.cursor_animation { c.cursor_ms = v.max(0.0); }
         if let Some(v) = f.smooth_scroll { c.smooth_scroll_ms = v.max(0.0); }
         if let Some(v) = f.cursor_trail { c.cursor_trail = v; }
+        match f.align.as_deref() {
+            Some("top-left") | Some("topleft") | Some("left") => c.center = false,
+            Some("center") | Some("centre") | None => c.center = true,
+            Some(other) => eprintln!("zash: align = {other:?}: use \"center\" or \"top-left\""),
+        }
+        if let Some([x, y]) = f.offset { c.offset = (x, y); }
         if let Some(p) = f.popup {
             let d = &mut c.popup;
             if let Some(v) = p.opacity { d.opacity = v.clamp(0.0, 1.0); }
