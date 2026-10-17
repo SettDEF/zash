@@ -149,6 +149,7 @@ pub struct Config {
     /// scrolling glides for this long (ms; 0 = it jumps a line at a time)
     pub smooth_scroll_ms: f32,
     pub cursor_trail: bool,
+    pub popup: PopupLook,
     pub palette: Palette,
     /// the colour file followed live
     pub colors_file: PathBuf,
@@ -180,6 +181,7 @@ impl Default for Config {
             cursor_ms: 90.0,
             smooth_scroll_ms: 80.0,
             cursor_trail: true,
+            popup: PopupLook::default(),
             palette: Palette::load(),
             colors_file: Palette::tinct_file(),
             opacity: 1.0,
@@ -242,6 +244,62 @@ struct File {
     opacity: Option<f32>,
     /// a tinct/WezTerm-style colour file to follow instead of the default
     colors: Option<String>,
+    /// the completion popup's look
+    popup: Option<PopupFile>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct PopupFile {
+    opacity: Option<f32>,
+    radius: Option<f32>,
+    blur: Option<f32>,
+    shadow: Option<bool>,
+    border: Option<bool>,
+    rows: Option<usize>,
+}
+
+/// How the completion popup looks: `[popup]` in zash.toml, and per shell from
+/// `zstyle ':zash:popup' …` (sent with the first popup, it wins).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PopupLook {
+    /// of its background (the text behind shows through, blurred)
+    pub opacity: f32,
+    pub radius: f32,
+    /// blur of what is behind it, in pixels (0: none)
+    pub blur: f32,
+    pub shadow: bool,
+    pub border: bool,
+    /// rows shown at most
+    pub rows: usize,
+}
+
+impl Default for PopupLook {
+    fn default() -> Self {
+        PopupLook { opacity: 0.82, radius: 12.0, blur: 10.0, shadow: true, border: true, rows: 10 }
+    }
+}
+
+impl PopupLook {
+    /// `opacity=0.8,radius=16,blur=yes,rows=8` on top of this one (unknown keys and bad values are skipped).
+    pub fn with(&self, overrides: &str) -> PopupLook {
+        let mut l = *self;
+        let yes = |v: &str| matches!(v, "yes" | "true" | "on" | "1");
+        for kv in overrides.split(',') {
+            let Some((k, v)) = kv.split_once('=') else { continue };
+            let (k, v) = (k.trim(), v.trim());
+            match k {
+                "opacity" => if let Ok(x) = v.parse::<f32>() { l.opacity = x.clamp(0.0, 1.0) },
+                "radius" => if let Ok(x) = v.parse::<f32>() { l.radius = x.clamp(0.0, 40.0) },
+                "blur" => l.blur = v.parse::<f32>().map(|x| x.clamp(0.0, 40.0)).unwrap_or(if yes(v) { 10.0 } else { 0.0 }),
+                "shadow" => l.shadow = yes(v),
+                "border" => l.border = yes(v),
+                "rows" => if let Ok(x) = v.parse::<usize>() { l.rows = x.clamp(1, 40) },
+                _ => {}
+            }
+        }
+        l
+    }
 }
 
 pub const DEFAULT_FILE: &str = r#"# zash — settings. Every line is optional; delete one to get the default back.
@@ -267,6 +325,19 @@ smooth_scroll = 80
 # opacity = 0.95
 # Colours: the file tinct writes for WezTerm, so zash follows the wallpaper.
 colors = "~/.config/wezterm/tinct_colors.lua"
+
+# The completion popup (zsh, while typing). A shell can change these with
+# zstyle ':zash:popup' opacity 0.7 (and radius, blur, shadow, border, rows).
+[popup]
+# How solid its background is (0–1); what is behind shows through, blurred.
+opacity = 0.82
+# Corner radius and the blur of the text behind it, in pixels (blur 0 = none).
+radius = 12
+blur = 10
+shadow = true
+border = true
+# Rows shown at most.
+rows = 10
 "#;
 
 impl Config {
@@ -307,6 +378,15 @@ impl Config {
         if let Some(v) = f.cursor_animation { c.cursor_ms = v.max(0.0); }
         if let Some(v) = f.smooth_scroll { c.smooth_scroll_ms = v.max(0.0); }
         if let Some(v) = f.cursor_trail { c.cursor_trail = v; }
+        if let Some(p) = f.popup {
+            let d = &mut c.popup;
+            if let Some(v) = p.opacity { d.opacity = v.clamp(0.0, 1.0); }
+            if let Some(v) = p.radius { d.radius = v.clamp(0.0, 40.0); }
+            if let Some(v) = p.blur { d.blur = v.clamp(0.0, 40.0); }
+            if let Some(v) = p.shadow { d.shadow = v; }
+            if let Some(v) = p.border { d.border = v; }
+            if let Some(v) = p.rows { d.rows = v.clamp(1, 40); }
+        }
         match f.opacity {
             Some(v) => c.opacity = v.clamp(0.1, 1.0),
             None => {

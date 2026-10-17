@@ -94,6 +94,7 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
     }
     frame.bar = bar;
     frame.popup = session.popup.lock().unwrap().clone();
+    frame.popup_look = cfg.popup.with(&session.popup_style.lock().unwrap());
     if !marks.is_empty() {
         let list: Vec<String> = marks.iter().map(|m| match m.exit { Some(e) => format!("{}{}={e}", m.kind, m.line), None => format!("{}{}", m.kind, m.line) }).collect();
         eprintln!("zash: shell marks: {}", list.join(" "));

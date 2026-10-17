@@ -944,6 +944,7 @@ impl App {
             };
             if id == tab.focus {
                 frame.popup = s.popup.lock().unwrap().clone();
+                frame.popup_look = self.cfg.popup.with(&s.popup_style.lock().unwrap());
                 if let Some(q) = &self.search {
                     frame.bar = Some(q.bar());
                 } else if self.prefix {

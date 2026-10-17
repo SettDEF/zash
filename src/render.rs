@@ -58,6 +58,7 @@ pub struct Frame {
     pub scroll_px: f32,
     /// the shell plugin's completion popup, drawn at the cursor
     pub popup: Option<crate::session::Popup>,
+    pub popup_look: crate::config::PopupLook,
     /// tab titles and which one is shown (drawn as a bar when there are two or more)
     pub tabs: Vec<(String, bool)>,
     /// a bar drawn over the terminal at the top right (search)
@@ -134,7 +135,7 @@ impl Frame {
                 }
             }
         }
-        Frame { region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
+        Frame { popup_look: crate::config::PopupLook::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1] }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -151,16 +152,35 @@ impl Frame {
 const RECT_WGSL: &str = r#"
 struct U { screen: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
-struct VOut { @builtin(position) pos: vec4<f32>, @location(0) color: vec4<f32> };
-@vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) rect: vec4<f32>, @location(1) color: vec4<f32>) -> VOut {
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+    @location(1) local: vec2<f32>,
+    @location(2) half: vec2<f32>,
+    @location(3) p: vec2<f32>,
+};
+@vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) rect: vec4<f32>, @location(1) color: vec4<f32>, @location(2) p: vec2<f32>) -> VOut {
     var corners = array<vec2<f32>, 6>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
-    let p = rect.xy + corners[vi] * rect.zw;
+    let c = corners[vi];
+    let q = rect.xy + c * rect.zw;
     var o: VOut;
-    o.pos = vec4(p.x / u.screen.x * 2.0 - 1.0, 1.0 - p.y / u.screen.y * 2.0, 0.0, 1.0);
+    o.pos = vec4(q.x / u.screen.x * 2.0 - 1.0, 1.0 - q.y / u.screen.y * 2.0, 0.0, 1.0);
     o.color = color;
+    o.local = (c - vec2(0.5)) * rect.zw;
+    o.half = rect.zw * 0.5;
+    o.p = p;
     return o;
 }
-@fragment fn fs(i: VOut) -> @location(0) vec4<f32> { return i.color; }
+// p.x: corner radius, p.y: edge softness (a shadow is a large softness); both 0: a plain box
+@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {
+    if (i.p.x <= 0.0 && i.p.y <= 0.0) { return i.color; }
+    let soft = max(i.p.y, 0.6);
+    let r = min(i.p.x + i.p.y, min(i.half.x, i.half.y));
+    let q = abs(i.local) - i.half + vec2(r);
+    let d = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    let a = 1.0 - smoothstep(-soft, soft, d + i.p.y);
+    return vec4(i.color.rgb, i.color.a * a);
+}
 "#;
 
 #[repr(C)]
@@ -168,6 +188,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) color: vec4<f32> }
 struct Rect {
     xywh: [f32; 4],
     color: [f32; 4],
+    /// corner radius and edge softness (0, 0: a plain box)
+    p: [f32; 2],
 }
 
 struct Rects {
@@ -194,7 +216,7 @@ impl Rects {
         });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &bgl, entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }] });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], ..Default::default() });
-        let attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
+        let attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x2];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("zash rects"),
             layout: Some(&layout),
@@ -202,7 +224,7 @@ impl Rects {
                 module: &module,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout { array_stride: 32, step_mode: wgpu::VertexStepMode::Instance, attributes: &attrs })],
+                buffers: &[Some(wgpu::VertexBufferLayout { array_stride: 40, step_mode: wgpu::VertexStepMode::Instance, attributes: &attrs })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
@@ -217,7 +239,7 @@ impl Rects {
             cache: None,
         });
         let cap = 4096;
-        let buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (cap * 32) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (cap * 40) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         Rects { pipeline, uniform, bind, buf, cap, count: 0 }
     }
 
@@ -225,9 +247,9 @@ impl Rects {
         queue.write_buffer(&self.uniform, 0, &as_bytes(&[w, h, 0.0, 0.0]));
         if rects.len() > self.cap {
             self.cap = rects.len().next_power_of_two();
-            self.buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (self.cap * 32) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            self.buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (self.cap * 40) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         }
-        let flat: Vec<f32> = rects.iter().flat_map(|r| r.xywh.into_iter().chain(r.color)).collect();
+        let flat: Vec<f32> = rects.iter().flat_map(|r| r.xywh.into_iter().chain(r.color).chain(r.p)).collect();
         if !flat.is_empty() {
             queue.write_buffer(&self.buf, 0, &as_bytes(&flat));
         }
@@ -296,6 +318,9 @@ pub struct Renderer {
     /// background opacity (pre-multiplied into the clear colour)
     pub opacity: f32,
     anim: Option<CursorAnim>,
+    /// the backdrop blur stage, made the first time a popup asks for it
+    blur: Option<Blur>,
+    format: wgpu::TextureFormat,
 }
 
 /// The drawn cursor chases its real position: the head quickly, the tail a
@@ -345,6 +370,8 @@ impl Renderer {
             cursor_trail: cfg.cursor_trail,
             opacity: cfg.opacity,
             anim: None,
+            blur: None,
+            format,
         };
         r.set_font(cfg.font_size_pt, cfg.line_height, cfg.padding, scale);
         r
@@ -455,7 +482,7 @@ impl Renderer {
             let mut col = if failed { frame.fail_color.f32() } else { frame.cursor_color.f32() };
             col[3] = if failed { 1.0 } else { 0.7 };
             let w = (self.font_px / 7.0).max(2.0).round();
-            out.push(Rect { xywh: [ox - self.pad, oy + *r as f32 * ch, w, ch], color: col });
+            out.push(Rect { xywh: [ox - self.pad, oy + *r as f32 * ch, w, ch], color: col, p: [0.0, 0.0] });
         }
         clipped(out, clip)
     }
@@ -480,7 +507,7 @@ impl Renderer {
                     (Some((s, e, col)), Some(b)) if b == col && e == c => run = Some((s, c + 1, col)),
                     (prev, bg) => {
                         if let Some((s, e, col)) = prev {
-                            out.push(Rect { xywh: [pad + s as f32 * cw, y, (e - s) as f32 * cw, ch], color: col.f32() });
+                            out.push(Rect { xywh: [pad + s as f32 * cw, y, (e - s) as f32 * cw, ch], color: col.f32(), p: [0.0, 0.0] });
                         }
                         run = bg.map(|b| (c, c + 1, b));
                     }
@@ -489,14 +516,14 @@ impl Renderer {
                 let w = if cell.wide { 2.0 * cw } else { cw };
                 let thick = (self.font_px / 14.0).max(1.0).round();
                 if cell.underline {
-                    out.push(Rect { xywh: [pad + c as f32 * cw, y + ch - thick * 2.0, w, thick], color: fg });
+                    out.push(Rect { xywh: [pad + c as f32 * cw, y + ch - thick * 2.0, w, thick], color: fg, p: [0.0, 0.0] });
                 }
                 if cell.strike {
-                    out.push(Rect { xywh: [pad + c as f32 * cw, y + ch * 0.55, w, thick], color: fg });
+                    out.push(Rect { xywh: [pad + c as f32 * cw, y + ch * 0.55, w, thick], color: fg, p: [0.0, 0.0] });
                 }
             }
             if let Some((s, e, col)) = run {
-                out.push(Rect { xywh: [pad + s as f32 * cw, y, (e - s) as f32 * cw, ch], color: col.f32() });
+                out.push(Rect { xywh: [pad + s as f32 * cw, y, (e - s) as f32 * cw, ch], color: col.f32(), p: [0.0, 0.0] });
             }
             match band {
                 Some((b0, b1)) => out_all.extend(clipped(out_row, [clip[0], b0, clip[2], b1 - b0])),
@@ -512,7 +539,7 @@ impl Renderer {
                     let (a, b) = (tx.min(x), tx.max(x));
                     let mut col = frame.cursor_color.f32();
                     col[3] = 0.35;
-                    out.push(Rect { xywh: [a, y + ch * 0.15, b - a, ch * 0.7], color: col });
+                    out.push(Rect { xywh: [a, y + ch * 0.15, b - a, ch * 0.7], color: col, p: [0.0, 0.0] });
                 }
             }
             let wide = frame.rows.get(r).and_then(|row| row.get(c)).is_some_and(|cell| cell.wide);
@@ -520,17 +547,17 @@ impl Renderer {
             let col = frame.cursor_color.f32();
             let t = (self.font_px / 9.0).max(1.0).round();
             match shape {
-                CursorShape::Beam => out.push(Rect { xywh: [x, y, t, ch], color: col }),
-                CursorShape::Underline => out.push(Rect { xywh: [x, y + ch - t, w, t], color: col }),
+                CursorShape::Beam => out.push(Rect { xywh: [x, y, t, ch], color: col, p: [0.0, 0.0] }),
+                CursorShape::Underline => out.push(Rect { xywh: [x, y + ch - t, w, t], color: col, p: [0.0, 0.0] }),
                 CursorShape::HollowBlock => {
-                    out.push(Rect { xywh: [x, y, w, t], color: col });
-                    out.push(Rect { xywh: [x, y + ch - t, w, t], color: col });
-                    out.push(Rect { xywh: [x, y, t, ch], color: col });
-                    out.push(Rect { xywh: [x + w - t, y, t, ch], color: col });
+                    out.push(Rect { xywh: [x, y, w, t], color: col, p: [0.0, 0.0] });
+                    out.push(Rect { xywh: [x, y + ch - t, w, t], color: col, p: [0.0, 0.0] });
+                    out.push(Rect { xywh: [x, y, t, ch], color: col, p: [0.0, 0.0] });
+                    out.push(Rect { xywh: [x + w - t, y, t, ch], color: col, p: [0.0, 0.0] });
                 }
                 _ => {
                     // a block; the character on it is drawn in the cursor's text colour (Frame::extract)
-                    out.push(Rect { xywh: [x, y, w, ch], color: col });
+                    out.push(Rect { xywh: [x, y, w, ch], color: col, p: [0.0, 0.0] });
                 }
             }
         }
@@ -563,14 +590,14 @@ impl Renderer {
             for p in panes {
                 // a hairline where a pane meets its left or upper neighbour
                 if p.x > 0.5 {
-                    over.push(Rect { xywh: [p.x.round() - 1.0, p.y, 1.0, p.h], color: line });
+                    over.push(Rect { xywh: [p.x.round() - 1.0, p.y, 1.0, p.h], color: line, p: [0.0, 0.0] });
                 }
                 if p.y > self.top + 0.5 {
-                    over.push(Rect { xywh: [p.x, p.y.round() - 1.0, p.w, 1.0], color: line });
+                    over.push(Rect { xywh: [p.x, p.y.round() - 1.0, p.w, 1.0], color: line, p: [0.0, 0.0] });
                 }
                 // panes without the keyboard step back a little
                 if !p.focused {
-                    over.push(Rect { xywh: [p.x, p.y, p.w, p.h], color: shade });
+                    over.push(Rect { xywh: [p.x, p.y, p.w, p.h], color: shade, p: [0.0, 0.0] });
                 }
             }
         }
@@ -593,7 +620,7 @@ impl Renderer {
             for (i, (title, active)) in frame.tabs.iter().enumerate() {
                 let x = self.cell_w * 0.5 + i as f32 * tw;
                 if *active {
-                    over.push(Rect { xywh: [x + 2.0, h * 0.12, tw - 4.0, h * 0.76], color: frame.bar_bg.f32() });
+                    over.push(Rect { xywh: [x + 2.0, h * 0.12, tw - 4.0, h * 0.76], color: frame.bar_bg.f32(), p: [0.0, 0.0] });
                 }
                 let max_chars = ((tw / self.cell_w) as usize).saturating_sub(3).max(4);
                 let mut t: String = title.chars().take(max_chars).collect();
@@ -606,17 +633,19 @@ impl Renderer {
                 labels.push((b, x + (tw - w) / 2.0, (h - self.cell_h) / 2.0));
             }
         }
+        let mut backdrop: Option<([f32; 4], f32, f32)> = None;
         if let (Some(pp), Some((cr, cc, _))) = (&frame.popup, frame.cursor) {
             // the completion popup: under the word being completed, above it when there is no room
+            let look = frame.popup_look;
             let n = pp.items.len();
             let row_h = (self.cell_h * 1.25).round();
             let (left, right, bottom) = (focus.x + self.pad, focus.x + focus.w - self.pad, height as f32 - self.pad);
-            // as many rows as fit on the roomier side of the cursor line (up to 10)
+            // as many rows as fit on the roomier side of the cursor line (up to the look's rows)
             let line_y = foy + cr as f32 * self.cell_h;
             let above_px = line_y - self.top;
             let below_px = bottom - line_y - self.cell_h;
             let room = above_px.max(below_px) - self.cell_h;
-            let mut show: usize = ((room / row_h) as usize).clamp(1, 10);
+            let mut show: usize = ((room / row_h) as usize).clamp(1, look.rows.max(1));
             if n > show {
                 // the footer ("3 of 40 · Tab next") takes a row too
                 show = show.saturating_sub(1).max(1);
@@ -632,16 +661,29 @@ impl Renderer {
             let x = wx.clamp(left.min(width as f32 - pw - self.pad).max(self.pad), (right.max(left + pw) - pw).min(width as f32 - pw - self.pad).max(self.pad));
             let below = line_y + self.cell_h + 2.0;
             let y = if below + ph <= bottom || below_px >= above_px { below } else { (line_y - ph - 4.0).max(self.top) };
-            let edge = frame.fg.f32();
-            over.push(Rect { xywh: [x - 1.0, y - 1.0, pw + 2.0, ph + 2.0], color: [edge[0], edge[1], edge[2], 0.18] });
-            over.push(Rect { xywh: [x, y, pw, ph], color: frame.bar_bg.f32() });
+            let r = look.radius;
+            if look.shadow {
+                // a soft shadow, a little lower than the popup
+                let s = 14.0;
+                over.push(Rect { xywh: [x - s, y - s + 4.0, pw + 2.0 * s, ph + 2.0 * s], color: [0.0, 0.0, 0.0, 0.38], p: [r, s] });
+            }
+            if look.blur > 0.0 {
+                backdrop = Some(([x, y, pw, ph], r, look.blur));
+            }
+            if look.border {
+                let e = frame.fg.f32();
+                over.push(Rect { xywh: [x - 1.0, y - 1.0, pw + 2.0, ph + 2.0], color: [e[0], e[1], e[2], 0.16], p: [r + 1.0, 0.0] });
+            }
+            let mut bg = frame.bar_bg.f32();
+            bg[3] = look.opacity;
+            over.push(Rect { xywh: [x, y, pw, ph], color: bg, p: [r, 0.0] });
             let dim = dim6(frame.fg);
             for (k, i) in rows.iter().enumerate() {
                 let ry = y + self.cell_h * 0.25 + k as f32 * row_h;
                 let chosen = pp.sel == Some(*i);
                 if chosen {
                     let c = frame.cursor_color.f32();
-                    over.push(Rect { xywh: [x + 3.0, ry, pw - 6.0, row_h], color: [c[0], c[1], c[2], 0.28] });
+                    over.push(Rect { xywh: [x + 4.0, ry, pw - 8.0, row_h], color: [c[0], c[1], c[2], 0.30], p: [(r * 0.6).max(2.0), 0.0] });
                 }
                 let (b, _) = label(&mut self.font_system, &self.family, &pp.items[*i], if chosen || pp.sel.is_none() { frame.fg } else { dim }, self.font_px, self.cell_h);
                 labels.push((b, x + self.cell_w, ry + (row_h - self.cell_h) / 2.0));
@@ -658,7 +700,7 @@ impl Renderer {
             let (bw, bh) = (w + 2.0 * self.cell_w, self.cell_h * 1.5);
             // bottom right of the focused pane: found lines are scrolled to the top, so the bar never covers them
             let (x, y) = ((focus.x + focus.w - bw - self.cell_w).max(focus.x), focus.y + focus.h - bh - self.cell_h * 0.5);
-            over.push(Rect { xywh: [x, y, bw, bh], color: frame.bar_bg.f32() });
+            over.push(Rect { xywh: [x, y, bw, bh], color: frame.bar_bg.f32(), p: [0.0, 0.0] });
             labels.push((b, x + self.cell_w, y + self.cell_h * 0.25));
         }
         self.bars = labels;
@@ -698,32 +740,68 @@ impl Renderer {
         let _ = self.text2.prepare(device, queue, &mut self.font_system, &mut self.atlas, &self.viewport, bar_areas, &mut self.swash);
 
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("zash frame") });
-        {
-            let bg = frame.bg.f32();
-            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let bg = frame.bg.f32();
+        // pre-multiplied: the compositor blends (and blurs) what is behind
+        let o = self.opacity as f64;
+        let clear = wgpu::Color { r: bg[0] as f64 * o, g: bg[1] as f64 * o, b: bg[2] as f64 * o, a: o };
+        let pass = |enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, load: wgpu::LoadOp<wgpu::Color>| -> wgpu::RenderPass<'static> {
+            enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear({
-                            // pre-multiplied: the compositor blends (and blurs) what is behind
-                            let o = self.opacity as f64;
-                            wgpu::Color { r: bg[0] as f64 * o, g: bg[1] as f64 * o, b: bg[2] as f64 * o, a: o }
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load, store: wgpu::StoreOp::Store } })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
-            });
-            self.rects.draw(&mut pass);
-            let _ = self.text.render(&self.atlas, &self.viewport, &mut pass);
-            self.overlay.draw(&mut pass);
-            let _ = self.text2.render(&self.atlas, &self.viewport, &mut pass);
+            }).forget_lifetime()
+        };
+        match backdrop {
+            None => {
+                // the usual frame: one pass
+                let mut p = pass(&mut enc, view, wgpu::LoadOp::Clear(clear));
+                self.rects.draw(&mut p);
+                let _ = self.text.render(&self.atlas, &self.viewport, &mut p);
+                self.overlay.draw(&mut p);
+                let _ = self.text2.render(&self.atlas, &self.viewport, &mut p);
+            }
+            Some((rect, radius, amount)) => {
+                // a popup with blur: the terminal offscreen, blurred inside the popup, then the popup on top
+                let blur = self.blur.get_or_insert_with(|| Blur::new(device, self.format));
+                blur.textures(device, width, height);
+                let (_, _, _, scene, _, tmp) = blur.tex.as_ref().unwrap();
+                {
+                    let mut p = pass(&mut enc, scene, wgpu::LoadOp::Clear(clear));
+                    self.rects.draw(&mut p);
+                    let _ = self.text.render(&self.atlas, &self.viewport, &mut p);
+                }
+                let (w, h) = (width as f32, height as f32);
+                let steps = (amount / 2.0).clamp(1.0, 12.0);
+                let spread = amount / steps;
+                let block = |dir: [f32; 2]| -> Vec<u8> {
+                    let v = [dir[0], dir[1], steps, 0.0, rect[0], rect[1], rect[2], rect[3], w, h, 0.0, 0.0, radius, 0.0, 0.0, 0.0];
+                    as_bytes(&v)
+                };
+                queue.write_buffer(&blur.uniform, 0, &block([spread / w, 0.0]));
+                queue.write_buffer(&blur.uniform, 256, &block([0.0, spread / h]));
+                queue.write_buffer(&blur.uniform, 512, &block([0.0, 0.0]));
+                queue.write_buffer(&blur.uniform, 768, &block([0.0, 0.0]));
+                // the region the blur needs: the popup plus the blur's reach
+                let m = amount * 1.5;
+                let sx = (rect[0] - m).max(0.0) as u32;
+                let sy = (rect[1] - m).max(0.0) as u32;
+                let sw = ((rect[0] + rect[2] + m).min(w) as u32).saturating_sub(sx);
+                let sh = ((rect[1] + rect[3] + m).min(h) as u32).saturating_sub(sy);
+                let to_screen = blur.bind(device, scene, 3);
+                let h_pass = blur.bind(device, scene, 0);
+                let v_pass = blur.bind(device, tmp, 1);
+                let masked = blur.bind(device, scene, 2);
+                fullscreen(&mut enc, view, &blur.blit, &to_screen, wgpu::LoadOp::Clear(clear), None);
+                fullscreen(&mut enc, tmp, &blur.blur, &h_pass, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), Some([sx, sy, sw, sh]));
+                fullscreen(&mut enc, scene, &blur.blur, &v_pass, wgpu::LoadOp::Load, Some([sx, sy, sw, sh]));
+                fullscreen(&mut enc, view, &blur.mask, &masked, wgpu::LoadOp::Load, Some([sx, sy, sw, sh]));
+                let mut p = pass(&mut enc, view, wgpu::LoadOp::Load);
+                self.overlay.draw(&mut p);
+                let _ = self.text2.render(&self.atlas, &self.viewport, &mut p);
+            }
         }
         queue.submit(Some(enc.finish()));
         self.atlas.trim();
@@ -878,7 +956,7 @@ fn clipped(rects: Vec<Rect>, clip: [f32; 4]) -> Vec<Rect> {
         .filter_map(|r| {
             let [x, y, w, h] = r.xywh;
             let (x0, y0, x1, y1) = (x.max(cx0), y.max(cy0), (x + w).min(cx1), (y + h).min(cy1));
-            (x1 > x0 && y1 > y0).then_some(Rect { xywh: [x0, y0, x1 - x0, y1 - y0], color: r.color })
+            (x1 > x0 && y1 > y0).then_some(Rect { xywh: [x0, y0, x1 - x0, y1 - y0], color: r.color, p: r.p })
         })
         .collect()
 }
@@ -911,4 +989,144 @@ fn placed(frame: &Frame, oy: f32, ch: f32) -> Vec<(&Vec<CellView>, f32, Option<(
         }
     }
     out
+}
+
+// ── backdrop blur (behind the completion popup) ──
+
+const BLUR_WGSL: &str = r#"
+struct P { dir: vec4<f32>, rect: vec4<f32>, screen: vec4<f32>, corner: vec4<f32> };
+@group(0) @binding(0) var t: texture_2d<f32>;
+@group(0) @binding(1) var s: sampler;
+@group(0) @binding(2) var<uniform> p: P;
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> VOut {
+    var xy = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+    var o: VOut;
+    o.pos = vec4(xy[vi], 0.0, 1.0);
+    o.uv = vec2(xy[vi].x * 0.5 + 0.5, 0.5 - xy[vi].y * 0.5);
+    return o;
+}
+@fragment fn blit(i: VOut) -> @location(0) vec4<f32> { return textureSample(t, s, i.uv); }
+// one direction of a gaussian; p.dir.xy: the step in uv, p.dir.z: how many steps each side
+@fragment fn blur(i: VOut) -> @location(0) vec4<f32> {
+    let n = i32(p.dir.z);
+    var acc = vec4(0.0);
+    var wsum = 0.0;
+    for (var k = -n; k <= n; k = k + 1) {
+        let x = f32(k) / max(f32(n), 1.0);
+        let w = exp(-x * x * 2.0);
+        acc = acc + textureSample(t, s, i.uv + p.dir.xy * f32(k)) * w;
+        wsum = wsum + w;
+    }
+    return acc / wsum;
+}
+// the blurred picture, only inside the popup's rounded rectangle
+@fragment fn mask(i: VOut) -> @location(0) vec4<f32> {
+    let px = i.uv * p.screen.xy;
+    let half = p.rect.zw * 0.5;
+    let c = p.rect.xy + half;
+    let r = min(p.corner.x, min(half.x, half.y));
+    let q = abs(px - c) - half + vec2(r);
+    let d = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    let a = 1.0 - smoothstep(-0.7, 0.7, d);
+    let col = textureSample(t, s, i.uv);
+    return vec4(col.rgb, col.a * a);
+}
+"#;
+
+struct Blur {
+    blit: wgpu::RenderPipeline,
+    blur: wgpu::RenderPipeline,
+    mask: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    uniform: wgpu::Buffer,
+    format: wgpu::TextureFormat,
+    /// the terminal drawn offscreen, and a second texture for the two blur passes
+    tex: Option<(u32, u32, wgpu::Texture, wgpu::TextureView, wgpu::Texture, wgpu::TextureView)>,
+}
+
+impl Blur {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Blur {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("zash blur"), source: wgpu::ShaderSource::Wgsl(BLUR_WGSL.into()) });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout)], ..Default::default() });
+        let make = |entry: &str, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("zash blur"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+                fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some(entry), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })] }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, address_mode_u: wgpu::AddressMode::ClampToEdge, address_mode_v: wgpu::AddressMode::ClampToEdge, ..Default::default() });
+        // four uniform blocks (h pass, v pass, mask, blit), 64 bytes each, 256 apart
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 256 * 4, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        Blur { blit: make("blit", None), blur: make("blur", None), mask: make("mask", Some(wgpu::BlendState::ALPHA_BLENDING)), layout, sampler, uniform, format, tex: None }
+    }
+
+    fn textures(&mut self, device: &wgpu::Device, w: u32, h: u32) {
+        if self.tex.as_ref().is_some_and(|t| t.0 == w && t.1 == h) {
+            return;
+        }
+        let mk = || {
+            let t = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("zash backdrop"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let v = t.create_view(&Default::default());
+            (t, v)
+        };
+        let (a, av) = mk();
+        let (b, bv) = mk();
+        self.tex = Some((w, h, a, av, b, bv));
+    }
+
+    fn bind(&self, device: &wgpu::Device, view: &wgpu::TextureView, slot: u64) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &self.uniform, offset: slot * 256, size: wgpu::BufferSize::new(64) }) },
+            ],
+        })
+    }
+}
+
+/// One full-screen pass of the blur shader into `target` (optionally only inside `scissor`).
+fn fullscreen(enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, load: wgpu::LoadOp<wgpu::Color>, scissor: Option<[u32; 4]>) {
+    let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: None,
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load, store: wgpu::StoreOp::Store } })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    if let Some([x, y, w, h]) = scissor {
+        pass.set_scissor_rect(x, y, w.max(1), h.max(1));
+    }
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind, &[]);
+    pass.draw(0..3, 0..1);
 }

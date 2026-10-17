@@ -396,6 +396,7 @@ impl State {
             above: Vec::new(),
             below: Vec::new(),
             scroll_px: 0.0,
+            popup_look: Default::default(),
             region: self.glide.as_ref().map(|g| crate::render::Region { top: g.top, bot: g.bot, px: g.px, old: g.old.clone() }),
             popup: None,
             tabs: Vec::new(),
