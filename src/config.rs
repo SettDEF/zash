@@ -154,6 +154,8 @@ pub struct Config {
     pub smooth_scroll_ms: f32,
     pub cursor_trail: bool,
     pub popup: PopupLook,
+    /// a multiplexer's zfloats: their panel and frame (`[zfloat]`)
+    pub zfloat: ZfloatLook,
     /// the text centred in the space whole cells do not fill (else top-left), and moved by an offset
     pub center: bool,
     pub offset: (f32, f32),
@@ -191,6 +193,7 @@ impl Default for Config {
             smooth_scroll_ms: 80.0,
             cursor_trail: true,
             popup: PopupLook::default(),
+            zfloat: ZfloatLook::default(),
             center: true,
             offset: (0.0, 0.0),
             palette: Palette::load(),
@@ -265,6 +268,37 @@ struct File {
     offset: Option<[f32; 2]>,
     /// the completion popup's look
     popup: Option<PopupFile>,
+    zfloat: Option<ZfloatFile>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ZfloatFile {
+    opacity: Option<f32>,
+    border: Option<String>,
+}
+
+/// How a zfloat looks: `[zfloat]` in zash.toml.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZfloatLook {
+    /// of its panel (0–1): lower lets the window's own background through
+    pub opacity: f32,
+    /// the frame: Panel (its own colour, no line), Accent (the cursor colour while it has
+    /// the keyboard), None
+    pub border: ZfloatBorder,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ZfloatBorder {
+    Panel,
+    Accent,
+    None,
+}
+
+impl Default for ZfloatLook {
+    fn default() -> Self {
+        ZfloatLook { opacity: 0.6, border: ZfloatBorder::Panel }
+    }
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -362,6 +396,13 @@ shadow = true
 border = true
 # Rows shown at most.
 rows = 10
+
+# A multiplexer's zfloats (zeit): the panel's opacity (0–1; lower lets the window show
+# through) and its frame: "panel" (its own colour), "accent" (the cursor colour while it
+# has the keyboard) or "none".
+[zfloat]
+opacity = 0.6
+border = "panel"
 "#;
 
 impl Config {
@@ -445,6 +486,16 @@ impl Config {
             Some(other) => eprintln!("zash: align = {other:?}: use \"center\" or \"top-left\""),
         }
         if let Some([x, y]) = f.offset { c.offset = (x, y); }
+        if let Some(z) = f.zfloat {
+            if let Some(v) = z.opacity { c.zfloat.opacity = v.clamp(0.0, 1.0); }
+            match z.border.as_deref() {
+                Some("panel") | Some("same") => c.zfloat.border = ZfloatBorder::Panel,
+                Some("accent") => c.zfloat.border = ZfloatBorder::Accent,
+                Some("none") | Some("off") => c.zfloat.border = ZfloatBorder::None,
+                None => {}
+                Some(o) => eprintln!("zash: [zfloat] border = {o:?}: use \"panel\", \"accent\" or \"none\""),
+            }
+        }
         if let Some(p) = f.popup {
             let d = &mut c.popup;
             if let Some(v) = p.opacity { d.opacity = v.clamp(0.0, 1.0); }

@@ -1157,6 +1157,7 @@ impl App {
                 let here = { let t = s.term.lock(); t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize };
                 frame.popup = s.popup.lock().unwrap().clone().filter(|p| p.line.is_none_or(|l| l == here));
                 frame.popup_look = self.cfg.popup.with(&s.popup_style.lock().unwrap());
+                frame.zfloat_look = self.cfg.zfloat;
                 if let Some(a) = &self.web_addr {
                     frame.bar = Some(format!("\u{f0ac}  {a}\u{258f}"));
                 } else if let Some(q) = &self.search {

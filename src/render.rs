@@ -59,6 +59,7 @@ pub struct Frame {
     /// the shell plugin's completion popup, drawn at the cursor
     pub popup: Option<crate::session::Popup>,
     pub popup_look: crate::config::PopupLook,
+    pub zfloat_look: crate::config::ZfloatLook,
     /// tab titles and which one is shown (drawn as a bar when there are two or more)
     pub tabs: Vec<(String, bool)>,
     /// a bar drawn over the terminal at the top right (search)
@@ -143,7 +144,7 @@ impl Frame {
                 }
             }
         }
-        Frame { float: None, popup_look: crate::config::PopupLook::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() }
+        Frame { float: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -650,17 +651,26 @@ impl Renderer {
                     r[3] = (p.y + p.h - edge - r[1]).max(r[3]);
                 }
                 let rad = 12.0;
-                rects.push(Rect { xywh: [r[0] - 14.0, r[1] - 10.0, r[2] + 28.0, r[3] + 28.0], color: [0.0, 0.0, 0.0, 0.34], p: [rad, 14.0] });
-                let edge = if z.focus { let mut c = p.frame.cursor_color.f32(); c[3] = 0.85; c } else { let mut c = p.frame.fg.f32(); c[3] = 0.16; c };
-                rects.push(Rect { xywh: [r[0] - 1.0, r[1] - 1.0, r[2] + 2.0, r[3] + 2.0], color: edge, p: [rad + 1.0, 0.0] });
+                // the look from [zfloat] in zash.toml (live): how solid the panel is, what its frame is
+                let look = p.frame.zfloat_look;
+                // the shadow fades with the panel (under a see-through one it only muddies it)
+                rects.push(Rect { xywh: [r[0] - 8.0, r[1] - 6.0, r[2] + 16.0, r[3] + 16.0], color: [0.0, 0.0, 0.0, 0.30 * look.opacity * look.opacity], p: [rad, 8.0] });
                 let mut panel = p.frame.bar_bg.f32();
-                panel[3] = 0.97;
+                panel[3] = look.opacity;
+                let edge = match look.border {
+                    crate::config::ZfloatBorder::Accent if z.focus => Some({ let mut c = p.frame.cursor_color.f32(); c[3] = 0.85; c }),
+                    crate::config::ZfloatBorder::Accent => Some({ let mut c = p.frame.fg.f32(); c[3] = 0.16; c }),
+                    // panel: its own colour, so no line of another one
+                    crate::config::ZfloatBorder::Panel | crate::config::ZfloatBorder::None => None,
+                };
+                if let Some(edge) = edge {
+                    rects.push(Rect { xywh: [r[0] - 1.0, r[1] - 1.0, r[2] + 2.0, r[3] + 2.0], color: edge, p: [rad + 1.0, 0.0] });
+                }
                 rects.push(Rect { xywh: r, color: panel, p: [rad, 0.0] });
                 // the title bar: a slightly lighter band on its row (square under it), a hairline below
                 let f = p.frame.fg.f32();
-                let band = [panel[0] * 0.93 + f[0] * 0.07, panel[1] * 0.93 + f[1] * 0.07, panel[2] * 0.93 + f[2] * 0.07, panel[3]];
-                rects.push(Rect { xywh: [r[0], r[1], r[2], self.cell_h + rad], color: band, p: [rad, 0.0] });
-                rects.push(Rect { xywh: [r[0], r[1] + self.cell_h, r[2], rad], color: panel, p: [0.0, 0.0] });
+                // (a tint over the panel, so a see-through panel stays as see-through under it)
+                rects.push(Rect { xywh: [r[0], r[1], r[2], self.cell_h], color: [f[0], f[1], f[2], 0.05], p: [rad.min(self.cell_h / 2.0), 0.0] });
                 rects.push(Rect { xywh: [r[0] + 1.0, r[1] + self.cell_h - 1.0, r[2] - 2.0, 1.0], color: [f[0], f[1], f[2], 0.10], p: [0.0, 0.0] });
                 floats.push((r, z.clone(), p.frame.fg, p.frame.cursor_color, p.frame.fail_color));
             }
