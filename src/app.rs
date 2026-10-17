@@ -945,7 +945,9 @@ impl App {
                 if id == tab.focus { f.with_scroll(&t, &pal, scroll_px, cell_h) } else { f }
             };
             if id == tab.focus {
-                frame.popup = s.popup.lock().unwrap().clone();
+                // a popup only while the cursor is still on its line
+                let here = { let t = s.term.lock(); t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize };
+                frame.popup = s.popup.lock().unwrap().clone().filter(|p| p.line.is_none_or(|l| l == here));
                 frame.popup_look = self.cfg.popup.with(&s.popup_style.lock().unwrap());
                 if let Some(q) = &self.search {
                     frame.bar = Some(q.bar());

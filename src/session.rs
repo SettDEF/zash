@@ -122,6 +122,9 @@ pub enum Found {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Popup {
     pub items: Vec<String>,
+    /// the line (from the oldest in scrollback) the cursor was on when it came: a popup
+    /// whose shell went away (crash, exit) disappears once the cursor leaves that line
+    pub line: Option<usize>,
     /// the chosen item (Tab), none before the first Tab
     pub sel: Option<usize>,
     /// how many columns the word being completed already has: the popup lines up with its start
@@ -142,7 +145,7 @@ impl Popup {
         if items.is_empty() {
             return Some(None);
         }
-        Some(Some(Popup { sel: sel.checked_sub(1).filter(|s| *s < items.len()), word, items }))
+        Some(Some(Popup { sel: sel.checked_sub(1).filter(|s| *s < items.len()), word, items, line: None }))
     }
 }
 
@@ -322,7 +325,8 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                 at = end;
                 let (kind, exit) = match what {
                     Found::Popup(p) => {
-                        *popup.lock().unwrap() = p;
+                        let line = t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize;
+                        *popup.lock().unwrap() = p.map(|p| Popup { line: Some(line), ..p });
                         continue;
                     }
                     Found::Reverse(on) => {
@@ -377,9 +381,9 @@ mod mark_tests {
     fn popup_messages() {
         let mut s = MarkScanner::default();
         let out = s.scan(b"\x1b]7733;popup;2;3;Documents/\x1fDownloads/\x07x\x1b]7733;close\x07");
-        assert_eq!(out[0].1, Found::Popup(Some(Popup { items: vec!["Documents/".into(), "Downloads/".into()], sel: Some(1), word: 3 })));
+        assert_eq!(out[0].1, Found::Popup(Some(Popup { items: vec!["Documents/".into(), "Downloads/".into()], sel: Some(1), word: 3, line: None })));
         assert_eq!(out[1].1, Found::Popup(None));
-        assert_eq!(Popup::parse("popup;0;1;a"), Some(Some(Popup { items: vec!["a".into()], sel: None, word: 1 })));
+        assert_eq!(Popup::parse("popup;0;1;a"), Some(Some(Popup { items: vec!["a".into()], sel: None, word: 1, line: None })));
         assert_eq!(Popup::parse("nonsense"), None);
     }
 

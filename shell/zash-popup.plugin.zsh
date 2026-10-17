@@ -9,6 +9,7 @@
 #   ZASH_POPUP_STYLE=auto|zash|text   how to show it (auto: zash when inside zash)
 #   ZASH_POPUP_MAX=10                 rows in the text list
 #   ZASH_NO_POPUP=1                   off
+#   ZASH_POPUP_LOG=/tmp/popup.log     log what the completion system offers (debugging)
 #
 # Or with zstyle (also before the first prompt):
 #   zstyle ':zash:popup' min-chars 2        letters typed before it opens (default 1)
@@ -31,7 +32,7 @@ zmodload zsh/zutil
 autoload -Uz add-zsh-hook add-zle-hook-widget
 
 typeset -ga _zash_show _zash_ins _zash_kind
-typeset -gi _zash_sel=0 _zash_wstart=0 _zash_open=0
+typeset -gi _zash_sel=0 _zash_wstart=0 _zash_open=0 _zash_busy=0
 typeset -g _zash_last='' _zash_tab_was='' _zash_btab_was='' _zash_style=''
 
 # zash draws the popup when zash is the terminal; through tmux the message is wrapped
@@ -88,6 +89,7 @@ _zash_capture() {
   local -A _zash_seen
   local -i _zash_pass=0
   compadd() {
+    [[ -n $ZASH_POPUP_LOG ]] && print -r -- "compadd $* | PREFIX=$PREFIX IPREFIX=$IPREFIX" >>$ZASH_POPUP_LOG
     # internal calls that only ask for matches pass straight through
     if [[ ${@[1,(i)(-|--)]} == *-(O|A|D)\ * ]]; then builtin compadd "$@"; return; fi
     local -a __hits; local -A __o
@@ -100,7 +102,10 @@ _zash_capture() {
     (( ${_matcher_num:-1} > _zash_pass )) && return 0
     local h ins d
     for h in $__hits; do
-      (( ${+__o[-Q]} )) && ins=$h || ins=${(q)h}
+      # quoted like Tab would, but a leading $ or ~ stays live ($GAMEDIR/, ~/x)
+      if (( ${+__o[-Q]} )); then ins=$h
+      elif [[ $h == [\$~]* ]]; then ins=${h[1]}${(q)h[2,-1]}
+      else ins=${(q)h}; fi
       ins=$IPREFIX${__o[-P]}${__o[-p]}$ins
       if (( ${+__o[-f]} )); then
         # -W is the folder the names are in; without it the inserted prefix is the path
@@ -123,6 +128,14 @@ _zash_capture() {
 }
 
 _zash_redraw() {
+  # never inside another completion (Tab's own menu, a listing): zsh cannot nest them, and
+  # trying once crashed the shell. Nor while our own capture runs.
+  (( _zash_busy )) && return
+  # (inside this hook $WIDGET is the hook itself; the widget that just ran is $LASTWIDGET)
+  case $LASTWIDGET in
+    *complete*|*expand*|menu-*|*-menu*|list-choices) return ;;
+  esac
+  [[ $KEYMAP == menuselect || $KEYMAP == listscroll ]] && return
   [[ $BUFFER == "$_zash_last" ]] && return
   _zash_last=$BUFFER
   # typing only opens it with trigger=typing, and after min-chars letters of the word
@@ -131,7 +144,9 @@ _zash_redraw() {
   if (( ${#word} < ${_zash_min:-1} )) && (( ! _zash_open )); then return; fi
   # only while typing a word at the end of the line, in insert mode
   if [[ $KEYMAP == vicmd || -n $RBUFFER || -z $LBUFFER || $LBUFFER == *[[:space:]] || $#BUFFER -gt 400 ]]; then _zash_close; return; fi
-  zle _zash_cap
+  _zash_busy=1
+  zle _zash_cap 2>/dev/null
+  _zash_busy=0
   _zash_history
   if (( $#_zash_ins == 0 )) || { (( $#_zash_ins == 1 )) && [[ ${_zash_ins[1]} == "${LBUFFER[_zash_wstart+1,-1]}" ]] }; then _zash_close; return; fi
   _zash_sel=0
@@ -155,7 +170,9 @@ _zash_step() {
 
 _zash_tab() { if (( _zash_open )); then _zash_step 1; else
   if [[ $_zash_trigger == tab ]]; then
-    zle _zash_cap
+    _zash_busy=1
+    zle _zash_cap 2>/dev/null
+    _zash_busy=0
     _zash_history
     if (( $#_zash_ins > 1 )); then _zash_sel=0; _zash_popup; _zash_step 1; return; fi
   fi
