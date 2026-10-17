@@ -73,7 +73,7 @@ fn main() {
             let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
             unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) };
             rows = (ws.ws_row as usize).max(4);
-            print!("\x1b[?25l\x1b[H\x1b[2J\x1b]2;{url}\x07\x1b]7733;web;rows={rows};url={url}\x07");
+            print!("\x1b[?25l\x1b[H\x1b[2J\x1b]2;{url}\x07\x1b]7733;web;rows={rows};focus=1;url={url}\x07");
             let _ = std::io::Write::flush(&mut std::io::stdout());
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(3600));

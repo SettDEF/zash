@@ -21,12 +21,15 @@ pub struct View {
     pub generation: AtomicU64,
     pub size: Mutex<(u32, u32)>,
     pub url: Mutex<String>,
+    /// the page's title (the window shows it)
+    pub title: Mutex<String>,
     wake: Box<dyn Fn() + Send + Sync>,
 }
 
 enum Pend {
     Create(Arc<View>),
     Attach(Arc<View>),
+    Title(Arc<View>),
 }
 
 struct Host {
@@ -156,6 +159,12 @@ fn handle(host: &Arc<Host>, v: Value) {
                     host.pending.lock().unwrap().insert(id, Pend::Attach(view));
                 }
             }
+            Some(Pend::Title(view)) => {
+                if let Some(t) = v["result"]["result"]["value"].as_str() {
+                    *view.title.lock().unwrap() = t.to_string();
+                    (view.wake)();
+                }
+            }
             Some(Pend::Attach(view)) => {
                 if let Some(s) = v["result"]["sessionId"].as_str() {
                     host.views.lock().unwrap().insert(s.to_string(), view.clone());
@@ -194,6 +203,10 @@ fn handle(host: &Arc<Host>, v: Value) {
                 *view.url.lock().unwrap() = f["url"].as_str().unwrap_or("").to_string();
             }
         }
+        Some("Page.loadEventFired") | Some("Page.domContentEventFired") => {
+            let id = host.send(Some(s), "Runtime.evaluate", json!({ "expression": "document.title", "returnByValue": true }));
+            host.pending.lock().unwrap().insert(id, Pend::Title(view.clone()));
+        }
         _ => {}
     }
 }
@@ -202,7 +215,7 @@ impl View {
     /// A page in an area of `w`×`h` pixels; `wake` asks for a redraw when a frame comes.
     pub fn open(id: u32, url: &str, w: u32, h: u32, wake: Box<dyn Fn() + Send + Sync>) -> Option<Arc<View>> {
         let host = host()?;
-        let view = Arc::new(View { id, session: Mutex::default(), target: Mutex::default(), queued: Mutex::default(), frame: Mutex::default(), generation: AtomicU64::new(0), size: Mutex::new((w.max(64), h.max(64))), url: Mutex::new(url.to_string()), wake });
+        let view = Arc::new(View { id, session: Mutex::default(), target: Mutex::default(), queued: Mutex::default(), frame: Mutex::default(), generation: AtomicU64::new(0), size: Mutex::new((w.max(64), h.max(64))), url: Mutex::new(url.to_string()), title: Mutex::default(), wake });
         view.queued.lock().unwrap().push(("Page.navigate".into(), json!({ "url": url })));
         let rid = host.send(None, "Target.createTarget", json!({ "url": "about:blank" }));
         host.pending.lock().unwrap().insert(rid, Pend::Create(view.clone()));
@@ -283,6 +296,10 @@ impl View {
         self.send("Runtime.evaluate", json!({ "expression": "history.back()" }));
     }
 
+    pub fn forward(&self) {
+        self.send("Runtime.evaluate", json!({ "expression": "history.forward()" }));
+    }
+
     pub fn reload(&self) {
         self.send("Page.reload", json!({}));
     }
@@ -309,20 +326,24 @@ impl View {
     }
 }
 
-/// `rows=N;url=…` (OSC 7733;web): the area's height in rows and the page.
-pub fn parse(body: &str) -> Option<(usize, String)> {
+/// `rows=N;focus=1;url=…` (OSC 7733;web): the area's height, whether it takes the keyboard
+/// at once, and the page (last, so it may hold `;`).
+pub fn parse(body: &str) -> Option<(usize, bool, String)> {
     let mut rows = 24;
+    let mut focus = false;
     let mut rest = body;
     while let Some((kv, more)) = rest.split_once(';') {
         if let Some(v) = kv.strip_prefix("rows=") {
             rows = v.parse().unwrap_or(24);
-            rest = more;
+        } else if kv == "focus=1" {
+            focus = true;
         } else {
             break;
         }
+        rest = more;
     }
     let url = rest.strip_prefix("url=")?.to_string();
-    (!url.is_empty()).then_some((rows.clamp(4, 200), url))
+    (!url.is_empty()).then_some((rows.clamp(4, 200), focus, url))
 }
 
 /// What a typed address means: a URL, a host, or a search.
@@ -341,8 +362,8 @@ pub fn address(s: &str) -> String {
 mod tests {
     #[test]
     fn web_messages_and_addresses() {
-        assert_eq!(super::parse("rows=30;url=https://a.b/?x=1;y"), Some((30, "https://a.b/?x=1;y".into())));
-        assert_eq!(super::parse("url=https://x.y"), Some((24, "https://x.y".into())));
+        assert_eq!(super::parse("rows=30;url=https://a.b/?x=1;y"), Some((30, false, "https://a.b/?x=1;y".into())));
+        assert_eq!(super::parse("rows=9;focus=1;url=https://x.y"), Some((9, true, "https://x.y".into())));
         assert_eq!(super::address("wikipedia.org"), "https://wikipedia.org");
         assert_eq!(super::address("rust traits"), "https://duckduckgo.com/?q=rust+traits");
     }

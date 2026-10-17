@@ -32,6 +32,8 @@ pub struct Graphics {
     pub generation: u64,
     /// web areas (OSC 7733;web), by the id their placement carries
     pub webs: HashMap<u32, Arc<crate::web::View>>,
+    /// a web area that asked for the keyboard (zash --web)
+    pub autofocus: Option<u32>,
 }
 
 /// What a command asks of the terminal after it was handled.

@@ -455,7 +455,7 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                         continue;
                     }
                     Found::Web(body) => {
-                        if let Some((rows, url)) = crate::web::parse(&body) {
+                        if let Some((rows, focus, url)) = crate::web::parse(&body) {
                             let at = (t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize, t.grid().cursor.point.column.0);
                             let cols = t.grid().columns().saturating_sub(at.1).max(1);
                             let (cw, ch) = *cell_px.lock().unwrap();
@@ -466,7 +466,11 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                                 wl.send_event(alacritty_terminal::event::Event::Wakeup);
                             });
                             if let Some(v) = crate::web::View::open(id, &url, (cols as f32 * cw) as u32, (rows as f32 * ch) as u32, wake) {
-                                graphics.lock().unwrap().add_web(v, at, cols, rows);
+                                let mut g = graphics.lock().unwrap();
+                                if focus {
+                                    g.autofocus = Some(v.id);
+                                }
+                                g.add_web(v, at, cols, rows);
                             }
                         }
                         continue;

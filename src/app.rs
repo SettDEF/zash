@@ -79,6 +79,10 @@ struct App {
     /// the web area that has the keyboard (by its view id), and the held button
     web_focus: Option<u32>,
     web_btn: Option<&'static str>,
+    /// Ctrl+L in a web area: the address being typed
+    web_addr: Option<String>,
+    /// the window title last set from a page
+    web_title: String,
     selecting: bool,
     scroll_acc: f64,
     /// the button held down in a Neovim pane (for drags)
@@ -99,7 +103,7 @@ pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::Pat
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -253,6 +257,37 @@ impl App {
         };
         let m = self.mods;
         let mods = u32::from(m.alt_key()) | u32::from(m.control_key()) << 1 | u32::from(m.shift_key()) << 3;
+        // the address line (Ctrl+L): typed here, Enter goes there
+        if let Some(a) = self.web_addr.as_mut() {
+            match &ev.logical_key {
+                Key::Named(NamedKey::Escape) => self.web_addr = None,
+                Key::Named(NamedKey::Enter) => {
+                    let to = crate::web::address(a);
+                    self.web_addr = None;
+                    v.navigate(&to);
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    a.pop();
+                }
+                Key::Named(NamedKey::Space) => a.push(' '),
+                Key::Character(c) if m.control_key() && c.eq_ignore_ascii_case("u") => a.clear(),
+                Key::Character(_) if !m.control_key() => a.push_str(ev.text.as_deref().unwrap_or("")),
+                _ => {}
+            }
+            self.redraw();
+            return true;
+        }
+        if let Key::Character(c) = &ev.logical_key {
+            if m.control_key() && !m.shift_key() && c.eq_ignore_ascii_case("l") {
+                self.web_addr = Some(v.url.lock().unwrap().clone());
+                self.redraw();
+                return true;
+            }
+            if m.control_key() && !m.shift_key() && c.eq_ignore_ascii_case("r") {
+                v.reload();
+                return true;
+            }
+        }
         match &ev.logical_key {
             // Esc gives the keyboard back to the terminal; Shift+Esc is Esc for the page
             Key::Named(NamedKey::Escape) if !m.shift_key() => {
@@ -261,6 +296,7 @@ impl App {
             }
             Key::Named(NamedKey::Escape) => v.key("Escape", 0),
             Key::Named(NamedKey::ArrowLeft) if m.alt_key() => v.back(),
+            Key::Named(NamedKey::ArrowRight) if m.alt_key() => v.forward(),
             Key::Named(NamedKey::F5) => v.reload(),
             Key::Named(n) => {
                 let name = match n {
@@ -1035,6 +1071,21 @@ impl App {
         if let Some(g) = self.gpu.as_ref() {
             crate::web::set_scale(g.window.scale_factor() as f32);
             let (cw, chh) = (g.renderer.cell_w, g.renderer.cell_h);
+            // a web area that asked for the keyboard (zash --web) gets it
+            if let Some(p) = tab.panes.iter().find(|p| p.id == tab.focus) {
+                if let Some(id) = p.session.graphics.lock().unwrap().autofocus.take() {
+                    self.web_focus = Some(id);
+                }
+            }
+            // the page's title in the window's, while it has the keyboard
+            if let Some(v) = self.web_focused() {
+                let t = v.title.lock().unwrap().clone();
+                if !t.is_empty() && t != self.web_title {
+                    g.window.set_title(&format!("{t} — zash"));
+                    self.web_title = t;
+                }
+            }
+            let tab = &self.tabs[self.active];
             for p in &tab.panes {
                 let gr = p.session.graphics.lock().unwrap();
                 for pl in &gr.places {
@@ -1081,7 +1132,9 @@ impl App {
                 let here = { let t = s.term.lock(); t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize };
                 frame.popup = s.popup.lock().unwrap().clone().filter(|p| p.line.is_none_or(|l| l == here));
                 frame.popup_look = self.cfg.popup.with(&s.popup_style.lock().unwrap());
-                if let Some(q) = &self.search {
+                if let Some(a) = &self.web_addr {
+                    frame.bar = Some(format!("\u{f0ac}  {a}\u{258f}"));
+                } else if let Some(q) = &self.search {
                     frame.bar = Some(q.bar());
                 } else if self.prefix {
                     frame.bar = Some(self.prefix_hint());
