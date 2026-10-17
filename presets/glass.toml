@@ -1,0 +1,12 @@
+# glass: today's look — translucent and blurred (follows the shell's Glass panel),
+# tinct colours, centred text, a blurred popup, gliding cursor and scrolling.
+align = "center"
+cursor_animation = 90
+cursor_trail = true
+smooth_scroll = 80
+
+[popup]
+opacity = 0.82
+blur = 10
+shadow = true
+radius = 12

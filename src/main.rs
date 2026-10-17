@@ -24,6 +24,16 @@ use std::time::Duration;
 fn main() {
     session::scrub_environment();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // --preset NAME and --config FILE: as variables, so the shells inside see them too
+    for (flag, var) in [("--preset", "ZASH_PRESET"), ("--config", "ZASH_CONFIG")] {
+        if let Some(i) = args.iter().position(|a| a == flag) {
+            if i + 1 < args.len() {
+                let v = args.remove(i + 1);
+                args.remove(i);
+                unsafe { std::env::set_var(var, v) };
+            }
+        }
+    }
     let cfg = config::Config::load();
     // -d DIR: start in that folder
     let mut workdir = None;
@@ -95,7 +105,9 @@ fn main() {
         // `zash PROGRAM ARGS…`
         Some(p) if !p.starts_with('-') => Some(args.clone()),
         Some("-h") | Some("--help") => {
-            println!("zash — the zett terminal\n\n  zash               your shell in a window\n  zash -e CMD …      run CMD in a window (also: zash CMD …, zash -e 'a command line')\n  zash -d DIR        start in DIR\n  zash --snapshot [out.png] [--size 100x30] [--wait MS] [-- CMD …]   (no CMD: your shell)\n                     headless: run CMD, print the screen, optionally render a PNG\n\nKeys: Ctrl+Shift+C/V copy/paste · Ctrl+Shift+Up/Down previous/next prompt · Ctrl+Shift+O copy the last output · Ctrl+Shift+F search · Ctrl+click open a link · Ctrl+Shift+T/W new/close tab · Ctrl+Tab next tab · Ctrl+= / Ctrl+- / Ctrl+0 font size · Shift+PageUp/PageDown scroll\n\nSettings: ~/.config/zash/zash.toml (written on first start, with comments)");
+            println!("zash — the zett terminal\n\n  zash               your shell in a window\n  zash -e CMD …      run CMD in a window (also: zash CMD …, zash -e 'a command line')\n  zash -d DIR        start in DIR
+  zash --preset NAME a preset on top of your settings (~/.config/zash/presets/NAME.toml; also $ZASH_PRESET)
+  zash --config FILE another settings file (also $ZASH_CONFIG)\n  zash --snapshot [out.png] [--size 100x30] [--wait MS] [-- CMD …]   (no CMD: your shell)\n                     headless: run CMD, print the screen, optionally render a PNG\n\nKeys: Ctrl+Shift+C/V copy/paste · Ctrl+Shift+Up/Down previous/next prompt · Ctrl+Shift+O copy the last output · Ctrl+Shift+F search · Ctrl+click open a link · Ctrl+Shift+T/W new/close tab · Ctrl+Tab next tab · Ctrl+= / Ctrl+- / Ctrl+0 font size · Shift+PageUp/PageDown scroll\n\nSettings: ~/.config/zash/zash.toml (written on first start, with comments)");
             return;
         }
         _ => None,

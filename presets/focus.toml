@@ -1,0 +1,8 @@
+# focus: for long reading and writing — larger text, more room around it.
+size = 13.5
+line_height = 1.35
+padding = 28
+align = "center"
+
+[popup]
+rows = 8

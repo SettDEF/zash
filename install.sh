@@ -12,6 +12,11 @@ target="${CARGO_TARGET_DIR:-target}/release/zash"
 install -Dm755 "$target" "$HOME/.local/bin/zash"
 icons="$HOME/.local/share/icons/hicolor"
 install -Dm644 packaging/zash.svg "$icons/scalable/apps/zash.svg"
+# presets: only added, never overwriting ones the user changed
+for p in presets/*.toml; do
+  dest="${XDG_CONFIG_HOME:-$HOME/.config}/zash/presets/$(basename "$p")"
+  [ -e "$dest" ] || install -Dm644 "$p" "$dest"
+done
 install -Dm644 shell/zash-popup.plugin.zsh "$HOME/.local/share/zash/shell/zsh/zash-popup.plugin.zsh"
 if command -v rsvg-convert >/dev/null; then
     for s in 16 24 32 48 64 128 256; do

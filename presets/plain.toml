@@ -1,0 +1,11 @@
+# plain: fast and quiet — opaque, nothing moves, a flat popup.
+opacity = 1.0
+cursor_animation = 0
+cursor_trail = false
+smooth_scroll = 0
+
+[popup]
+opacity = 1.0
+blur = 0
+shadow = false
+radius = 6

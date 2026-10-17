@@ -355,34 +355,68 @@ rows = 10
 "#;
 
 impl Config {
+    /// The settings file: $ZASH_CONFIG (or --config), else ~/.config/zash/zash.toml.
     pub fn file_path() -> PathBuf {
+        if let Some(p) = std::env::var_os("ZASH_CONFIG").filter(|p| !p.is_empty()) {
+            return PathBuf::from(p);
+        }
+        Self::config_dir().join("zash.toml")
+    }
+
+    pub fn config_dir() -> PathBuf {
         let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
             .unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".config"));
-        base.join("zash/zash.toml")
+        base.join("zash")
+    }
+
+    /// A preset: a settings file loaded on top of the user's ($ZASH_PRESET or --preset).
+    pub fn preset_path(name: &str) -> PathBuf {
+        Self::config_dir().join("presets").join(format!("{name}.toml"))
+    }
+
+    fn parse(path: &std::path::Path) -> Option<File> {
+        let text = std::fs::read_to_string(path).ok()?;
+        match toml::from_str(&text) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                eprintln!("zash: {}: {e}", path.display());
+                None
+            }
+        }
     }
 
     /// The defaults, then the user's file on top. A broken file is reported and ignored.
     pub fn load() -> Config {
         let mut c = Config::default();
         let path = Self::file_path();
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(_) => {
-                // first start: write the file, so every setting is discoverable
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
-                }
-                let _ = std::fs::write(&path, DEFAULT_FILE);
-                return c;
+        if !path.exists() && std::env::var_os("ZASH_CONFIG").is_none() {
+            // first start: write the file, so every setting is discoverable
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
             }
-        };
-        let f: File = match toml::from_str(&text) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("zash: {}: {e}", path.display());
-                return c;
+            let _ = std::fs::write(&path, DEFAULT_FILE);
+        }
+        // layers: the user's file, then a preset on top (only what it sets changes)
+        let f = Self::parse(&path).unwrap_or_default();
+        c.apply(f, true);
+        if let Some(name) = std::env::var("ZASH_PRESET").ok().filter(|n| !n.is_empty()) {
+            let p = Self::preset_path(&name);
+            match Self::parse(&p) {
+                Some(f) => c.apply(f, false),
+                None if !p.exists() => eprintln!("zash: no preset {name:?} (looked for {})", p.display()),
+                None => {}
             }
-        };
+        }
+        // the environment still wins, for one-off runs
+        if let Ok(v) = std::env::var("ZASH_FONT") { c.font_family = v; }
+        if let Some(v) = std::env::var("ZASH_FONT_SIZE").ok().and_then(|s| s.parse().ok()) { c.font_size_pt = v; }
+        c
+    }
+
+    /// One layer of settings: what the file sets changes, the rest stays. The first
+    /// layer (`base`) also decides whether the Glass panel drives the opacity.
+    fn apply(&mut self, f: File, base: bool) {
+        let c = self;
         if let Some(v) = f.font { c.font_family = v; }
         if let Some(v) = f.size { c.font_size_pt = v; }
         if let Some(v) = f.line_height { c.line_height = v; }
@@ -394,7 +428,8 @@ impl Config {
         if let Some(v) = f.cursor_trail { c.cursor_trail = v; }
         match f.align.as_deref() {
             Some("top-left") | Some("topleft") | Some("left") => c.center = false,
-            Some("center") | Some("centre") | None => c.center = true,
+            Some("center") | Some("centre") => c.center = true,
+            None => {}
             Some(other) => eprintln!("zash: align = {other:?}: use \"center\" or \"top-left\""),
         }
         if let Some([x, y]) = f.offset { c.offset = (x, y); }
@@ -408,8 +443,11 @@ impl Config {
             if let Some(v) = p.rows { d.rows = v.clamp(1, 40); }
         }
         match f.opacity {
-            Some(v) => c.opacity = v.clamp(0.1, 1.0),
-            None => {
+            Some(v) => {
+                c.opacity = v.clamp(0.1, 1.0);
+                c.glass_file = None;
+            }
+            None if base => {
                 let home = std::env::var("HOME").unwrap_or_default();
                 // the shell's Glass panel writes zash's own file; WezTerm's until it has
                 let mine = PathBuf::from(&home).join(".config/zash/glass.lua");
@@ -417,6 +455,7 @@ impl Config {
                 if let Some(o) = Self::read_glass(&g) { c.opacity = o; }
                 c.glass_file = Some(g);
             }
+            None => {}
         }
         if let Some(v) = f.colors {
             let home = std::env::var("HOME").unwrap_or_default();
@@ -426,10 +465,6 @@ impl Config {
                 c.palette = Palette::from_tinct_lua(&s);
             }
         }
-        // the environment still wins, for one-off runs
-        if let Ok(v) = std::env::var("ZASH_FONT") { c.font_family = v; }
-        if let Some(v) = std::env::var("ZASH_FONT_SIZE").ok().and_then(|s| s.parse().ok()) { c.font_size_pt = v; }
-        c
     }
 }
 
