@@ -3,7 +3,7 @@
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::Mutex;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{self, Term};
@@ -32,16 +32,14 @@ pub enum Sink {
 }
 
 #[derive(Clone)]
-pub struct Listener(pub Sink, pub Arc<std::sync::OnceLock<Arc<Mutex<File>>>>);
+pub struct Listener(pub Sink, pub Arc<std::sync::OnceLock<mpsc::Sender<Vec<u8>>>>);
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
         // replies to the program (device attributes, cursor position, colours asked for) go
         // straight back from the reader thread: a program waiting with a short timeout gets them
         if let (Event::PtyWrite(s), Some(w)) = (&event, self.1.get()) {
-            if let Ok(mut f) = w.lock() {
-                let _ = std::io::Write::write_all(&mut *f, s.as_bytes());
-            }
+            let _ = w.send(s.as_bytes().to_vec());
             return;
         }
         match &self.0 {
@@ -101,7 +99,9 @@ pub struct Session {
     /// a cell in pixels (images are sized in cells)
     pub cell_px: Arc<Mutex<(f32, f32)>>,
     pub term: Arc<FairMutex<Term<Listener>>>,
-    writer: Arc<Mutex<File>>,
+    /// what goes to the program: a thread of its own writes it, so neither the window nor the
+    /// reader ever waits on a program that does not read (that froze zash)
+    writer: mpsc::Sender<Vec<u8>>,
     pty: Arc<Mutex<tty::Pty>>,
     pub grid: Grid,
     pub marks: Arc<Mutex<Vec<Mark>>>,
@@ -342,7 +342,7 @@ impl Session {
         let options = tty::Options { shell, working_directory: workdir, drain_on_exit: true, env };
         let pty = tty::new(&options, grid.window_size(), 0)?;
         let reader = pty.file().try_clone()?;
-        let writer = Arc::new(Mutex::new(pty.file().try_clone()?));
+        let writer = spawn_writer(pty.file().try_clone()?)?;
         let _ = replies.set(writer.clone());
         let pid = pty.child().id();
         let pty = Arc::new(Mutex::new(pty));
@@ -363,19 +363,9 @@ impl Session {
     }
 
     /// Bytes for the program, as if typed.
+    /// Queues bytes for the program; never waits.
     pub fn write(&self, bytes: Vec<u8>) {
-        let mut w = self.writer.lock().unwrap();
-        let mut rest: &[u8] = &bytes;
-        // the pty is non-blocking: a big paste may need a few rounds
-        while !rest.is_empty() {
-            match w.write(rest) {
-                Ok(n) => rest = &rest[n..],
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::Interrupted => {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                Err(_) => return,
-            }
-        }
+        let _ = self.writer.send(bytes);
     }
 
     /// The folder the program is in now (where a new tab should start).
@@ -694,5 +684,46 @@ mod claim_tests {
         assert!(c.all);
         c.apply("none");
         assert_eq!(c, Claims::default());
+    }
+}
+
+/// The thread that writes to a program: it waits for the program to read, nobody else does.
+fn spawn_writer(mut f: File) -> std::io::Result<mpsc::Sender<Vec<u8>>> {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::Builder::new().name("zash pty writer".into()).spawn(move || {
+        for bytes in rx {
+            let mut rest: &[u8] = &bytes;
+            // the pty is non-blocking: a big paste (or a program that reads slowly) takes rounds
+            while !rest.is_empty() {
+                match std::io::Write::write(&mut f, rest) {
+                    Ok(n) => rest = &rest[n..],
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::Interrupted => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    // the program is gone
+                    Err(_) => return,
+                }
+            }
+        }
+    })?;
+    Ok(tx)
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+
+    /// A program that never reads: writing far more than the pty holds must not wait (the
+    /// window called this; waiting froze zash, and with the reader's replies it deadlocked).
+    #[test]
+    fn writing_never_waits_on_the_program() {
+        let (tx, _rx) = mpsc::channel();
+        let grid = Grid { cols: 80, rows: 24, cell_w: 9.0, cell_h: 18.0 };
+        let s = Session::spawn(Some(vec!["sleep".into(), "20".into()]), None, grid, 100, Sink::Channel(tx)).expect("spawn");
+        let started = std::time::Instant::now();
+        for _ in 0..2000 {
+            s.write(vec![b'x'; 512]);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_millis(500), "write waited {:?}", started.elapsed());
     }
 }
