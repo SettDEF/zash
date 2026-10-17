@@ -180,6 +180,7 @@ pub fn encode_notation(s: &str, app_cursor: bool) -> Vec<Vec<u8>> {
                     "del" => Some(Key::Named(Named::Delete)),
                     "pageup" => Some(Key::Named(Named::PageUp)),
                     "pagedown" => Some(Key::Named(Named::PageDown)),
+                    "space" => Some(Key::Text(" ")),
                     _ => None,
                 };
                 let bytes = match key {
