@@ -42,9 +42,21 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
         // give the program a moment to start, then type at a human-ish pace
         std::thread::sleep(Duration::from_millis(400));
         let app_cursor = session.term.lock().mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR);
-        for b in crate::input::encode_notation(keys, app_cursor) {
-            session.write(b);
-            std::thread::sleep(Duration::from_millis(8));
+        // <Sleep:MS> pauses between keys (a program that needs time to get ready)
+        let mut rest = keys.as_str();
+        loop {
+            let (now, after) = match rest.find("<Sleep:") {
+                Some(i) => (&rest[..i], Some(&rest[i + 7..])),
+                None => (rest, None),
+            };
+            for b in crate::input::encode_notation(now, app_cursor) {
+                session.write(b);
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            let Some(after) = after else { break };
+            let (ms, tail) = after.split_once('>').unwrap_or((after, ""));
+            std::thread::sleep(Duration::from_millis(ms.parse().unwrap_or(1000)));
+            rest = tail;
         }
     }
     let deadline = Instant::now() + o.wait;
