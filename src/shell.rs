@@ -29,10 +29,10 @@ if [[ -o interactive ]]; then
   add-zsh-hook precmd _zash_precmd
   add-zsh-hook preexec _zash_preexec
   # nvim in zash: zash is its screen (smooth scrolling, a flying cursor), as Neovide does.
-  # Inside tmux, in pipes, or with ZASH_NO_NVIM_UI set it is plain nvim.
+  # Inside tmux or zeit, in pipes, or with ZASH_NO_NVIM_UI set it is plain nvim.
   if [[ -z "$ZASH_NO_NVIM_UI" ]]; then
     nvim() {
-      if [[ -n "$TMUX" || ! -t 0 || ! -t 1 ]]; then command nvim "$@"; return; fi
+      if [[ -n "$TMUX" || -n "$ZEIT" || ! -t 0 || ! -t 1 ]]; then command nvim "$@"; return; fi
       local sock="${XDG_RUNTIME_DIR:-/tmp}/zash-nvim-$$-$RANDOM.sock"
       print -n "\e]7733;nvim;$sock\a"
       command nvim --headless --listen "$sock" "$@"
