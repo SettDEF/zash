@@ -36,14 +36,26 @@ fn main() {
             }
         }
     }
+    // zash --web URL: a window that is the page (links opened with zash, the "Open with" portal)
+    if let Some(i) = args.iter().position(|a| a == "--web") {
+        let url = args.get(i + 1).cloned().unwrap_or_else(|| "about:blank".into());
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "zash".into());
+        let cmd = vec![exe, "web".into(), "--fill".into(), url];
+        if let Err(e) = app::run(config::Config::load(), Some(cmd), None) {
+            eprintln!("zash: {e}");
+        }
+        return;
+    }
     // zash web ADDRESS [-r ROWS]: a web page here, in this terminal (zash draws it)
     if args.first().map(String::as_str) == Some("web") {
         let mut rows = 30usize;
+        let mut fill = false;
         let mut words = Vec::new();
         let mut it = args[1..].iter();
         while let Some(a) = it.next() {
             match a.as_str() {
                 "-r" | "--rows" => rows = it.next().and_then(|v| v.parse().ok()).unwrap_or(rows),
+                "--fill" => fill = true,
                 _ => words.push(a.clone()),
             }
         }
@@ -56,6 +68,17 @@ fn main() {
             std::process::exit(1);
         }
         let url = web::address(&words.join(" "));
+        if fill {
+            // the whole window: the page from the top, and this program stays so the window does
+            let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+            unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) };
+            rows = (ws.ws_row as usize).max(4);
+            print!("\x1b[?25l\x1b[H\x1b[2J\x1b]2;{url}\x07\x1b]7733;web;rows={rows};url={url}\x07");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
         print!("\x1b]7733;web;rows={rows};url={url}\x07{}", "\n".repeat(rows));
         let _ = std::io::Write::flush(&mut std::io::stdout());
         return;
