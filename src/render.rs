@@ -703,7 +703,7 @@ impl Renderer {
                     rects.push(Rect { xywh: [r[0] - 1.0, r[1] - 1.0, r[2] + 2.0, r[3] + 2.0], color: edge, p: [rad + 1.0, 0.0] });
                 }
                 // the panel: its shader if the title has one that compiles, else its colour
-                let shader = self.zfloat_shaders.for_title(&z.title).cloned()
+                let shader = self.zfloat_shaders.for_title(&z.title).filter(|_| self.fx.shaders_on()).cloned()
                     .filter(|path| self.shaders.get(device, self.format, path).is_some());
                 match shader {
                     Some(path) => {

@@ -282,6 +282,7 @@ struct File {
 #[serde(deny_unknown_fields)]
 struct FxFile {
     enabled: Option<bool>,
+    shaders: Option<bool>,
     fps: Option<f32>,
     presets: Option<std::collections::HashMap<String, String>>,
 }
@@ -438,12 +439,16 @@ border = "panel"
 shader = ""
 [zfloat.shaders]
 
-# Text effects programs can ask for (OSC 7733;fx: shimmer, pulse, fade, rainbow, typewriter,
-# glow). Off: their text shows plain. fps: the most frames a second they cause (slow frames
-# lower it on their own). A preset is a name programs can use, written like the escape:
+# Effects, all switchable for old machines (nothing animates while they are off):
+#   enabled: text effects programs ask for (OSC 7733;fx: shimmer, pulse, fade, rainbow,
+#            typewriter, glow); off, their text shows plain
+#   shaders: GLSL zfloat panels ([zfloat.shaders]); off, the panels are plain
+#   fps:     the most frames a second either causes (15 is plenty on an old laptop); frames that
+#            come out slow lower it on their own, and turn both off as a last resort A preset is a name programs can use, written like the escape:
 #   done = "shimmer;color=good;speed=1.5;loop=2"
 [fx]
 enabled = true
+shaders = true
 fps = 30
 [fx.presets]
 "#;
@@ -531,6 +536,7 @@ impl Config {
         if let Some([x, y]) = f.offset { c.offset = (x, y); }
         if let Some(x) = f.fx {
             if let Some(v) = x.enabled { c.fx.enabled = v; }
+            if let Some(v) = x.shaders { c.fx.shaders = v; }
             if let Some(v) = x.fps { c.fx.fps = v.clamp(1.0, 120.0); }
             if let Some(p) = x.presets { c.fx.presets = p; }
         }

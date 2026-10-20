@@ -22,6 +22,8 @@ pub const SCHEME: &str = "zash-fx:";
 pub struct Settings {
     /// false: effects show as plain text
     pub enabled: bool,
+    /// false: zfloats keep their plain panel, no GLSL ([zfloat.shaders] is ignored)
+    pub shaders: bool,
     /// the most frames a second effects ask for (old machines: lower)
     pub fps: f32,
     /// name → the same text an escape carries (`shimmer;color=good;loop=2`)
@@ -30,7 +32,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { enabled: true, fps: 30.0, presets: HashMap::new() }
+        Settings { enabled: true, shaders: true, fps: 30.0, presets: HashMap::new() }
     }
 }
 

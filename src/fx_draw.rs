@@ -155,6 +155,11 @@ impl FxLayer {
         out
     }
 
+    /// GLSL panels may be drawn (the setting, and the budget guard has not turned them off).
+    pub fn shaders_on(&self) -> bool {
+        self.settings.shaders
+    }
+
     pub fn buffer(&self, key: &GlyphKey) -> Option<&Buffer> {
         self.glyphs.get(key)
     }
@@ -172,14 +177,15 @@ impl FxLayer {
                     eprintln!("zash: effect frames take {} ms: {} a second now", took.as_millis(), self.fps);
                 } else {
                     self.settings.enabled = false;
+                    self.settings.shaders = false;
                     self.effects.clear();
-                    eprintln!("zash: effect frames still take {} ms at 10 a second: effects off ([fx] in zash.toml)", took.as_millis());
+                    eprintln!("zash: effect frames still take {} ms at 10 a second: effects and panel shaders off ([fx] in zash.toml)", took.as_millis());
                 }
             }
         } else if moving {
             self.slow = self.slow.saturating_sub(1);
         }
-        self.due = (moving && self.settings.enabled).then(|| Instant::now() + Duration::from_secs_f32(1.0 / self.fps));
+        self.due = (moving && (self.settings.enabled || self.settings.shaders)).then(|| Instant::now() + Duration::from_secs_f32(1.0 / self.fps));
     }
 }
 
