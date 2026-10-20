@@ -1186,7 +1186,9 @@ impl App {
                 return;
             }
             _ => {
-                g.window.request_redraw();
+                // timed out, or hidden (occluded): try again a little later, not at once (that
+                // asked for a redraw that failed the same way, in a loop)
+                g.renderer.fx.due = Some(std::time::Instant::now() + std::time::Duration::from_millis(100));
                 return;
             }
         };
@@ -1240,8 +1242,12 @@ impl ApplicationHandler<ZEvent> for App {
 
     fn new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
-            if let Some(g) = self.gpu.as_ref() {
+            if let Some(g) = self.gpu.as_mut() {
                 g.window.request_redraw();
+                // the redraw is asked for; the next drawn frame sets a new time. Kept, a time in the
+                // past made every wait return at once while Wayland held the redraw for its frame
+                // callback: a busy loop at 100 % of a core (an animated zfloat shader, 2026-10-20)
+                g.renderer.fx.due = None;
             }
         }
     }
