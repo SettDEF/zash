@@ -18,6 +18,7 @@ mod app;
 mod watchdog;
 mod cli;
 mod config;
+mod desktop;
 mod dnd;
 mod graphics;
 mod web;
@@ -68,7 +69,7 @@ fn main() {
         let url = if typed.trim().is_empty() { "about:blank".to_string() } else { web::address(&typed) };
         let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "zash".into());
         let cmd = vec![exe, "web".into(), "--fill".into(), url];
-        if let Err(e) = app::run(config::Config::load(), Some(cmd), None) {
+        if let Err(e) = app::run(config::Config::load(), Some(cmd), None, None) {
             eprintln!("zash: {e}");
             std::process::exit(1);
         }
@@ -140,6 +141,30 @@ fn main() {
         }
     }
 
+    // --desktop: on the wallpaper, click-through ([desktop] in the settings); -- CMD runs CMD in it
+    if matches!(args.first().map(String::as_str), Some("--desktop" | "desktop")) {
+        if args.iter().any(|a| a == "-h" || a == "--help") {
+            return cli::print(cli::DESKTOP_HELP);
+        }
+        let cmd = args.iter().position(|a| a == "--").map(|i| args[i + 1..].to_vec()).filter(|c| !c.is_empty());
+        let probe = args.iter().any(|a| a == "--probe");
+        if let Err(e) = desktop::run(cfg, cmd, probe) {
+            eprintln!("zash --desktop: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // --float [WxH]: a floating window of that size ([float] size; Hyprland floats "zash-float")
+    let mut float = None;
+    if let Some(i) = args.iter().position(|a| a == "--float") {
+        args.remove(i);
+        let size = args.get(i).and_then(|s| s.split_once('x')).and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)));
+        if size.is_some() {
+            args.remove(i);
+        }
+        float = Some(size.unwrap_or(cfg.float_size));
+    }
+
     if matches!(args.first().map(String::as_str), Some("--snapshot" | "snapshot")) {
         let mut o = snapshot::Opts { png: None, cols: 100, rows: 30, wait: Duration::from_secs(5), cmd: Vec::new(), keys: None, workdir: workdir.clone(), search: None, older: 0, nvim: false };
         let mut it = args.into_iter().skip(1);
@@ -206,7 +231,7 @@ fn main() {
     };
     // a plain `zash` runs the configured command (command = "zeit new"), else the shell
     let cmd = cmd.or_else(|| cfg.command.clone().filter(|c| !c.trim().is_empty()).map(|c| vec!["sh".into(), "-c".into(), format!("exec {c}")]));
-    if let Err(e) = app::run(cfg, cmd, workdir) {
+    if let Err(e) = app::run(cfg, cmd, workdir, float) {
         eprintln!("zash: {e}");
         std::process::exit(1);
     }

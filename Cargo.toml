@@ -20,6 +20,10 @@ rmpv = "1"
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 libc = "0.2"
+# --desktop: a layer-shell surface (on the wallpaper), sized for fractional scales
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+raw-window-handle = "0.6"
 
 [profile.release]
 opt-level = 3

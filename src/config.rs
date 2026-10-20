@@ -172,6 +172,10 @@ pub struct Config {
     pub opacity: f32,
     /// the shell's Glass panel writes this (opacity = …); followed live unless the config sets one
     pub glass_file: Option<PathBuf>,
+    /// zash on the wallpaper (`[desktop]`, `zash --desktop`)
+    pub desktop: DesktopConf,
+    /// `zash --float`: the window's size, logical pixels (`[float] size`)
+    pub float_size: (u32, u32),
 }
 
 impl Config {
@@ -209,6 +213,8 @@ impl Default for Config {
             colors_file: Palette::tinct_file(),
             opacity: 1.0,
             glass_file: None,
+            desktop: DesktopConf::default(),
+            float_size: (900, 560),
         }
     }
 }
@@ -280,6 +286,8 @@ struct File {
     popup: Option<PopupFile>,
     zfloat: Option<ZfloatFile>,
     fx: Option<FxFile>,
+    desktop: Option<DesktopFile>,
+    float: Option<FloatFile>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -363,6 +371,123 @@ impl ZfloatShaders {
     pub fn for_title(&self, title: &str) -> Option<&PathBuf> {
         self.by_title.get(title).or(self.default.as_ref())
     }
+}
+
+/// Which corner, edge or centre of the screen the desktop terminal sits at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Anchor {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl Anchor {
+    pub fn parse(s: &str) -> Option<Anchor> {
+        Some(match s.trim().to_lowercase().replace(['_', ' '], "-").as_str() {
+            "top-left" => Anchor::TopLeft,
+            "top" => Anchor::Top,
+            "top-right" => Anchor::TopRight,
+            "left" => Anchor::Left,
+            "center" | "centre" => Anchor::Center,
+            "right" => Anchor::Right,
+            "bottom-left" => Anchor::BottomLeft,
+            "bottom" => Anchor::Bottom,
+            "bottom-right" => Anchor::BottomRight,
+            _ => return None,
+        })
+    }
+
+    /// (left, right, top, bottom): the edges it is pinned to.
+    pub fn edges(self) -> (bool, bool, bool, bool) {
+        use Anchor::*;
+        let left = matches!(self, TopLeft | Left | BottomLeft);
+        let right = matches!(self, TopRight | Right | BottomRight);
+        let top = matches!(self, TopLeft | Top | TopRight);
+        let bottom = matches!(self, BottomLeft | Bottom | BottomRight);
+        (left, right, top, bottom)
+    }
+}
+
+/// The layer the desktop terminal lives on: under the windows (bottom), or with the wallpaper.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DesktopLayer {
+    Background,
+    Bottom,
+}
+
+/// How dark (or light) the panel under the desktop terminal's text is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Readability {
+    /// measured from the wallpaper under it: just enough for the contrast asked
+    Auto,
+    /// a fixed panel opacity, 0..1
+    Fixed(f32),
+}
+
+/// `[desktop]`: zash on the wallpaper (`zash --desktop`), click-through.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesktopConf {
+    pub anchor: Anchor,
+    /// logical pixels
+    pub size: (u32, u32),
+    /// from the pinned edges, logical pixels: [x, y]
+    pub margin: (i32, i32),
+    pub layer: DesktopLayer,
+    /// a monitor by name (eDP-1); None: the compositor's choice
+    pub output: Option<String>,
+    /// what runs in it; None: the zeit session "desktop" (attach to it elsewhere to type)
+    pub command: Option<String>,
+    pub readability: Readability,
+    /// the contrast the text keeps over the wallpaper (WCAG ratio; 7 = AAA)
+    pub contrast: f32,
+    /// never less panel than this, even over a plain wallpaper
+    pub min_opacity: f32,
+    pub font_size_pt: Option<f32>,
+}
+
+impl Default for DesktopConf {
+    fn default() -> Self {
+        DesktopConf {
+            anchor: Anchor::BottomRight,
+            size: (720, 400),
+            margin: (24, 24),
+            layer: DesktopLayer::Bottom,
+            output: None,
+            command: None,
+            readability: Readability::Auto,
+            contrast: 7.0,
+            min_opacity: 0.12,
+            font_size_pt: None,
+        }
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DesktopFile {
+    anchor: Option<String>,
+    size: Option<[u32; 2]>,
+    margin: Option<[i32; 2]>,
+    layer: Option<String>,
+    output: Option<String>,
+    command: Option<String>,
+    /// "auto" or a number 0..1
+    readability: Option<toml::Value>,
+    contrast: Option<f32>,
+    min_opacity: Option<f32>,
+    size_pt: Option<f32>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FloatFile {
+    size: Option<[u32; 2]>,
 }
 
 /// How a zfloat looks: `[zfloat]` in zash.toml.
@@ -517,6 +642,21 @@ enabled = true
 shaders = true
 fps = 30
 [fx.presets]
+
+# zash --desktop: a terminal on the wallpaper, click-through (zash --desktop --help).
+# Its panel is as dark as the wallpaper under it needs for the contrast below.
+# [desktop]
+# anchor = "bottom-right"
+# size = [720, 400]
+# margin = [24, 24]
+# layer = "bottom"
+# command = "btop"
+# readability = "auto"
+# contrast = 7
+
+# zash --float: a floating window of this size (logical pixels)
+# [float]
+# size = [900, 560]
 "#;
 
 impl Config {
@@ -625,6 +765,35 @@ impl Config {
             if let Some(v) = x.fps { c.fx.fps = v.clamp(1.0, 120.0); }
             if let Some(p) = x.presets { c.fx.presets = p; }
         }
+        if let Some(d) = f.desktop {
+            let k = &mut c.desktop;
+            match d.anchor.as_deref().map(|a| (a, Anchor::parse(a))) {
+                None => {}
+                Some((_, Some(a))) => k.anchor = a,
+                Some((a, None)) => eprintln!("zash: [desktop] anchor = {a:?}: use top-left, top, top-right, left, center, right, bottom-left, bottom or bottom-right"),
+            }
+            if let Some([w, h]) = d.size { k.size = (w.max(80), h.max(40)); }
+            if let Some([x, y]) = d.margin { k.margin = (x, y); }
+            match d.layer.as_deref() {
+                None => {}
+                Some("bottom") => k.layer = DesktopLayer::Bottom,
+                Some("background") => k.layer = DesktopLayer::Background,
+                Some(o) => eprintln!("zash: [desktop] layer = {o:?}: use \"bottom\" or \"background\""),
+            }
+            if let Some(v) = d.output { k.output = Some(v).filter(|s| !s.is_empty()); }
+            if let Some(v) = d.command { k.command = Some(v).filter(|s| !s.trim().is_empty()); }
+            match d.readability {
+                None => {}
+                Some(toml::Value::String(s)) if s == "auto" => k.readability = Readability::Auto,
+                Some(toml::Value::Float(v)) => k.readability = Readability::Fixed((v as f32).clamp(0.0, 1.0)),
+                Some(toml::Value::Integer(v)) => k.readability = Readability::Fixed((v as f32).clamp(0.0, 1.0)),
+                Some(o) => eprintln!("zash: [desktop] readability = {o}: use \"auto\" or a number from 0 to 1"),
+            }
+            if let Some(v) = d.contrast { k.contrast = v.clamp(1.0, 21.0); }
+            if let Some(v) = d.min_opacity { k.min_opacity = v.clamp(0.0, 1.0); }
+            if let Some(v) = d.size_pt { k.font_size_pt = Some(v.clamp(4.0, 72.0)); }
+        }
+        if let Some([w, h]) = f.float.and_then(|f| f.size) { c.float_size = (w.max(200), h.max(120)); }
         if let Some(z) = f.zfloat {
             if let Some(v) = z.opacity { c.zfloat.opacity = v.clamp(0.0, 1.0); }
             let path = |s: &str| PathBuf::from(s.strip_prefix("~/").map(|r| format!("{}/{r}", std::env::var("HOME").unwrap_or_default())).unwrap_or_else(|| s.to_string()));

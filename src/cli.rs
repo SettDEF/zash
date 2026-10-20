@@ -67,10 +67,12 @@ The terminal of zett: GPU-drawn, themed by the wallpaper, with images and web pa
   `web` <address>         Show a web page here (inside zeit: in a pane of its own)
   `open` <address>        Open a web page in a window of its own
   `snapshot` [<out.png>]  Draw without a window and print the screen (for tests)
+  `--desktop`             A terminal on the wallpaper (`zash --desktop --help`)
 
 **Options:**
   `-e`, `--exec` <command>  Run <command> instead of the shell ('a command line' goes through sh)
   `-d`, `--dir` <folder>    Start in <folder>
+      `--float` [<W>x<H>]  A floating window of that size (Hyprland floats `zash-float`)
       `--preset` <name>   Layer a preset over your settings (~/.config/zash/presets/)
       `--config` <file>   Use another settings file
   `-h`, `--help`            Show this help (`zash` <subcommand> `--help` for one command)
@@ -100,3 +102,23 @@ Alt+← / → back / forward · Ctrl+R reload · Ctrl+Shift+V paste
 `zash open` <address> opens it in a window of its own instead.";
 
 pub const OPEN_USAGE: &str = "**Usage:** `zash open` <address>";
+
+pub const DESKTOP_HELP: &str = "A terminal on the wallpaper: no window, click-through, under every window.
+
+**Usage:** `zash --desktop` [`--` <command> …]
+
+It runs zeit's session \"desktop\" (made the first time); `zeit attach -t desktop` in a
+window types in it. Its panel is only as dark as the wallpaper under it needs for the
+text to stay readable, measured again when the wallpaper or the colours change.
+
+**Settings:** `[desktop]` in ~/.config/zash/zash.toml
+  anchor = \"bottom-right\"   top-left, top, top-right, left, center, right, bottom-left, bottom
+  size = [720, 400]        logical pixels        margin = [24, 24]   from the edges
+  layer = \"bottom\"         or \"background\" (with the wallpaper, under desktop widgets)
+  output = \"eDP-1\"         a monitor (else the compositor's choice)
+  command = \"btop\"         what runs in it (else the zeit session)
+  readability = \"auto\"     or a fixed panel opacity 0–1
+  contrast = 7             the text's contrast over the wallpaper (WCAG; 4.5 AA, 7 AAA)
+  min_opacity = 0.12       never less panel than this        size_pt = 10   its font size
+
+`zash --float` [<W>x<H>] is the window version: a floating window (`[float] size`).";

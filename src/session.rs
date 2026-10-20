@@ -62,7 +62,7 @@ pub struct Grid {
 }
 
 impl Grid {
-    fn window_size(&self) -> WindowSize {
+    pub(crate) fn window_size(&self) -> WindowSize {
         WindowSize { num_lines: self.rows as u16, num_cols: self.cols as u16, cell_width: self.cell_w as u16, cell_height: self.cell_h as u16 }
     }
     fn term_size(&self) -> term::test::TermSize {

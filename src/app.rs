@@ -97,13 +97,16 @@ struct App {
     glide_at: std::time::Instant,
     /// scrollback search (Ctrl+Shift+F) while it is open
     search: Option<crate::search::Search>,
+    /// `--float`: the window's size; its app id is "zash-float"
+    float: Option<(u32, u32)>,
 }
 
-pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::PathBuf>) -> Result<(), String> {
+/// `float`: a window of this size (logical px) with the app id "zash-float", which Hyprland floats.
+pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::PathBuf>, float: Option<(u32, u32)>) -> Result<(), String> {
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None, float };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -1256,11 +1259,13 @@ impl ApplicationHandler<ZEvent> for App {
         if self.gpu.is_some() {
             return;
         }
-        let mut attrs = Window::default_attributes().with_title("zash").with_transparent(self.cfg.opacity < 1.0).with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0));
+        let (w, h) = self.float.unwrap_or((960, 600));
+        let mut attrs = Window::default_attributes().with_title("zash").with_transparent(self.cfg.opacity < 1.0).with_inner_size(winit::dpi::LogicalSize::new(w as f64, h as f64));
         #[cfg(target_os = "linux")]
         {
             use winit::platform::wayland::WindowAttributesExtWayland;
-            attrs = attrs.with_name("zash", "zash");
+            let id = if self.float.is_some() { "zash-float" } else { "zash" };
+            attrs = attrs.with_name(id, id);
         }
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
