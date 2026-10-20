@@ -139,6 +139,9 @@ impl Frame {
         let offset = content.display_offset as i32;
         let mut rows: Vec<Vec<CellView>> = (0..lines).map(|_| Vec::with_capacity(cols)).collect();
         let sel = content.selection;
+        // the default colours as the program set them (OSC 10/11: the shell sends the new theme's after
+        // a wallpaper change), else the palette's
+        let (def_fg, def_bg) = (resolve(AColor::Named(NamedColor::Foreground), content.colors, p, false), resolve(AColor::Named(NamedColor::Background), content.colors, p, false));
         // per row: how many cells are inverted, and the last one (a TUI's own cursor is a lone one)
         let mut inverted: Vec<(u32, usize)> = vec![(0, 0); lines];
         for ic in content.display_iter {
@@ -156,7 +159,7 @@ impl Frame {
             ((l + offset) as usize, c, content.cursor.shape)
         }).filter(|(r, _, _)| *r < lines);
         let drawn_cursor = if cursor.is_none() { inverted.iter().rposition(|(n, _)| *n == 1).map(|r| (r, inverted[r].1)) } else { None };
-        let f = Frame { drawn_cursor, cursor_drawn: false, cursor_styled: true, float: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() };
+        let f = Frame { drawn_cursor, cursor_drawn: false, cursor_styled: true, float: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: def_fg, prompts: Vec::new(), cols, rows, cursor, bg: def_bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() };
         f
     }
 
@@ -610,6 +613,9 @@ impl Renderer {
             }
             let mut out_row: Vec<Rect> = Vec::new();
             let out = &mut out_row;
+            // shapes and lines go on top of every background of the row (a run is only flushed when
+            // it ends, which can be after a shape in it: an explicit status-line colour hid the pill ends)
+            let mut fore: Vec<Rect> = Vec::new();
             // backgrounds, merged across cells of one colour
             let mut run: Option<(usize, usize, Rgb)> = None;
             for (c, cell) in row.iter().enumerate() {
@@ -628,7 +634,7 @@ impl Renderer {
                 if let Some(shape) = powerline(cell.ch) {
                     let x = pad + c as f32 * cw;
                     let r = (ch / 2.0).min(cw);
-                    out.push(match shape {
+                    fore.push(match shape {
                         // a rounded end reaches into the next cell (the pill's body, same colour)
                         Powerline::RoundLeft => Rect { xywh: [x, y, 2.0 * cw, ch], color: fg, p: [r, 0.0] },
                         Powerline::RoundRight => Rect { xywh: [x - cw, y, 2.0 * cw, ch], color: fg, p: [r, 0.0] },
@@ -639,15 +645,16 @@ impl Renderer {
                 let w = if cell.wide { 2.0 * cw } else { cw };
                 let thick = (self.font_px / 14.0).max(1.0).round();
                 if cell.underline {
-                    out.push(Rect { xywh: [pad + c as f32 * cw, y + ch - thick * 2.0, w, thick], color: fg, p: [0.0, 0.0] });
+                    fore.push(Rect { xywh: [pad + c as f32 * cw, y + ch - thick * 2.0, w, thick], color: fg, p: [0.0, 0.0] });
                 }
                 if cell.strike {
-                    out.push(Rect { xywh: [pad + c as f32 * cw, y + ch * 0.55, w, thick], color: fg, p: [0.0, 0.0] });
+                    fore.push(Rect { xywh: [pad + c as f32 * cw, y + ch * 0.55, w, thick], color: fg, p: [0.0, 0.0] });
                 }
             }
             if let Some((s, e, col)) = run {
                 out.push(Rect { xywh: [pad + s as f32 * cw, y, (e - s) as f32 * cw, ch], color: col.f32(), p: [0.0, 0.0] });
             }
+            out_row.extend(fore);
             match band {
                 Some((b0, b1)) => out_all.extend(clipped(out_row, [clip[0], b0, clip[2], b1 - b0])),
                 None => out_all.extend(out_row),
@@ -1206,6 +1213,9 @@ fn cell_view(cell: &alacritty_terminal::term::cell::Cell, point: Point, colors: 
     let bold = f.contains(Flags::BOLD);
     let mut fg = resolve(cell.fg, colors, p, bold);
     let mut bg = resolve(cell.bg, colors, p, false);
+    // "its own background" is one that differs from the default in force, not from the palette's: after
+    // an OSC 11 every default cell drew a box, which hid what is drawn over it (rounded pill ends)
+    let def_bg = resolve(AColor::Named(NamedColor::Background), colors, p, false);
     if f.contains(Flags::DIM) {
         fg = dim(fg);
     }
@@ -1223,7 +1233,7 @@ fn cell_view(cell: &alacritty_terminal::term::cell::Cell, point: Point, colors: 
         ch,
         zw: cell.zerowidth().map(|z| z.to_vec()),
         style: Style2 { fg: (fg.0, fg.1, fg.2), bold, italic: f.contains(Flags::ITALIC) },
-        bg: (bg != p.bg).then_some(bg),
+        bg: (bg != def_bg).then_some(bg),
         underline: f.intersects(Flags::ALL_UNDERLINES),
         strike: f.contains(Flags::STRIKEOUT),
         wide: f.contains(Flags::WIDE_CHAR),
