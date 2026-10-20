@@ -226,9 +226,9 @@ A release that is worse than the best on any of them is not done.
 
 ## Status (2026-10-17)
 
-- Open (2026-10-20): after a wallpaper change a running zash kept the old 16 colours while a
-  fresh one was right: the shell's live OSC palette (applycolor.sh) likely wins over the file
-  palette. Reproduce on the next change; the file palette should win, or both agree.
+- Resolved (2026-10-20): "old colours after a wallpaper change" was not zash (it reloads its
+  palette file): zeit never reloaded its look (tinct now runs `zeit source-file` after the tmux
+  colours) and zsh read its colours only at start (a precmd check re-reads them now).
 - Text effects (OSC 7733;fx, fx.rs / fx_draw.rs) and GLSL zfloat panels (panel_shader.rs,
   [zfloat.shaders]) are in. Measured with ZASH_BENCH: 30 frames/s at ~1 ms a frame; 20 % of a
   core on the software renderer, ~4 % on the GPU.
