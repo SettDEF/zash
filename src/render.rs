@@ -27,6 +27,10 @@ pub struct Style2 {
     pub italic: bool,
 }
 
+/// A zfloat's buttons start this many cells from its frame's right edge, where zeit expects the
+/// clicks (zeit's BUTTONS_FROM_RIGHT): the × sits next to the corner.
+const ZFLOAT_BUTTONS: f32 = 7.0;
+
 #[derive(Clone)]
 pub struct CellView {
     pub ch: char,
@@ -723,7 +727,7 @@ impl Renderer {
             let (b, _) = label(&mut self.font_system, &self.family, &z.title, if z.focus { *fg } else { dim }, self.font_px, self.cell_h);
             labels.push((b, r[0] + self.cell_w * 1.5, r[1]));
             // from the frame's right edge (a docked frame reaches past its last cell to the window's)
-            let bx = r[0] + r[2] - 9.0 * self.cell_w + self.cell_w * 0.25;
+            let bx = r[0] + r[2] - ZFLOAT_BUTTONS * self.cell_w + self.cell_w * 0.25;
             for (k, glyph) in [(1.0, "⌄"), (3.0, "–"), (5.0, "×")].into_iter().filter(|_| z.buttons) {
                 let cx = bx + (k + 0.5) * self.cell_w;
                 let cy = r[1] + self.cell_h * 0.5;
