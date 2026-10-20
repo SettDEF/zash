@@ -151,6 +151,23 @@ pub fn render_png(frame: &Frame, cfg: &Config, path: &str) -> Result<(u32, u32),
     r.cursor_ms = 0.0;
     let pane = crate::render::PaneView { id: 0, x: 0.0, y: 0.0, w: width as f32, h: height as f32, frame, focused: true };
     r.render(&device, &queue, &view, width, height, &[pane]);
+    // ZASH_BENCH=SECONDS: keep drawing as the window would (only when an effect or shader asks for a
+    // frame, at its rate), then report the frame times: what effects cost on this machine
+    if let Some(secs) = std::env::var("ZASH_BENCH").ok().and_then(|s| s.parse::<f32>().ok()) {
+        let end = Instant::now() + Duration::from_secs_f32(secs);
+        let mut times: Vec<f32> = Vec::new();
+        while Instant::now() < end {
+            let Some(due) = r.fx.due else { break };
+            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+            let t = Instant::now();
+            r.render(&device, &queue, &view, width, height, &[crate::render::PaneView { id: 0, x: 0.0, y: 0.0, w: width as f32, h: height as f32, frame, focused: true }]);
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            times.push(t.elapsed().as_secs_f32() * 1000.0);
+        }
+        times.sort_by(f32::total_cmp);
+        let n = times.len().max(1);
+        eprintln!("zash bench: {} frames in {secs} s ({:.1}/s), frame ms: median {:.2}, p95 {:.2}, max {:.2}", times.len(), times.len() as f32 / secs, times.get(n / 2).unwrap_or(&0.0), times.get(n * 95 / 100).unwrap_or(&0.0), times.last().unwrap_or(&0.0));
+    }
 
     // read back, rows padded to 256 bytes
     let row = (width * 4).div_ceil(256) * 256;

@@ -8,7 +8,7 @@ license = "MIT"
 [dependencies]
 alacritty_terminal = "0.26"
 glyphon = "0.12"
-wgpu = "30"
+wgpu = { version = "30", features = ["glsl"] }
 winit = "0.30"
 pollster = "0.4"
 log = "0.4"

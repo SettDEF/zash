@@ -526,7 +526,8 @@ impl App {
         let (p, _) = self.point_at(x, y)?;
         let s = self.sess()?;
         let t = s.term.lock();
-        if let Some(h) = t.grid()[p].hyperlink() {
+        // a text effect rides the hyperlink too, but is no link (fx.rs)
+        if let Some(h) = t.grid()[p].hyperlink().filter(|h| !h.uri().starts_with(crate::fx::SCHEME)) {
             return Some(h.uri().to_string());
         }
         let cols = t.grid().columns();
@@ -1226,6 +1227,23 @@ impl App {
 }
 
 impl ApplicationHandler<ZEvent> for App {
+    // Text effects move at their own rate (FxLayer::due): sleep until then, not in a busy loop.
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        let due = self.gpu.as_ref().and_then(|g| g.renderer.fx.due);
+        el.set_control_flow(match due {
+            Some(t) => winit::event_loop::ControlFlow::WaitUntil(t),
+            None => winit::event_loop::ControlFlow::Wait,
+        });
+    }
+
+    fn new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
+        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            if let Some(g) = self.gpu.as_ref() {
+                g.window.request_redraw();
+            }
+        }
+    }
+
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.gpu.is_some() {
             return;
@@ -1351,6 +1369,8 @@ impl ApplicationHandler<ZEvent> for App {
                     g.renderer.opacity = self.cfg.opacity;
                     g.renderer.cursor_ms = self.cfg.cursor_ms;
                     g.renderer.cursor_trail = self.cfg.cursor_trail;
+                    g.renderer.fx.set_settings(self.cfg.fx.clone());
+                    g.renderer.zfloat_shaders = self.cfg.zfloat_shaders.clone();
                     g.renderer.invalidate();
                 }
                 if font {

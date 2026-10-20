@@ -226,6 +226,13 @@ A release that is worse than the best on any of them is not done.
 
 ## Status (2026-10-17)
 
+- Open (2026-10-20): after a wallpaper change a running zash kept the old 16 colours while a
+  fresh one was right: the shell's live OSC palette (applycolor.sh) likely wins over the file
+  palette. Reproduce on the next change; the file palette should win, or both agree.
+- Text effects (OSC 7733;fx, fx.rs / fx_draw.rs) and GLSL zfloat panels (panel_shader.rs,
+  [zfloat.shaders]) are in. Measured with ZASH_BENCH: 30 frames/s at ~1 ms a frame; 20 % of a
+  core on the software renderer, ~4 % on the GPU.
+
 Done: T0 (vttest screens checked), most of T1 (pixel scrolling, cursor glide, a
 cache keyed by row content), T2 (tinct, glass, tabs, splits with the user's tmux
 keys, centring/offset), T3 basics (marks, failed-command bars, jump, copy last

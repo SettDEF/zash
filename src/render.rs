@@ -41,6 +41,8 @@ pub struct CellView {
     pub strike: bool,
     pub wide: bool,
     pub spacer: bool,
+    /// the text effect on this cell (its zash-fx: hyperlink, fx.rs), if any
+    pub fx: Option<alacritty_terminal::term::cell::Hyperlink>,
 }
 
 /// A part of the screen whose scroll is gliding (Neovim's grid_scroll): rows `top..bot` are
@@ -206,11 +208,11 @@ struct VOut {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Rect {
-    xywh: [f32; 4],
-    color: [f32; 4],
+pub(crate) struct Rect {
+    pub(crate) xywh: [f32; 4],
+    pub(crate) color: [f32; 4],
     /// corner radius and edge softness (0, 0: a plain box)
-    p: [f32; 2],
+    pub(crate) p: [f32; 2],
 }
 
 struct Rects {
@@ -278,13 +280,19 @@ impl Rects {
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass) {
-        if self.count == 0 {
+        self.draw_range(pass, 0, u32::MAX);
+    }
+
+    /// Rectangles `from..to` of the last upload (something else is drawn between two ranges).
+    fn draw_range(&self, pass: &mut wgpu::RenderPass, from: u32, to: u32) {
+        let to = to.min(self.count);
+        if from >= to {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_vertex_buffer(0, self.buf.slice(..));
-        pass.draw(0..6, 0..self.count);
+        pass.draw(0..6, from..to);
     }
 }
 
@@ -347,6 +355,13 @@ pub struct Renderer {
     pub offset: (f32, f32),
     /// the backdrop blur stage, made the first time a popup asks for it
     blur: Option<Blur>,
+    /// text effects (OSC 7733;fx): their settings, shaped characters and next frame
+    pub fx: crate::fx_draw::FxLayer,
+    /// GLSL panels for zfloats: which file for which title, the compiled ones, and this frame's
+    /// (the shader and the rectangle index it is drawn at, between the panel's frame and its cells)
+    pub zfloat_shaders: crate::config::ZfloatShaders,
+    shaders: crate::panel_shader::Shaders,
+    panel_shader: Option<(std::path::PathBuf, u32)>,
     format: wgpu::TextureFormat,
 }
 
@@ -399,6 +414,10 @@ impl Renderer {
             opacity: cfg.opacity,
             pointer: None,
             anim: None,
+            fx: crate::fx_draw::FxLayer::new(cfg.fx.clone()),
+            zfloat_shaders: cfg.zfloat_shaders.clone(),
+            shaders: Default::default(),
+            panel_shader: None,
             blur: None,
             format,
             center: cfg.center,
@@ -410,6 +429,7 @@ impl Renderer {
 
     /// Font size in points (96 dpi, as WezTerm counts them) at a display scale.
     pub fn set_font(&mut self, size_pt: f32, line_height: f32, padding: f32, scale: f32) {
+        self.fx.font_changed();
         self.font_px = size_pt * 96.0 / 72.0 * scale;
         self.cell_h = (self.font_px * line_height).round();
         self.pad = (padding * scale).round();
@@ -459,7 +479,8 @@ impl Renderer {
     /// Shapes the rows of a pane: above the screen, the screen, below it (top to bottom).
     /// The cache is keyed by a row's content, not its position: when the screen scrolls,
     /// rows that only moved are not shaped again.
-    fn shape_rows(&mut self, pane: u64, frame: &Frame, width: f32) {
+    /// `hidden`: runs whose characters an effect draws this frame (left blank here).
+    fn shape_rows(&mut self, pane: u64, frame: &Frame, width: f32, hidden: &std::collections::HashSet<String>) {
         let mut old = self.rows.remove(&pane).unwrap_or_default();
         let mut cache: std::collections::HashMap<u64, Buffer> = std::collections::HashMap::with_capacity(frame.rows.len() + 4);
         let mut order = Vec::with_capacity(frame.rows.len() + frame.above.len() + frame.below.len());
@@ -472,6 +493,7 @@ impl Renderer {
                 c.zw.hash(&mut h);
                 c.style.hash(&mut h);
                 c.spacer.hash(&mut h);
+                crate::fx_draw::hides(c, hidden).hash(&mut h);
             }
             let key = h.finish();
             order.push(key);
@@ -487,8 +509,10 @@ impl Renderer {
             for c in row.iter().filter(|c| !c.spacer) {
                 let mut s = String::new();
                 // powerline shapes are drawn as rectangles (rect_list), not as glyphs
-                s.push(if c.ch == '\0' || powerline(c.ch).is_some() { ' ' } else { c.ch });
-                if let Some(z) = &c.zw {
+                // an effect drawing this cell's text leaves it blank here
+                let blank = crate::fx_draw::hides(c, hidden);
+                s.push(if blank || c.ch == '\0' || powerline(c.ch).is_some() { ' ' } else { c.ch });
+                if let Some(z) = c.zw.as_ref().filter(|_| !blank) {
                     s.extend(z.iter());
                 }
                 match spans.last_mut() {
@@ -635,12 +659,20 @@ impl Renderer {
         self.order.retain(|id, _| panes.iter().any(|p| p.id == *id));
         let (fox, foy) = self.origin(focus.x, focus.y, focus.w, focus.h);
         let (cur, animating) = self.cursor_motion(frame, fox, foy);
+        // text effects: one clock for the whole frame, and its cost for the budget (fx_draw.rs)
+        let fx_start = std::time::Instant::now();
+        let fx_now = crate::fx::now();
+        let mut fx_moving = false;
+        let mut fx_glyphs: Vec<(usize, Vec<crate::fx_draw::Glyph>)> = Vec::new();
+        self.panel_shader = None;
         let mut rects = Vec::new();
         let mut over = Vec::new();
         // floats (a multiplexer's app popups): their pixel rect, for the title and buttons later
         let mut floats: Vec<([f32; 4], crate::graphics::ZFloat, Rgb, Rgb, Rgb)> = Vec::new();
-        for p in panes {
-            self.shape_rows(p.id, p.frame, p.w - 2.0 * self.pad);
+        for (pi, p) in panes.iter().enumerate() {
+            let spans = crate::fx_draw::FxLayer::spans(p.frame);
+            let hidden = if spans.is_empty() { Default::default() } else { self.fx.hidden(&spans, fx_now) };
+            self.shape_rows(p.id, p.frame, p.w - 2.0 * self.pad, &hidden);
             let (ox, oy) = self.origin(p.x, p.y, p.w, p.h);
             let clip = [p.x, p.y.max(self.top), p.w, p.y + p.h - p.y.max(self.top)];
             if let Some(z) = &p.frame.float {
@@ -670,7 +702,20 @@ impl Renderer {
                 if let Some(edge) = edge {
                     rects.push(Rect { xywh: [r[0] - 1.0, r[1] - 1.0, r[2] + 2.0, r[3] + 2.0], color: edge, p: [rad + 1.0, 0.0] });
                 }
-                rects.push(Rect { xywh: r, color: panel, p: [rad, 0.0] });
+                // the panel: its shader if the title has one that compiles, else its colour
+                let shader = self.zfloat_shaders.for_title(&z.title).cloned()
+                    .filter(|path| self.shaders.get(device, self.format, path).is_some());
+                match shader {
+                    Some(path) => {
+                        let place = crate::panel_shader::Place { rect: r, screen: [width as f32, height as f32], panel: { let mut c = p.frame.bar_bg.f32(); c[3] = 1.0; c }, accent: p.frame.cursor_color.f32(), focus: z.focus, opacity: look.opacity.max(0.05), radius: rad };
+                        if let Some(s) = self.shaders.loaded(&path) {
+                            s.update(queue, &place, fx_now);
+                        }
+                        self.panel_shader = Some((path, rects.len() as u32));
+                        fx_moving = true;
+                    }
+                    None => rects.push(Rect { xywh: r, color: panel, p: [rad, 0.0] }),
+                }
                 // the title bar: a slightly lighter band on its row (square under it), a hairline below
                 let f = p.frame.fg.f32();
                 // (a tint over the panel, so a see-through panel stays as see-through under it)
@@ -679,6 +724,12 @@ impl Renderer {
                 floats.push((r, z.clone(), p.frame.fg, p.frame.cursor_color, p.frame.fail_color));
             }
             rects.extend(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy, clip));
+            if !spans.is_empty() {
+                let d = self.fx.draw(&mut self.font_system, &self.family, self.font_px, self.cell_w, self.cell_h, p.frame, &spans, ox, oy, fx_now);
+                fx_moving |= d.moving;
+                rects.extend(clipped(d.rects, clip));
+                fx_glyphs.push((pi, d.glyphs));
+            }
             over.extend(self.overlay_list(p.frame, ox, oy, clip));
         }
         if panes.len() > 1 {
@@ -878,7 +929,7 @@ impl Renderer {
         self.viewport.update(queue, Resolution { width, height });
         let ch = self.cell_h;
         let mut areas: Vec<TextArea> = Vec::new();
-        for p in panes {
+        for (pi, p) in panes.iter().enumerate() {
             let (Some(cache), Some(order)) = (self.rows.get(&p.id), self.order.get(&p.id)) else { continue };
             let (ox, oy) = self.origin(p.x, p.y, p.w, p.h);
             // each pane's text stays inside its pane (and out of the tab bar); a gliding region's rows inside the region
@@ -896,6 +947,23 @@ impl Renderer {
                 default_color: Color::rgb(255, 255, 255),
                 custom_glyphs: &[],
             }));
+            // characters an effect draws: each in its colour this frame, clipped as its row
+            let fx = &self.fx;
+            for (_, glyphs) in fx_glyphs.iter().filter(|(i, _)| *i == pi) {
+                areas.extend(glyphs.iter().filter_map(|g| fx.buffer(&g.key).map(|b| {
+                    let (t, bo) = g.band.map(|(b0, b1)| (b0.max(pane_top), b1.min(p.y + p.h))).unwrap_or((pane_top, p.y + p.h));
+                    let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    TextArea {
+                        buffer: b,
+                        left: g.x,
+                        top: g.y,
+                        scale: 1.0,
+                        bounds: TextBounds { left: p.x as i32, top: t as i32, right: (p.x + p.w) as i32, bottom: bo as i32 },
+                        default_color: Color::rgba(c(g.color[0]), c(g.color[1]), c(g.color[2]), c(g.color[3])),
+                        custom_glyphs: &[],
+                    }
+                })));
+            }
         }
         let _ = self.text.prepare(device, queue, &mut self.font_system, &mut self.atlas, &self.viewport, areas, &mut self.swash);
         let bar_areas: Vec<TextArea> = self.bars.iter().map(|(b, x, y)| TextArea {
@@ -928,7 +996,7 @@ impl Renderer {
             None => {
                 // the usual frame: one pass
                 let mut p = pass(&mut enc, view, wgpu::LoadOp::Clear(clear));
-                self.rects.draw(&mut p);
+                draw_rects(&self.rects, &self.shaders, &self.panel_shader, &mut p);
                 self.images.draw(&mut p, width, height);
                 let _ = self.text.render(&self.atlas, &self.viewport, &mut p);
                 self.overlay.draw(&mut p);
@@ -941,7 +1009,7 @@ impl Renderer {
                 let (_, _, _, scene, _, tmp) = blur.tex.as_ref().unwrap();
                 {
                     let mut p = pass(&mut enc, scene, wgpu::LoadOp::Clear(clear));
-                    self.rects.draw(&mut p);
+                    draw_rects(&self.rects, &self.shaders, &self.panel_shader, &mut p);
                     self.images.draw(&mut p, width, height);
                     let _ = self.text.render(&self.atlas, &self.viewport, &mut p);
                 }
@@ -977,6 +1045,7 @@ impl Renderer {
         }
         queue.submit(Some(enc.finish()));
         self.atlas.trim();
+        self.fx.frame_done(fx_moving, fx_start.elapsed());
         animating
     }
 
@@ -1115,6 +1184,7 @@ fn cell_view(cell: &alacritty_terminal::term::cell::Cell, point: Point, colors: 
         strike: f.contains(Flags::STRIKEOUT),
         wide: f.contains(Flags::WIDE_CHAR),
         spacer: f.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
+        fx: cell.hyperlink().filter(|h| h.uri().starts_with(crate::fx::SCHEME)),
     }
 }
 
@@ -1165,7 +1235,7 @@ fn clipped(rects: Vec<Rect>, clip: [f32; 4]) -> Vec<Rect> {
 
 /// Every row to draw, top to bottom, with its y and (for a gliding region) the band it
 /// is cut to: rows above the screen, the screen, rows below it, then a region's old rows.
-fn placed(frame: &Frame, oy: f32, ch: f32) -> Vec<(&Vec<CellView>, f32, Option<(f32, f32)>)> {
+pub(crate) fn placed(frame: &Frame, oy: f32, ch: f32) -> Vec<(&Vec<CellView>, f32, Option<(f32, f32)>)> {
     let oy = oy + frame.scroll_px;
     let mut out = Vec::with_capacity(frame.rows.len() + frame.above.len() + frame.below.len());
     let n = frame.above.len() as f32;
@@ -1565,5 +1635,18 @@ impl Images {
             pass.draw(0..6, 0..1);
         }
         pass.set_scissor_rect(0, 0, w, h);
+    }
+}
+
+/// The rectangles under the text, with a zfloat's shader panel drawn in their midst (between
+/// its frame and the cells inside it). Fields, not the renderer: the blur stage borrows it.
+fn draw_rects(rects: &Rects, shaders: &crate::panel_shader::Shaders, panel: &Option<(std::path::PathBuf, u32)>, pass: &mut wgpu::RenderPass) {
+    match panel.as_ref().and_then(|(path, at)| shaders.loaded(path).map(|s| (s, *at))) {
+        Some((shader, at)) => {
+            rects.draw_range(pass, 0, at);
+            shader.draw(pass);
+            rects.draw_range(pass, at, u32::MAX);
+        }
+        None => rects.draw(pass),
     }
 }

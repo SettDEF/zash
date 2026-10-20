@@ -135,6 +135,8 @@ pub enum Found {
     WebPin(String, String),
     /// keys a program wants for itself: OSC 7733;keys;all|none|claim=…|release=…
     Keys(String),
+    /// a text effect starts or ends: OSC 7733;fx;NAME;key=value… or fx;end (fx.rs)
+    Fx(String),
     /// DECSCNM: the whole screen in reverse video (light background), on or off
     Reverse(bool),
     Popup(Option<Popup>),
@@ -261,6 +263,8 @@ impl MarkScanner {
                 out.push((at, Found::PopupStyle(look.to_string())));
             } else if let Some(k) = body.strip_prefix("7733;keys;") {
                 out.push((at, Found::Keys(k.to_string())));
+            } else if let Some(f) = body.strip_prefix("7733;fx;").or_else(|| (body == "7733;fx").then_some("")) {
+                out.push((at, Found::Fx(f.to_string())));
             } else if let Some((kind, rest)) = body.strip_prefix("7733;").and_then(|b| b.split_once(';')).filter(|(k, _)| matches!(*k, "webrect" | "webhide" | "webclose" | "zfloat" | "zfloatclose")) {
                 out.push((at, Found::WebPin(kind.to_string(), rest.to_string())));
             } else if let Some(w) = body.strip_prefix("7733;web;") {
@@ -454,6 +458,16 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                     }
                     Found::Keys(body) => {
                         claims.lock().unwrap().apply(&body);
+                        continue;
+                    }
+                    Found::Fx(body) => {
+                        // the effect rides the cells' hyperlink: it stays on them through scrolling,
+                        // scrollback and resizing, and ends where the run ends
+                        use alacritty_terminal::vte::ansi::{Handler, Hyperlink};
+                        match crate::fx::Escape::parse(&body) {
+                            crate::fx::Escape::Start(uri) => t.set_hyperlink(Some(Hyperlink { id: None, uri })),
+                            crate::fx::Escape::End => t.set_hyperlink(None),
+                        }
                         continue;
                     }
                     Found::WebPin(kind, body) => {
@@ -731,5 +745,16 @@ mod writer_tests {
             s.write(vec![b'x'; 512]);
         }
         assert!(started.elapsed() < std::time::Duration::from_millis(500), "write waited {:?}", started.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod fx_scan_tests {
+    #[test]
+    fn effects_are_found_with_their_parameters() {
+        let mut s = super::MarkScanner::default();
+        let out = s.scan(b"a\x1b]7733;fx;shimmer;speed=2\x07text\x1b]7733;fx;end\x07");
+        let found: Vec<_> = out.into_iter().map(|(_, f)| f).collect();
+        assert_eq!(found, vec![super::Found::Fx("shimmer;speed=2".into()), super::Found::Fx("end".into())]);
     }
 }

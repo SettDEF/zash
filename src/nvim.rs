@@ -344,7 +344,7 @@ impl State {
                 if let Some(prev) = out.last_mut() {
                     prev.wide = true;
                 }
-                out.push(CellView { ch: ' ', zw: None, style: Style2 { fg: (fg.0, fg.1, fg.2), bold: false, italic: false }, bg: (bg != dbg).then_some(bg), underline: false, strike: false, wide: false, spacer: true });
+                out.push(CellView { ch: ' ', zw: None, style: Style2 { fg: (fg.0, fg.1, fg.2), bold: false, italic: false }, bg: (bg != dbg).then_some(bg), underline: false, strike: false, wide: false, spacer: true, fx: None });
                 continue;
             }
             let mut chars = c.text.chars();
@@ -359,6 +359,7 @@ impl State {
                 strike: at.strike,
                 wide: false,
                 spacer: false,
+                fx: None,
             });
         }
         out

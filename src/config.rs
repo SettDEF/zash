@@ -156,6 +156,10 @@ pub struct Config {
     pub popup: PopupLook,
     /// a multiplexer's zfloats: their panel and frame (`[zfloat]`)
     pub zfloat: ZfloatLook,
+    /// a GLSL shader as a zfloat's background: by its title, else the default (`[zfloat] shader`)
+    pub zfloat_shaders: ZfloatShaders,
+    /// text effects (OSC 7733;fx): on or off, their frame rate, presets (`[fx]`)
+    pub fx: crate::fx::Settings,
     /// the text centred in the space whole cells do not fill (else top-left), and moved by an offset
     pub center: bool,
     pub offset: (f32, f32),
@@ -194,6 +198,8 @@ impl Default for Config {
             cursor_trail: true,
             popup: PopupLook::default(),
             zfloat: ZfloatLook::default(),
+            zfloat_shaders: ZfloatShaders::default(),
+            fx: crate::fx::Settings::default(),
             center: true,
             offset: (0.0, 0.0),
             palette: Palette::load(),
@@ -269,6 +275,15 @@ struct File {
     /// the completion popup's look
     popup: Option<PopupFile>,
     zfloat: Option<ZfloatFile>,
+    fx: Option<FxFile>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FxFile {
+    enabled: Option<bool>,
+    fps: Option<f32>,
+    presets: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -276,6 +291,21 @@ struct File {
 struct ZfloatFile {
     opacity: Option<f32>,
     border: Option<String>,
+    shader: Option<String>,
+    shaders: Option<std::collections::HashMap<String, String>>,
+}
+
+/// Panel shaders (panel_shader.rs): one for every zfloat, and one per title on top.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ZfloatShaders {
+    pub default: Option<PathBuf>,
+    pub by_title: std::collections::HashMap<String, PathBuf>,
+}
+
+impl ZfloatShaders {
+    pub fn for_title(&self, title: &str) -> Option<&PathBuf> {
+        self.by_title.get(title).or(self.default.as_ref())
+    }
 }
 
 /// How a zfloat looks: `[zfloat]` in zash.toml.
@@ -400,9 +430,22 @@ rows = 10
 # A multiplexer's zfloats (zeit): the panel's opacity (0–1; lower lets the window show
 # through) and its frame: "panel" (its own colour), "accent" (the cursor colour while it
 # has the keyboard) or "none".
+# shader: a GLSL file drawn as the panel (Shadertoy style: mainImage, iTime, iResolution, plus
+# iPanel, iAccent, iFocus); [zfloat.shaders] gives one per title, e.g. Claude = "~/x.glsl".
 [zfloat]
 opacity = 0.6
 border = "panel"
+shader = ""
+[zfloat.shaders]
+
+# Text effects programs can ask for (OSC 7733;fx: shimmer, pulse, fade, rainbow, typewriter,
+# glow). Off: their text shows plain. fps: the most frames a second they cause (slow frames
+# lower it on their own). A preset is a name programs can use, written like the escape:
+#   done = "shimmer;color=good;speed=1.5;loop=2"
+[fx]
+enabled = true
+fps = 30
+[fx.presets]
 "#;
 
 impl Config {
@@ -486,8 +529,16 @@ impl Config {
             Some(other) => eprintln!("zash: align = {other:?}: use \"center\" or \"top-left\""),
         }
         if let Some([x, y]) = f.offset { c.offset = (x, y); }
+        if let Some(x) = f.fx {
+            if let Some(v) = x.enabled { c.fx.enabled = v; }
+            if let Some(v) = x.fps { c.fx.fps = v.clamp(1.0, 120.0); }
+            if let Some(p) = x.presets { c.fx.presets = p; }
+        }
         if let Some(z) = f.zfloat {
             if let Some(v) = z.opacity { c.zfloat.opacity = v.clamp(0.0, 1.0); }
+            let path = |s: &str| PathBuf::from(s.strip_prefix("~/").map(|r| format!("{}/{r}", std::env::var("HOME").unwrap_or_default())).unwrap_or_else(|| s.to_string()));
+            c.zfloat_shaders.default = z.shader.as_deref().filter(|s| !s.is_empty()).map(path);
+            c.zfloat_shaders.by_title = z.shaders.unwrap_or_default().iter().map(|(k, v)| (k.clone(), path(v))).collect();
             match z.border.as_deref() {
                 Some("panel") | Some("same") => c.zfloat.border = ZfloatBorder::Panel,
                 Some("accent") => c.zfloat.border = ZfloatBorder::Accent,
