@@ -153,6 +153,8 @@ pub struct Config {
     /// scrolling glides for this long (ms; 0 = it jumps a line at a time)
     pub smooth_scroll_ms: f32,
     pub cursor_trail: bool,
+    /// the cursor's style, a TUI's own cursor, and where zash's look applies (`[cursor]`)
+    pub cursor: CursorConf,
     pub popup: PopupLook,
     /// a multiplexer's zfloats: their panel and frame (`[zfloat]`)
     pub zfloat: ZfloatLook,
@@ -196,6 +198,7 @@ impl Default for Config {
             cursor_ms: 90.0,
             smooth_scroll_ms: 80.0,
             cursor_trail: true,
+            cursor: CursorConf::default(),
             popup: PopupLook::default(),
             zfloat: ZfloatLook::default(),
             zfloat_shaders: ZfloatShaders::default(),
@@ -264,6 +267,7 @@ struct File {
     cursor_animation: Option<f32>,
     smooth_scroll: Option<f32>,
     cursor_trail: Option<bool>,
+    cursor: Option<CursorFile>,
     /// 0..1; leave out to follow the shell's Glass panel
     opacity: Option<f32>,
     /// a tinct/WezTerm-style colour file to follow instead of the default
@@ -276,6 +280,58 @@ struct File {
     popup: Option<PopupFile>,
     zfloat: Option<ZfloatFile>,
     fx: Option<FxFile>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct CursorFile {
+    animation: Option<f32>,
+    trail: Option<bool>,
+    style: Option<String>,
+    drawn: Option<bool>,
+    scope: Option<String>,
+}
+
+/// Where zash's own cursor look (glide, trail, style) applies.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum CursorScope {
+    #[default]
+    All,
+    /// not inside a zfloat
+    Terminal,
+    /// only inside a zfloat
+    Zfloat,
+}
+
+/// `[cursor]`: the glide and trail live in cursor_ms / cursor_trail.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CursorConf {
+    /// a shape over what programs ask for; None: theirs
+    pub style: Option<alacritty_terminal::vte::ansi::CursorShape>,
+    /// follow a cursor a program draws itself while it hides the real one
+    pub drawn: bool,
+    pub scope: CursorScope,
+}
+
+impl Default for CursorConf {
+    fn default() -> Self {
+        CursorConf { style: None, drawn: true, scope: CursorScope::All }
+    }
+}
+
+impl CursorConf {
+    /// A style name: "app" (None) or a shape.
+    pub fn shape(name: &str) -> Result<Option<alacritty_terminal::vte::ansi::CursorShape>, String> {
+        use alacritty_terminal::vte::ansi::CursorShape as S;
+        Ok(match name {
+            "app" => None,
+            "block" => Some(S::Block),
+            "beam" | "bar" => Some(S::Beam),
+            "underline" => Some(S::Underline),
+            "hollow" => Some(S::HollowBlock),
+            o => return Err(format!("style = {o:?}: use \"app\", \"block\", \"beam\", \"underline\" or \"hollow\"")),
+        })
+    }
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -405,9 +461,6 @@ align = "center"
 offset = [0, 0]
 # Lines kept for scrolling back.
 scrollback = 10000
-# The cursor glides to where it goes (milliseconds; 0 = it jumps), with a short smear.
-cursor_animation = 90
-cursor_trail = true
 # Scrolling glides instead of jumping a line at a time (milliseconds; 0 = off).
 smooth_scroll = 80
 # Background opacity (0.1–1). Leave it out to follow the shell's Glass panel.
@@ -427,6 +480,19 @@ shadow = true
 border = true
 # Rows shown at most.
 rows = 10
+
+# The cursor.
+#   animation: it glides to where it goes (milliseconds; 0 = it jumps); trail: a short smear
+#   style:     "app" (what the program asks for), "block", "beam", "underline", "hollow"
+#   drawn:     follow a cursor a full-screen program draws itself (one inverted cell, as
+#              Claude Code does): it gets the glide and trail too
+#   scope:     where the look above applies: "all", "terminal" (not in zfloats), "zfloat"
+[cursor]
+animation = 90
+trail = true
+style = "app"
+drawn = true
+scope = "all"
 
 # A multiplexer's zfloats (zeit): the panel's opacity (0–1; lower lets the window show
 # through) and its frame: "panel" (its own colour), "accent" (the cursor colour while it
@@ -527,6 +593,25 @@ impl Config {
         if let Some(v) = f.cursor_animation { c.cursor_ms = v.max(0.0); }
         if let Some(v) = f.smooth_scroll { c.smooth_scroll_ms = v.max(0.0); }
         if let Some(v) = f.cursor_trail { c.cursor_trail = v; }
+        if let Some(k) = f.cursor {
+            if let Some(v) = k.animation { c.cursor_ms = v.max(0.0); }
+            if let Some(v) = k.trail { c.cursor_trail = v; }
+            if let Some(v) = k.drawn { c.cursor.drawn = v; }
+            match k.style.as_deref() {
+                None => {}
+                Some(s) => match CursorConf::shape(s) {
+                    Ok(v) => c.cursor.style = v,
+                    Err(e) => eprintln!("zash: [cursor] {e}"),
+                },
+            }
+            match k.scope.as_deref() {
+                None => {}
+                Some("all") => c.cursor.scope = CursorScope::All,
+                Some("terminal") => c.cursor.scope = CursorScope::Terminal,
+                Some("zfloat") => c.cursor.scope = CursorScope::Zfloat,
+                Some(o) => eprintln!("zash: [cursor] scope = {o:?}: use \"all\", \"terminal\" or \"zfloat\""),
+            }
+        }
         match f.align.as_deref() {
             Some("top-left") | Some("topleft") | Some("left") => c.center = false,
             Some("center") | Some("centre") => c.center = true,

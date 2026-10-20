@@ -394,6 +394,9 @@ impl State {
             }
         }
         Frame {
+            drawn_cursor: None,
+            cursor_drawn: false,
+            cursor_styled: true,
             float: None,
             above: Vec::new(),
             below: Vec::new(),

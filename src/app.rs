@@ -1159,6 +1159,8 @@ impl App {
                 frame.popup = s.popup.lock().unwrap().clone().filter(|p| p.line.is_none_or(|l| l == here));
                 frame.popup_look = self.cfg.popup.with(&s.popup_style.lock().unwrap());
                 frame.zfloat_look = self.cfg.zfloat;
+                // the cursor by [cursor]: style, a TUI's own one, where zash's look applies
+                frame.apply_cursor(&self.cfg.cursor, self.cfg.palette.cursor_fg);
                 if let Some(a) = &self.web_addr {
                     frame.bar = Some(format!("\u{f0ac}  {a}\u{258f}"));
                 } else if let Some(q) = &self.search {

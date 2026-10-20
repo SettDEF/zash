@@ -57,6 +57,13 @@ pub struct Region {
 
 pub struct Frame {
     pub region: Option<Region>,
+    /// a cursor a full-screen program draws itself while it hides the real one: the one cell
+    /// shown inverted on its row (the lowest such row)
+    pub drawn_cursor: Option<(usize, usize)>,
+    /// set by apply_cursor: `cursor` is such a drawn one (zash adds only its glide)
+    pub cursor_drawn: bool,
+    /// set by apply_cursor: zash's look (glide, trail, style) applies where the cursor is
+    pub cursor_styled: bool,
     /// smooth scrolling: rows just above and below the screen (nearest first), and how
     /// far the content is drawn shifted (pixels, + = down) while a scroll glides
     pub above: Vec<Vec<CellView>>,
@@ -132,10 +139,15 @@ impl Frame {
         let offset = content.display_offset as i32;
         let mut rows: Vec<Vec<CellView>> = (0..lines).map(|_| Vec::with_capacity(cols)).collect();
         let sel = content.selection;
+        // per row: how many cells are inverted, and the last one (a TUI's own cursor is a lone one)
+        let mut inverted: Vec<(u32, usize)> = vec![(0, 0); lines];
         for ic in content.display_iter {
             let row = (ic.point.line.0 + offset) as usize;
             if row >= lines {
                 continue;
+            }
+            if ic.cell.flags.contains(Flags::INVERSE) {
+                inverted[row] = (inverted[row].0 + 1, ic.point.column.0);
             }
             rows[row].push(cell_view(ic.cell, ic.point, content.colors, p, sel));
         }
@@ -143,14 +155,41 @@ impl Frame {
             let Point { line: Line(l), column: Column(c) } = content.cursor.point;
             ((l + offset) as usize, c, content.cursor.shape)
         }).filter(|(r, _, _)| *r < lines);
-        if let Some((r, c, shape)) = cursor {
-            if shape == CursorShape::Block {
-                if let Some(cell) = rows[r].get_mut(c) {
-                    cell.style.fg = (p.cursor_fg.0, p.cursor_fg.1, p.cursor_fg.2);
-                }
+        let drawn_cursor = if cursor.is_none() { inverted.iter().rposition(|(n, _)| *n == 1).map(|r| (r, inverted[r].1)) } else { None };
+        let f = Frame { drawn_cursor, cursor_drawn: false, cursor_styled: true, float: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() };
+        f
+    }
+
+    /// The cursor zash draws, by `[cursor]`: a TUI's own one when the real cursor is hidden, the
+    /// style over the program's, and whether zash's look applies where it is (scope: in a zfloat
+    /// or not). Once the zfloat is known (after with_images). A block takes the cursor's text colour.
+    pub fn apply_cursor(&mut self, conf: &crate::config::CursorConf, cursor_fg: Rgb) {
+        use crate::config::CursorScope;
+        if self.cursor.is_none() && conf.drawn {
+            if let Some((r, c)) = self.drawn_cursor {
+                self.cursor = Some((r, c, CursorShape::Block));
+                self.cursor_drawn = true;
             }
         }
-        Frame { float: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: p.fg, prompts: Vec::new(), cols, rows, cursor, bg: p.bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() }
+        let Some((r, c, mut shape)) = self.cursor else { return };
+        let inside = self.float.as_ref().is_some_and(|z| r >= z.y && r < z.y + z.h && c >= z.x && c < z.x + z.w);
+        self.cursor_styled = match conf.scope {
+            CursorScope::All => true,
+            CursorScope::Terminal => !inside,
+            CursorScope::Zfloat => inside,
+        };
+        if self.cursor_drawn {
+            return; // the program draws the cell itself
+        }
+        if let Some(s) = conf.style.filter(|_| self.cursor_styled) {
+            shape = s;
+        }
+        self.cursor = Some((r, c, shape));
+        if shape == CursorShape::Block {
+            if let Some(cell) = self.rows.get_mut(r).and_then(|row| row.get_mut(c)) {
+                cell.style.fg = (cursor_fg.0, cursor_fg.1, cursor_fg.2);
+            }
+        }
     }
 
     /// The screen as plain text (headless checks and tests).
@@ -618,13 +657,17 @@ impl Renderer {
         if let Some((r, c, shape)) = frame.cursor {
             let (x, y) = cur.map(|c| c.0).unwrap_or((pad + c as f32 * cw, oy + r as f32 * ch + shift));
             // the smear: from the lagging tail to the head, along one line only
-            if let Some((_, (tx, ty))) = cur.filter(|_| self.cursor_trail) {
+            if let Some((_, (tx, ty))) = cur.filter(|_| self.cursor_trail && frame.cursor_styled) {
                 if (ty - y).abs() < 1.0 && (tx - x).abs() > 1.0 {
                     let (a, b) = (tx.min(x), tx.max(x));
                     let mut col = frame.cursor_color.f32();
                     col[3] = 0.35;
                     out.push(Rect { xywh: [a, y + ch * 0.15, b - a, ch * 0.7], color: col, p: [0.0, 0.0] });
                 }
+            }
+            // a cursor the program draws itself: it has its block, zash only adds the trail above
+            if frame.cursor_drawn {
+                return clipped(out, clip);
             }
             let wide = frame.rows.get(r).and_then(|row| row.get(c)).is_some_and(|cell| cell.wide);
             let w = if wide { 2.0 * cw } else { cw };
@@ -1051,7 +1094,8 @@ impl Renderer {
 
     fn cursor_motion(&mut self, frame: &Frame, ox: f32, oy: f32) -> (Option<((f32, f32), (f32, f32))>, bool) {
         let target = frame.cursor.map(|(r, c, _)| (ox + c as f32 * self.cell_w, oy + r as f32 * self.cell_h));
-        let (Some(t), true) = (target, self.cursor_ms > 0.0) else {
+        // zash's glide only where its look applies ([cursor] scope); elsewhere the cursor jumps
+        let (Some(t), true) = (target, self.cursor_ms > 0.0 && frame.cursor_styled) else {
             self.anim = None;
             return (None, false);
         };
@@ -1648,5 +1692,48 @@ fn draw_rects(rects: &Rects, shaders: &crate::panel_shader::Shaders, panel: &Opt
             rects.draw_range(pass, at, u32::MAX);
         }
         None => rects.draw(pass),
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use crate::config::{CursorConf, CursorScope, Palette};
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::term::{test::TermSize, Config, Term};
+    use alacritty_terminal::vte::ansi::{CursorShape, Processor};
+
+    fn frame(bytes: &[u8]) -> super::Frame {
+        let mut t = Term::new(Config::default(), &TermSize::new(20, 5), VoidListener);
+        let mut p: Processor = Processor::new();
+        p.advance(&mut t, bytes);
+        super::Frame::extract(&t, &Palette::default())
+    }
+
+    #[test]
+    fn a_tui_drawn_cursor_is_followed_and_a_menu_row_is_not() {
+        // real cursor hidden; a highlighted menu row (many inverted cells), then "> ab" with one inverted cell
+        let mut f = frame(b"\x1b[?25l\x1b[7mmenu item\x1b[0m\r\n> ab\x1b[7m \x1b[0m");
+        assert_eq!(f.drawn_cursor, Some((1, 4)));
+        f.apply_cursor(&CursorConf::default(), Palette::default().cursor_fg);
+        assert!(f.cursor_drawn);
+        assert_eq!(f.cursor.map(|(r, c, _)| (r, c)), Some((1, 4)));
+        // switched off: no cursor at all, as before
+        let mut g = frame(b"\x1b[?25l> ab\x1b[7m \x1b[0m");
+        g.apply_cursor(&CursorConf { drawn: false, ..Default::default() }, Palette::default().cursor_fg);
+        assert!(g.cursor.is_none());
+    }
+
+    #[test]
+    fn style_and_scope() {
+        let beam = CursorConf { style: Some(CursorShape::Beam), ..Default::default() };
+        let mut f = frame(b"abc");
+        f.apply_cursor(&beam, Palette::default().cursor_fg);
+        assert_eq!(f.cursor.map(|c| c.2), Some(CursorShape::Beam));
+        // "zfloat" scope with the cursor outside any zfloat: the program's own shape, no glide
+        let mut g = frame(b"abc");
+        g.apply_cursor(&CursorConf { scope: CursorScope::Zfloat, ..beam }, Palette::default().cursor_fg);
+        assert!(!g.cursor_styled);
+        assert_eq!(g.cursor.map(|c| c.2), Some(CursorShape::Block));
+        assert!(CursorConf::shape("wobbly").is_err());
     }
 }
