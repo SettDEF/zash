@@ -734,7 +734,7 @@ impl Renderer {
                 let look = p.frame.zfloat_look;
                 // the shadow fades with the panel (under a see-through one it only muddies it)
                 rects.push(Rect { xywh: [r[0] - 8.0, r[1] - 6.0, r[2] + 16.0, r[3] + 16.0], color: [0.0, 0.0, 0.0, 0.30 * look.opacity * look.opacity], p: [rad, 8.0] });
-                let mut panel = p.frame.bar_bg.f32();
+                let mut panel = z.bg.unwrap_or(p.frame.bar_bg).f32();
                 panel[3] = look.opacity;
                 let edge = match look.border {
                     crate::config::ZfloatBorder::Accent if z.focus => Some({ let mut c = p.frame.cursor_color.f32(); c[3] = 0.85; c }),
@@ -750,7 +750,7 @@ impl Renderer {
                     .filter(|path| self.shaders.get(device, self.format, path).is_some());
                 match shader {
                     Some(path) => {
-                        let place = crate::panel_shader::Place { rect: r, screen: [width as f32, height as f32], panel: { let mut c = p.frame.bar_bg.f32(); c[3] = 1.0; c }, accent: p.frame.cursor_color.f32(), focus: z.focus, opacity: look.opacity.max(0.05), radius: rad };
+                        let place = crate::panel_shader::Place { rect: r, screen: [width as f32, height as f32], panel: { let mut c = z.bg.unwrap_or(p.frame.bar_bg).f32(); c[3] = 1.0; c }, accent: p.frame.cursor_color.f32(), focus: z.focus, opacity: look.opacity.max(0.05), radius: rad };
                         if let Some(s) = self.shaders.loaded(&path) {
                             s.update(queue, &place, fx_now);
                         }

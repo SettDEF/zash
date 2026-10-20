@@ -48,6 +48,8 @@ pub struct Graphics {
 pub struct ZFloat {
     /// the preset, hide and close buttons (a zfloat's settings can leave them out)
     pub buttons: bool,
+    /// its panel colour, as the multiplexer draws its own (zeit: its pill colour); None: zash's
+    pub bg: Option<crate::config::Rgb>,
     pub x: usize,
     pub y: usize,
     pub w: usize,
@@ -243,7 +245,7 @@ impl Graphics {
             let (head, title) = body.split_once(";title=").unwrap_or((body, ""));
             let kv: HashMap<&str, &str> = head.split(';').filter_map(|p| p.split_once('=')).collect();
             let n = |k: &str| kv.get(k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-            self.float = Some(ZFloat { buttons: kv.get("buttons") != Some(&"0"), x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
+            self.float = Some(ZFloat { bg: kv.get("bg").and_then(|h| crate::config::Rgb::hex(h)), buttons: kv.get("buttons") != Some(&"0"), x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
             self.generation += 1;
             return;
         }
