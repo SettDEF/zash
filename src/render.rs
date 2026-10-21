@@ -970,7 +970,13 @@ impl Renderer {
                 let col = if glyph == "×" { let mut c = fail.f32(); c[3] = if hot { 1.0 } else if z.focus { 0.85 } else { 0.35 }; c } else { let mut c = fg.f32(); c[3] = if hot { 0.30 } else { 0.12 }; c };
                 over.push(Rect { xywh: [cx - d / 2.0, cy - d / 2.0, d, d], color: col, p: [d / 2.0, 0.0] });
                 let (b, w) = label(&mut self.font_system, &self.family, glyph, if glyph == "×" { Rgb(255, 255, 255) } else { *fg }, self.font_px * 0.9, self.cell_h);
-                labels.push((b, cx - w / 2.0, r[1]));
+                // centred by what the glyph draws, not by its line: ⌄ sits on the baseline, – on the
+                // middle, × on the maths axis, and a font of another shape moves each its own way
+                let (x, y) = match ink_center(&mut self.font_system, &mut self.swash, &b) {
+                    Some((ix, iy)) => (cx - ix, cy - iy),
+                    None => (cx - w / 2.0, r[1]),
+                };
+                labels.push((b, x, y));
             }
             let _ = accent;
         }
@@ -1957,4 +1963,26 @@ fn moved(mut rects: Vec<Rect>, m: Option<([f32; 4], f32, f32)>) -> Vec<Rect> {
         }
     }
     rects
+}
+
+/// The middle of what a laid-out buffer actually draws (its glyphs' ink), from its top-left corner.
+fn ink_center(fs: &mut FontSystem, swash: &mut SwashCache, b: &Buffer) -> Option<(f32, f32)> {
+    let (mut l, mut t, mut r, mut bt) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for run in b.layout_runs() {
+        for g in run.glyphs {
+            let p = g.physical((0.0, 0.0), 1.0);
+            let Some(img) = swash.get_image_uncached(fs, p.cache_key) else { continue };
+            let pl = img.placement;
+            if pl.width == 0 || pl.height == 0 {
+                continue;
+            }
+            let x = p.x as f32 + pl.left as f32;
+            let y = run.line_y + p.y as f32 - pl.top as f32;
+            l = l.min(x);
+            r = r.max(x + pl.width as f32);
+            t = t.min(y);
+            bt = bt.max(y + pl.height as f32);
+        }
+    }
+    (l < r && t < bt).then(|| ((l + r) / 2.0, (t + bt) / 2.0))
 }
