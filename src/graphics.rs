@@ -43,6 +43,50 @@ pub struct Graphics {
     pub pin_focus: Vec<(u32, bool)>,
     /// a multiplexer's app popup (OSC 7733;zfloat): zash draws its frame, title and buttons
     pub float: Option<ZFloat>,
+    /// while the zfloat is dragged (OSC 7733;zunder): the cells under its edge, so a pixel-smooth
+    /// drag shows what is really there in the strip it uncovers
+    pub under: Option<ZUnder>,
+}
+
+/// A colour as the multiplexer sends it: the default, a palette index, or RGB.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UColor {
+    Default,
+    Index(u8),
+    Rgb(crate::config::Rgb),
+}
+
+/// The cells under a dragged zfloat's edge: its id and rect then, and (column, row, text, fg, bg)
+/// relative to the rect's top left.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ZUnder {
+    pub id: u64,
+    pub x: usize,
+    pub y: usize,
+    pub cells: Vec<(usize, usize, String, UColor, UColor)>,
+}
+
+impl ZUnder {
+    /// id=;x=;y=;w=;h=;cells=rows "/", cells ".", each "hex-text,fg,bg" (empty: not sent)
+    pub fn parse(body: &str) -> Option<ZUnder> {
+        let kv: HashMap<&str, &str> = body.split(';').filter_map(|p| p.split_once('=')).collect();
+        let n = |k: &str| kv.get(k).and_then(|v| v.parse::<u64>().ok());
+        let color = |s: &str| match s {
+            "d" => Some(UColor::Default),
+            s if s.starts_with('i') => s[1..].parse().ok().map(UColor::Index),
+            s => crate::config::Rgb::hex(s).map(UColor::Rgb),
+        };
+        let mut cells = Vec::new();
+        for (row, line) in kv.get("cells")?.split('/').enumerate() {
+            for (col, c) in line.split('.').enumerate().filter(|(_, c)| !c.is_empty()) {
+                let mut f = c.split(',');
+                let (Some(t), Some(fg), Some(bg)) = (f.next(), f.next().and_then(color), f.next().and_then(color)) else { continue };
+                let bytes: Option<Vec<u8>> = (0..t.len() / 2).map(|i| u8::from_str_radix(t.get(2 * i..2 * i + 2)?, 16).ok()).collect();
+                cells.push((col, row, String::from_utf8(bytes?).ok()?, fg, bg));
+            }
+        }
+        Some(ZUnder { id: n("id")?, x: n("x")? as usize, y: n("y")? as usize, cells })
+    }
 }
 
 /// Where a float is (cells, frame included), whether it has the keyboard, its name.
@@ -245,6 +289,11 @@ impl Graphics {
             self.generation += 1;
             return;
         }
+        if kind == "zunder" {
+            self.under = if body.is_empty() { None } else { ZUnder::parse(body) };
+            self.generation += 1;
+            return;
+        }
         if kind == "zfloat" {
             let (head, title) = body.split_once(";title=").unwrap_or((body, ""));
             let kv: HashMap<&str, &str> = head.split(';').filter_map(|p| p.split_once('=')).collect();
@@ -344,6 +393,16 @@ impl Graphics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cells_under_a_dragged_zfloat_parse() {
+        // "a" (61) default on red, "é" (c3a9) index 4 on default; the middle cell is not sent
+        let u = ZUnder::parse("id=7;x=3;y=2;w=3;h=1;cells=61,d,ff0000..c3a9,i4,d").unwrap();
+        assert_eq!((u.id, u.x, u.y), (7, 3, 2));
+        assert_eq!(u.cells.len(), 2);
+        assert_eq!(u.cells[0], (0, 0, "a".to_string(), UColor::Default, UColor::Rgb(crate::config::Rgb(255, 0, 0))));
+        assert_eq!(u.cells[1], (2, 0, "é".to_string(), UColor::Index(4), UColor::Default));
+    }
 
     fn rgba_cmd(id: u32, w: u32, h: u32, extra: &str) -> String {
         let px: Vec<u8> = (0..w * h).flat_map(|_| [255u8, 0, 0, 255]).collect();

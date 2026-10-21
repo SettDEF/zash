@@ -398,6 +398,7 @@ impl State {
             cursor_drawn: false,
             cursor_styled: true,
             float: None,
+            under: None,
             above: Vec::new(),
             below: Vec::new(),
             scroll_px: 0.0,

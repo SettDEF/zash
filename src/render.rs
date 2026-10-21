@@ -100,6 +100,8 @@ pub struct Frame {
     pub pen_hover: Option<(f64, f32, f32, bool)>,
     /// a multiplexer's app popup: zash draws its frame (the cells under it are blanked)
     pub float: Option<crate::graphics::ZFloat>,
+    /// while the zfloat is dragged: the cells under its edge (its id; column, row in the pane, text, fg, bg)
+    pub under: Option<(u64, Vec<(usize, usize, String, Rgb, Option<Rgb>)>)>,
 }
 
 fn resolve(c: AColor, term_colors: &alacritty_terminal::term::color::Colors, p: &Palette, bold: bool) -> Rgb {
@@ -164,7 +166,7 @@ impl Frame {
             ((l + offset) as usize, c, content.cursor.shape)
         }).filter(|(r, _, _)| *r < lines);
         let drawn_cursor = if cursor.is_none() { inverted.iter().rposition(|(n, _)| *n == 1).map(|r| (r, inverted[r].1)) } else { None };
-        let f = Frame { drawn_cursor, cursor_drawn: false, cursor_styled: true, float: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: def_fg, prompts: Vec::new(), cols, rows, cursor, bg: def_bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new(), ink: Vec::new(), ink_top: 0.0, pen_hover: None };
+        let f = Frame { drawn_cursor, cursor_drawn: false, cursor_styled: true, float: None, under: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: def_fg, prompts: Vec::new(), cols, rows, cursor, bg: def_bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new(), ink: Vec::new(), ink_top: 0.0, pen_hover: None };
         f
     }
 
@@ -373,6 +375,8 @@ pub struct Renderer {
     /// text drawn above the overlay (the search bar)
     text2: TextRenderer,
     bars: Vec<(Buffer, f32, f32)>,
+    /// letters under a dragged zfloat, in the strip it uncovers (buffer, x, y, clip l t r b)
+    unders: Vec<(Buffer, f32, f32, [f32; 4])>,
     /// height of the tab bar above the rows (0 with one tab)
     pub top: f32,
     rects: Rects,
@@ -450,6 +454,7 @@ impl Renderer {
             text,
             text2,
             bars: Vec::new(),
+            unders: Vec::new(),
             top: 0.0,
             rows: std::collections::HashMap::new(),
             order: std::collections::HashMap::new(),
@@ -724,6 +729,7 @@ impl Renderer {
         let mut fx_moving = false;
         let mut fx_glyphs: Vec<(usize, Vec<crate::fx_draw::Glyph>)> = Vec::new();
         self.panel_shader = None;
+        self.unders.clear();
         let mut rects = Vec::new();
         let mut over = Vec::new();
         // floats (a multiplexer's app popups): their pixel rect, for the title and buttons later
@@ -759,6 +765,34 @@ impl Renderer {
                 if let Some((dx, dy)) = shift {
                     r[0] += dx;
                     r[1] += dy;
+                }
+                // the strip the shift uncovers (its cells hold the zfloat in zeit): what zeit says is under it
+                if let (Some((c, dx, dy)), Some((uid, cells))) = (moves[pi], p.frame.under.as_ref()) {
+                    if *uid == z.id {
+                        let (x0, y0, x1, y1) = (c[0], c[1], c[0] + c[2], c[1] + c[3]);
+                        let side = if dx > 0.0 { [x0, y0, (x0 + dx).min(x1), y1] } else { [(x1 + dx).max(x0), y0, x1, y1] };
+                        let (vx0, vx1) = if dx > 0.0 { (side[2], x1) } else { (x0, side[0]) };
+                        let top = if dy > 0.0 { [vx0, y0, vx1, (y0 + dy).min(y1)] } else { [vx0, (y1 + dy).max(y0), vx1, y1] };
+                        for (col, row, text, fg, bg) in cells {
+                            let cell = [ox + *col as f32 * self.cell_w, oy + *row as f32 * self.cell_h];
+                            for s in [side, top] {
+                                let cut = [cell[0].max(s[0]), cell[1].max(s[1]), (cell[0] + self.cell_w).min(s[2]), (cell[1] + self.cell_h).min(s[3])];
+                                if cut[2] - cut[0] < 0.5 || cut[3] - cut[1] < 0.5 {
+                                    continue;
+                                }
+                                if let Some(bg) = bg {
+                                    rects.push(Rect { xywh: [cut[0], cut[1], cut[2] - cut[0], cut[3] - cut[1]], color: bg.f32(), p: [0.0, 0.0] });
+                                }
+                                if !text.trim().is_empty() {
+                                    let mut b = Buffer::new(&mut self.font_system, Metrics::new(self.font_px, self.cell_h));
+                                    b.set_size(None, Some(self.cell_h));
+                                    b.set_text(text, &Attrs::new().family(Family::Name(&self.family)).color(Color::rgb(fg.0, fg.1, fg.2)), Shaping::Advanced, None);
+                                    b.shape_until_scroll(&mut self.font_system, false);
+                                    self.unders.push((b, cell[0], cell[1], cut));
+                                }
+                            }
+                        }
+                    }
                 }
                 let rad = 12.0;
                 // the look from [zfloat] in zash.toml (live): how solid the panel is, what its frame is
@@ -1075,7 +1109,15 @@ impl Renderer {
             bounds: TextBounds { left: 0, top: 0, right: width as i32, bottom: height as i32 },
             default_color: Color::rgb(255, 255, 255),
             custom_glyphs: &[],
-        }).collect();
+        }).chain(self.unders.iter().map(|(b, x, y, c)| TextArea {
+            buffer: b,
+            left: *x,
+            top: *y,
+            scale: 1.0,
+            bounds: TextBounds { left: c[0] as i32, top: c[1] as i32, right: c[2].ceil() as i32, bottom: c[3].ceil() as i32 },
+            default_color: Color::rgb(255, 255, 255),
+            custom_glyphs: &[],
+        })).collect();
         let _ = self.text2.prepare(device, queue, &mut self.font_system, &mut self.atlas, &self.viewport, bar_areas, &mut self.swash);
 
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("zash frame") });
@@ -1550,6 +1592,16 @@ impl Frame {
             self.ink_top = term.grid().history_size() as f64 - term.grid().display_offset() as f64;
             self.ink = ink.shown(self.ink_top, self.rows.len() as f64, float);
         }
+        self
+    }
+
+    /// The cells under a dragged zfloat's edge, in this palette's colours.
+    pub fn with_under(mut self, g: &crate::graphics::Graphics, p: &Palette) -> Frame {
+        use crate::graphics::UColor;
+        self.under = g.under.as_ref().map(|u| {
+            let c = |c: UColor| match c { UColor::Default => None, UColor::Index(i) => Some(p.indexed(i)), UColor::Rgb(r) => Some(r) };
+            (u.id, u.cells.iter().map(|(x, y, t, fg, bg)| (u.x + x, u.y + y, t.clone(), c(*fg).unwrap_or(self.fg), c(*bg))).collect())
+        });
         self
     }
 
