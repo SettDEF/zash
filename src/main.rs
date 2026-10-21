@@ -18,6 +18,7 @@ mod app;
 mod watchdog;
 mod cli;
 mod config;
+mod copy;
 mod desktop;
 mod dnd;
 mod graphics;

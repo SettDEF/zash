@@ -162,6 +162,8 @@ pub struct Config {
     pub zfloat_shaders: ZfloatShaders,
     /// text effects (OSC 7733;fx): on or off, their frame rate, presets (`[fx]`)
     pub fx: crate::fx::Settings,
+    /// what a copy puts on the clipboard (`[copy]`, copy.rs)
+    pub copy: crate::copy::Settings,
     /// the text centred in the space whole cells do not fill (else top-left), and moved by an offset
     pub center: bool,
     pub offset: (f32, f32),
@@ -207,6 +209,7 @@ impl Default for Config {
             zfloat: ZfloatLook::default(),
             zfloat_shaders: ZfloatShaders::default(),
             fx: crate::fx::Settings::default(),
+            copy: crate::copy::Settings::default(),
             center: true,
             offset: (0.0, 0.0),
             palette: Palette::load(),
@@ -286,6 +289,7 @@ struct File {
     popup: Option<PopupFile>,
     zfloat: Option<ZfloatFile>,
     fx: Option<FxFile>,
+    copy: Option<CopyFile>,
     desktop: Option<DesktopFile>,
     float: Option<FloatFile>,
 }
@@ -340,6 +344,13 @@ impl CursorConf {
             o => return Err(format!("style = {o:?}: use \"app\", \"block\", \"beam\", \"underline\" or \"hollow\"")),
         })
     }
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct CopyFile {
+    unwrap: Option<String>,
+    trim: Option<bool>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -637,6 +648,14 @@ shader = ""
 #   fps:     the most frames a second either causes (15 is plenty on an old laptop); frames that
 #            come out slow lower it on their own, and turn both off as a last resort A preset is a name programs can use, written like the escape:
 #   done = "shimmer;color=good;speed=1.5;loop=2"
+[copy]
+# unwrap: "smart" joins lines a program wrapped itself (Claude Code, zeit) back into one, so a long
+#         command pastes whole; lines ended on purpose (lists, short lines, code fences) stay apart.
+#         "off" copies the rows as they are.
+# trim:   drop spaces at line ends
+unwrap = "smart"
+trim = true
+
 [fx]
 enabled = true
 shaders = true
@@ -764,6 +783,15 @@ impl Config {
             if let Some(v) = x.shaders { c.fx.shaders = v; }
             if let Some(v) = x.fps { c.fx.fps = v.clamp(1.0, 120.0); }
             if let Some(p) = x.presets { c.fx.presets = p; }
+        }
+        if let Some(x) = f.copy {
+            match x.unwrap.as_deref() {
+                Some("smart") => c.copy.unwrap = true,
+                Some("off") => c.copy.unwrap = false,
+                None => {}
+                Some(other) => eprintln!("zash: [copy] unwrap = {other:?}: use \"smart\" or \"off\""),
+            }
+            if let Some(t) = x.trim { c.copy.trim = t; }
         }
         if let Some(d) = f.desktop {
             let k = &mut c.desktop;

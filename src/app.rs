@@ -884,7 +884,7 @@ impl App {
                     "c" => {
                         if let Some(s) = self.sess() {
                             if let Some(t) = s.term.lock().selection_to_string() {
-                                clipboard_set(&t, false);
+                                clipboard_set(&crate::copy::tidy(&t, &self.cfg.copy), false);
                             }
                         }
                         return;
@@ -1613,6 +1613,7 @@ impl ApplicationHandler<ZEvent> for App {
                         if let Some(s) = self.sess() {
                             let text = { let t = s.term.lock(); t.selection.as_ref().filter(|s| !s.is_empty()).and(t.selection_to_string()) };
                             if let Some(t) = text.filter(|t| !t.is_empty()) {
+                                let t = crate::copy::tidy(&t, &self.cfg.copy);
                                 std::thread::spawn(move || clipboard_set(&t, true));
                             }
                         }
