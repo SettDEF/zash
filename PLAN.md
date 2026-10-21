@@ -112,6 +112,31 @@ draws it — without breaking the grid for everything else.
 - Needs zash's own pre-parser in front of the VT parser (unknown escapes are
   dropped there today): planned with T5, smart output.
 
+### 6¾. Drawing and animation (2026-10-21)
+More than text: shapes drawn by hand, animations from EffectCraft (Lottie) and VectorCraft (SVG),
+things that react to the pointer, widgets. Always attached to text (they scroll and resize with
+it), in the theme's colours, and plain text in every other terminal.
+1. **Base** — the hand-drawn layer on the effects escape (OSC 7733;fx, `src/fx.rs`):
+   - [x] `scribble`: the text written, then a loop drawn round it (2.2 turns, wobbling, each turn
+     wider and turned, the centre drifting, a superellipse that never runs over the text, the pen
+     thin at both ends, which do not meet); one loop per word, the same every time; stays drawn
+     without asking for frames; strokes drawn as dots in the rectangle pipeline (no new GPU code)
+   - [x] programs check TERM_PROGRAM=zash; [ ] a query that also works over SSH (XTGETTCAP or DA)
+   - [ ] more strokes on the same base: underline, strike, check, arrow, bracket, a box drawing itself
+   - [ ] frames tested headless at set times against kept images (zash --snapshot)
+2. **Pictures and Lottie** — Kitty images exist (`graphics.rs`); add vello + velato for SVG and Lottie
+   with named slots (text, colour from the theme); `zash anim check` (what cannot play), `zash anim
+   play file --text Buffers` (preview with a scrubber); EffectCraft exports with `effectcraft-cli`.
+3. **Interaction** — hover and click on what is drawn, named states (idle, hover, active, done) with
+   smooth changes, events back to the program, Tab and Enter reach everything.
+4. **Widgets** — button, progress, table, list, input on the same layer; `zash ui …` for scripts.
+5. **Shaders and type** — custom GPU effects within a cost limit, variable fonts, animated weight,
+   fonts for titles.
+6. **Recording, pen, made by the agent, sound** — video/GIF of what is drawn (tinct-cast), the Z13 pen
+   as vector strokes, effects written by the agent from a sentence, optional small sounds.
+Always: under 2 ms a frame, nothing drawn while nothing moves, paused when hidden, slower on battery,
+reduced motion, no flashing, limits on size and time, graphics from SSH limited by default.
+
 ### 7. Scrollback and history
 - **Vim in the scrollback**: `v`, `y`, `/`, `n`, text objects over output.
  

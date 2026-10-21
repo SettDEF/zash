@@ -1,11 +1,15 @@
-//! Text effects (OSC 7733;fx): shimmer, pulse, fade, rainbow, typewriter, glow on a run of text
+//! Text effects (OSC 7733;fx): shimmer, pulse, fade, rainbow, typewriter, glow, scribble on a run of text
 //! or its background, each with its own parameters. A run carries its effect as a hyperlink with
 //! a `zash-fx:` address, so it stays on its cells through scrolling, scrollback and resizing.
 //!
 //! ```text
 //! ESC ] 7733 ; fx ; shimmer ; target=bg ; speed=1.2 ; color=accent ; loop=2 ST   text   ESC ] 7733 ; fx ; end ST
 //! ESC ] 7733 ; fx ; done ST   text   ESC ] 7733 ; fx ; end ST          (a preset from [fx.presets])
+//! ESC ] 7733 ; fx ; scribble ; color=accent ; turns=2.2 ; wobble=0.1 ; width=0.13 ; draw=900ms ST
+//!     Buffers   ESC ] 7733 ; fx ; end ST      (written, then a loop drawn round it by hand; it stays)
 //! ```
+//!
+//! A program knows it may send these when TERM_PROGRAM=zash (zash sets it, with TERM_PROGRAM_VERSION).
 //! Unknown keys and values are ignored, so programs written for a newer zash still work here.
 
 use std::collections::HashMap;
@@ -86,6 +90,9 @@ pub enum Kind {
     Typewriter,
     /// a soft halo behind the run, breathing
     Glow,
+    /// the text written, then a loop drawn around it by hand: more than two turns, wobbling,
+    /// its ends apart (turns, wobble, width, draw, write=0 to skip the writing)
+    Scribble,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,6 +131,12 @@ pub struct Effect {
     pub width: f32,
     /// seconds before it starts (fade and typewriter keep the text hidden meanwhile)
     pub delay: f32,
+    /// scribble: how many times round, how much the line wanders (of the radius), seconds to
+    /// draw it, and whether the text is written first
+    pub turns: f32,
+    pub wobble: f32,
+    pub draw: f32,
+    pub write: bool,
     life: Life,
     /// seconds on the shared clock when the run began
     start: f32,
@@ -163,6 +176,7 @@ impl Effect {
             "rainbow" => Kind::Rainbow,
             "typewriter" => Kind::Typewriter,
             "glow" => Kind::Glow,
+            "scribble" => Kind::Scribble,
             _ => return None,
         };
         let once = matches!(kind, Kind::Fade | Kind::Typewriter);
@@ -172,9 +186,19 @@ impl Effect {
             speed: 1.0,
             intensity: if kind == Kind::Rainbow { 1.0 } else { 0.8 },
             color: Paint::Role('a'),
-            width: if kind == Kind::Rainbow { 24.0 } else { 4.0 },
+            width: match kind {
+                Kind::Rainbow => 24.0,
+                // scribble: the pen, in parts of a cell's height
+                Kind::Scribble => 0.13,
+                _ => 4.0,
+            },
             delay: 0.0,
-            life: Life::Cycles(if once { 1.0 } else { 2.0 }),
+            turns: 2.2,
+            wobble: 0.1,
+            draw: 0.9,
+            write: true,
+            // a scribble stays once drawn
+            life: if kind == Kind::Scribble { Life::Forever } else { Life::Cycles(if once { 1.0 } else { 2.0 }) },
             start,
         };
         for kv in preset.into_iter().chain(own) {
@@ -197,6 +221,10 @@ impl Effect {
             "intensity" => self.intensity = num(v).map(|i| i.clamp(0.0, 1.0)).unwrap_or(self.intensity),
             "width" => self.width = num(v).filter(|w| *w > 0.0).unwrap_or(self.width),
             "delay" => self.delay = secs(v).unwrap_or(self.delay),
+            "turns" => self.turns = num(v).map(|t| t.clamp(0.2, 8.0)).unwrap_or(self.turns),
+            "wobble" => self.wobble = num(v).map(|w| w.clamp(0.0, 0.5)).unwrap_or(self.wobble),
+            "draw" => self.draw = secs(v).filter(|d| *d > 0.0).unwrap_or(self.draw),
+            "write" => self.write = !matches!(v, "0" | "false" | "no" | "off"),
             "color" => self.color = paint(v).unwrap_or(self.color),
             "loop" => self.life = if v == "forever" { Life::Forever } else { num(v).filter(|n| *n > 0.0).map(Life::Cycles).unwrap_or(self.life) },
             "duration" => self.life = if v == "forever" { Life::Forever } else { secs(v).filter(|d| *d > 0.0).map(Life::Seconds).unwrap_or(self.life) },
@@ -221,6 +249,7 @@ impl Effect {
             Kind::Rainbow => 2.0,
             Kind::Typewriter => n as f32 / 40.0,
             Kind::Glow => 1.6,
+            Kind::Scribble => self.write_secs(n) * self.speed + self.draw,
         };
         base.max(0.05) / self.speed
     }
@@ -233,6 +262,100 @@ impl Effect {
             Life::Cycles(c) => t < c * self.cycle(n),
             Life::Seconds(s) => t < s,
         }
+    }
+
+    /// Scribble: seconds the writing takes (0 with write=0).
+    fn write_secs(&self, n: usize) -> f32 {
+        if self.write { (n as f32 / 40.0).max(0.05) / self.speed } else { 0.0 }
+    }
+
+    /// Still changing at `now`: another frame is wanted. A scribble stays drawn after it is
+    /// done, without asking for frames; the others change as long as they are live.
+    pub fn animating(&self, now: f32, n: usize) -> bool {
+        match self.kind {
+            Kind::Scribble => now - self.start - self.delay < self.cycle(n),
+            _ => self.live(now, n),
+        }
+    }
+
+    /// The effect draws the run's text itself at `now` (the rows leave those cells blank).
+    pub fn hides_text(&self, now: f32, n: usize) -> bool {
+        match self.kind {
+            // only while it is being written; then the text is plain and the loop stays
+            Kind::Scribble => self.write && now - self.start - self.delay < self.write_secs(n),
+            _ => self.styles_text() && self.live(now, n),
+        }
+    }
+
+    /// Scribble: how much of the loop is drawn at `now`, 0..1, eased like a hand.
+    pub fn stroke_progress(&self, now: f32, n: usize) -> f32 {
+        let t = now - self.start - self.delay - self.write_secs(n);
+        let p = (t / (self.draw / self.speed)).clamp(0.0, 1.0);
+        // slow in, quick through the middle, slowing at the end
+        if p < 0.5 { 4.0 * p * p * p } else { 1.0 - (-2.0 * p + 2.0).powi(3) / 2.0 }
+    }
+
+    /// The colour a role or fixed paint stands for.
+    pub fn paint(&self, tone: impl Fn(char) -> Rgb) -> [f32; 4] {
+        match self.color {
+            Paint::Role(r) => tone(r).f32(),
+            Paint::Fixed(c) => c.f32(),
+        }
+    }
+
+    /// Scribble: the loop around a box (x0, y0, x1, y1, pixels) for a cell `ch` high, as dots
+    /// (centre, radius) close enough to read as a line, drawn up to `progress`. More than two
+    /// turns of an ellipse, each a little wider and turned, its radius wandering; the pen thin
+    /// at both ends, which do not meet. `seed` (the run's text) makes each word its own loop,
+    /// the same every time.
+    pub fn scribble(&self, b: [f32; 4], ch: f32, seed: u64, progress: f32) -> Vec<([f32; 2], f32)> {
+        use std::f32::consts::TAU;
+        if progress <= 0.0 {
+            return Vec::new();
+        }
+        // a small random generator, from the seed
+        let mut s = seed ^ 0x9e37_79b9_7f4a_7c15;
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f32 / (1u64 << 53) as f32
+        };
+        let (cx, cy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+        // a squarer loop than an ellipse (a superellipse, power 3) hugs a line of text; through
+        // the box's corners it is 2^(1/3) its half sides. Room on top for the pen,
+        // the wobble pulling inwards and the drift, so the loop never runs over the text
+        let inner = 1.0 / (1.0 - self.wobble).max(0.5);
+        let rx = ((b[2] - b[0]) / 2.0 * 2f32.powf(1.0 / 3.0) + ch * (0.3 + 0.22)) * inner;
+        let ry = ((b[3] - b[1]) / 2.0 * 2f32.powf(1.0 / 3.0) + ch * (0.25 + 0.12)) * inner;
+        let start = rnd() * TAU;
+        let tilt = (rnd() - 0.5) * 0.12;
+        let phase: [f32; 3] = [rnd() * TAU, rnd() * TAU, rnd() * TAU];
+        let pen = (self.width * ch).max(1.0);
+        let total = self.turns * TAU;
+        // a step small enough that the dots overlap well (a fifth of the pen), twice over: the
+        // squarer shape moves faster along its flat sides than an even step in angle suggests
+        let around = TAU * rx.max(ry);
+        let steps = ((around * self.turns) / (pen * 0.2) * 2.0).ceil().max(8.0) as usize;
+        let last = ((steps as f32) * progress).ceil() as usize;
+        let mut out = Vec::with_capacity(last + 1);
+        for k in 0..=last.min(steps) {
+            let u = k as f32 / steps as f32;
+            let a = start + u * total;
+            // each turn a little wider, its centre drifting; the radius wandering with a few slow waves
+            let grow = 1.0 + 0.1 * (u * self.turns);
+            let drift = [ch * 0.22 * (u * self.turns * std::f32::consts::PI + phase[1]).sin(), ch * 0.12 * (u * self.turns * 2.1 + phase[2]).sin()];
+            let w = 1.0 + self.wobble * (0.6 * (a * 1.3 + phase[0]).sin() + 0.3 * (a * 2.7 + phase[1]).sin() + 0.1 * (a * 5.1 + phase[2]).sin());
+            let sq = |v: f32| v.signum() * v.abs().powf(2.0 / 3.0);
+            let (x, y) = (rx * grow * w * sq(a.cos()), ry * grow * w * sq(a.sin()));
+            // turned a little, and further with each turn (a hand does not repeat itself)
+            let turn = tilt + 0.06 * u * self.turns;
+            let (x, y) = (x * turn.cos() - y * turn.sin() + drift[0], x * turn.sin() + y * turn.cos() + drift[1]);
+            // the pen: thin where it starts and ends, full in between
+            let taper = (std::f32::consts::PI * u).sin().max(0.0).sqrt();
+            out.push(([cx + x, cy + y], pen * (0.25 + 0.75 * taper) / 2.0));
+        }
+        out
     }
 
     /// Cell `i` of a run of `n` at `now`, over these colours. `tone` resolves palette roles.
@@ -257,6 +380,10 @@ impl Effect {
                 Kind::Pulse | Kind::Glow => (1.0 - (t / cyc * std::f32::consts::TAU).cos()) / 2.0,
                 Kind::Fade => (t / cyc).clamp(0.0, 1.0),
                 Kind::Typewriter => ((t / cyc * n as f32) > i as f32) as u8 as f32,
+                Kind::Scribble => match self.write_secs(n) {
+                    w if w > 0.0 => ((t / w * n as f32) > i as f32) as u8 as f32,
+                    _ => 1.0,
+                },
                 Kind::Rainbow => 1.0,
             }
         };
@@ -270,7 +397,7 @@ impl Effect {
                     out.bg = Some(mix(bg, color, f * k));
                 }
             }
-            Kind::Fade | Kind::Typewriter => {
+            Kind::Fade | Kind::Typewriter | Kind::Scribble => {
                 if self.styles_text() {
                     out.fg = Some([fg[0], fg[1], fg[2], fg[3] * f]);
                 }
@@ -374,6 +501,50 @@ mod tests {
         let Escape::Start(a) = Escape::parse("sparkle") else { panic!() };
         assert!(Effect::from_address(&a, &s).is_none());
         assert_eq!(Escape::parse("end"), Escape::End);
+    }
+
+    #[test]
+    fn a_scribble_writes_then_loops_and_stays() {
+        let s = Settings::default();
+        let e = eff("scribble", &s);
+        let n = 7;
+        let written = e.start + e.write_secs(n);
+        // writing: the text is hidden letter by letter, no loop yet
+        assert!(e.hides_text(e.start + 0.01, n));
+        assert_eq!(e.stroke_progress(written - 0.01, n), 0.0);
+        // then the loop is drawn, and stays without asking for frames
+        assert!(!e.hides_text(written + 0.01, n));
+        let done = e.start + e.cycle(n) + 0.01;
+        assert_eq!(e.stroke_progress(done, n), 1.0);
+        assert!(e.live(done + 100.0, n) && !e.animating(done, n));
+        assert!(!eff("scribble;write=0", &s).hides_text(e.start + 0.01, n), "write=0: no writing");
+    }
+
+    #[test]
+    fn a_scribble_is_open_hand_drawn_and_the_same_every_time() {
+        let s = Settings::default();
+        let e = eff("scribble", &s);
+        let b = [100.0, 50.0, 200.0, 70.0];
+        let a = e.scribble(b, 20.0, 42, 1.0);
+        assert_eq!(a, e.scribble(b, 20.0, 42, 1.0), "one word, one loop");
+        assert_ne!(a, e.scribble(b, 20.0, 43, 1.0), "another word, another loop");
+        // more than two turns: the dots go round the centre more than 720°
+        let (cx, cy) = (150.0, 60.0);
+        let mut turned = 0.0f32;
+        for w in a.windows(2) {
+            let (p, q) = (w[0].0, w[1].0);
+            let d = (q[1] - cy).atan2(q[0] - cx) - (p[1] - cy).atan2(p[0] - cx);
+            turned += (d + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        }
+        assert!(turned.abs() > 2.0 * std::f32::consts::TAU, "turned {}°", turned.to_degrees());
+        // the ends do not meet, and the pen is thin there
+        let (first, last) = (a[0], a[a.len() - 1]);
+        assert!(((first.0[0] - last.0[0]).powi(2) + (first.0[1] - last.0[1]).powi(2)).sqrt() > 5.0, "ends apart");
+        let widest = a.iter().map(|d| d.1).fold(0.0, f32::max);
+        assert!(first.1 < widest * 0.5 && last.1 < widest * 0.5, "tapered ends");
+        // it surrounds the box, and is drawn as far as asked
+        assert!(a.iter().all(|d| (d.0[0] < 100.0 || d.0[0] > 200.0) || (d.0[1] < 50.0 || d.0[1] > 70.0)), "never over the text");
+        assert!(e.scribble(b, 20.0, 42, 0.5).len() < a.len() && e.scribble(b, 20.0, 42, 0.0).is_empty());
     }
 
     #[test]

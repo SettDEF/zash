@@ -91,7 +91,7 @@ impl FxLayer {
     pub fn hidden(&mut self, spans: &HashMap<String, usize>, now: f32) -> HashSet<String> {
         spans
             .iter()
-            .filter(|(uri, n)| self.effect(uri).is_some_and(|e| e.styles_text() && e.live(now, **n)))
+            .filter(|(uri, n)| self.effect(uri).is_some_and(|e| e.hides_text(now, **n)))
             .map(|(uri, _)| uri.clone())
             .collect()
     }
@@ -104,6 +104,8 @@ impl FxLayer {
             return out;
         }
         let mut index: HashMap<&str, usize> = HashMap::new();
+        // scribbles: each run's box, text, effect and length
+        let mut loops: HashMap<String, ([f32; 4], String, Effect, usize)> = HashMap::new();
         // a halo per row segment of a run: (uri, row y, x0, x1, colour)
         let mut halos: Vec<(String, f32, f32, f32, [f32; 4])> = Vec::new();
         for (row, y, band) in placed(frame, oy, ch) {
@@ -118,12 +120,22 @@ impl FxLayer {
                 *i += 1;
                 let n = spans.get(uri).copied().unwrap_or(1);
                 let Some(e) = self.effect(uri).filter(|e| e.live(now, n)) else { continue };
-                out.moving = true;
+                // only what still changes asks for frames (a drawn scribble just stays)
+                out.moving |= e.animating(now, n);
+                let x = ox + col as f32 * cw;
+                let w = if c.wide { 2.0 * cw } else { cw };
+                if e.kind == crate::fx::Kind::Scribble {
+                    // its box and text, for the loop drawn after the cells
+                    let s = loops.entry(uri.to_string()).or_insert_with(|| ([f32::MAX, f32::MAX, f32::MIN, f32::MIN], String::new(), e.clone(), n));
+                    s.0 = [s.0[0].min(x), s.0[1].min(y), s.0[2].max(x + w), s.0[3].max(y + ch)];
+                    s.1.push(c.ch);
+                    if !e.hides_text(now, n) {
+                        continue;
+                    }
+                }
                 let fg = Rgb(c.style.fg.0, c.style.fg.1, c.style.fg.2).f32();
                 let bg = c.bg.unwrap_or(frame.bg).f32();
                 let look = e.look(now, at, n, fg, bg, |t| frame.tone(t));
-                let x = ox + col as f32 * cw;
-                let w = if c.wide { 2.0 * cw } else { cw };
                 if let Some(color) = look.bg {
                     out.rects.push(Rect { xywh: [x, y, w, ch], color, p: [0.0, 0.0] });
                 }
@@ -145,6 +157,15 @@ impl FxLayer {
                     }
                     out.glyphs.push(Glyph { key, x, y, color, band });
                 }
+            }
+        }
+        // the loops around scribbled runs: dots along the path, under the text
+        for (_, (b, text, e, n)) in loops {
+            let p = e.stroke_progress(now, n);
+            let seed = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x0100_0000_01b3));
+            let color = e.paint(|t| frame.tone(t));
+            for ([x, y], r) in e.scribble(b, ch, seed, p) {
+                out.rects.push(Rect { xywh: [x - r, y - r, 2.0 * r, 2.0 * r], color, p: [r, 0.6] });
             }
         }
         // a soft glow around each segment, under the text
