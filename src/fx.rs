@@ -60,7 +60,10 @@ impl Escape {
         }
         // each run its own id, so two runs next to each other stay two runs
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Escape::Start(format!("{SCHEME}{id};{};{body}", now_ms()))
+        // since=MS: it began that long ago (zeit sends a pane's run again with each redraw of
+        // its row; the line goes on being drawn instead of starting over)
+        let since = body.split(';').find_map(|p| p.trim().strip_prefix("since=")?.parse::<u64>().ok()).unwrap_or(0);
+        Escape::Start(format!("{SCHEME}{id};{};{body}", now_ms().saturating_sub(since)))
     }
 }
 
@@ -651,6 +654,16 @@ mod tests {
     fn eff(body: &str, s: &Settings) -> Effect {
         let Escape::Start(addr) = Escape::parse(body) else { panic!("an end") };
         Effect::from_address(&addr, s).expect("an effect")
+    }
+
+    #[test]
+    fn since_starts_it_earlier() {
+        // a run zeit sends again goes on from where it was, not from the start
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let s = Settings::default();
+        let fresh = eff("underline", &s);
+        let older = eff(&format!("underline;since={}", now_ms()), &s);
+        assert!(fresh.start - older.start > 0.004, "{} {}", fresh.start, older.start);
     }
 
     #[test]
