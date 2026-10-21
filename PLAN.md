@@ -144,7 +144,15 @@ it), in the theme's colours, and plain text in every other terminal.
 4. **Widgets** — button, progress, table, list, input on the same layer; `zash ui …` for scripts.
 5. **Shaders and type** — custom GPU effects within a cost limit, variable fonts, animated weight,
    fonts for titles.
-6. **Recording, pen, made by the agent, sound** — video/GIF of what is drawn (tinct-cast), the Z13 pen
+6. **Recording, pen, made by the agent, sound** — **Pen brushes from PhotoCraft (planned 2026-10-21, not built):** drawing mode draws with
+   photocraft-paint (github.com/storytold/photocraft, MIT or Apache-2.0, pure Rust; a git dependency
+   pinned to a commit, never the craft-sync build cache): its built-in presets (General, Dry Media, Wet
+   Media, Special Effects: pencil, ink, marker, airbrush, watercolour…), pressure / tilt / rotation
+   response curves and smoothing (pulled string, catch-up). Strokes become dabs rendered into a picture
+   per pane (the image layer), the dots of ink.rs stay as the light fallback; `[pen] brush = "Ink"`, a
+   brush picker in drawing mode, and the same preset names Knurl uses, so a pen tested there draws the
+   same here. Its Wayland pen reading (pen.rs) is what photocraft-tablet says it lacks: worth offering
+   back. — video/GIF of what is drawn (tinct-cast), the Z13 pen
    as vector strokes, effects written by the agent from a sentence, optional small sounds.
    **The pen** (2026-10-21): winit 0.30 has no pen events, so zash binds the Wayland tablet protocol
    (zwp_tablet_manager_v2, already in wayland-protocols' unstable set) on its own connection, as the
