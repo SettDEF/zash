@@ -384,7 +384,8 @@ pub struct Renderer {
     /// drawn after the text: marks that must stay visible over glyphs
     overlay: Rects,
     /// shaped rows per pane (by pane id)
-    rows: std::collections::HashMap<u64, std::collections::HashMap<u64, Buffer>>,
+    /// per pane, per row content: its segments (x offset in pixels, shaped text), each on its column
+    rows: std::collections::HashMap<u64, std::collections::HashMap<u64, Vec<(f32, Buffer)>>>,
     /// per pane: the content key of each drawn row, top to bottom (above the screen first)
     order: std::collections::HashMap<u64, Vec<u64>>,
     family: String,
@@ -544,7 +545,7 @@ impl Renderer {
     /// `hidden`: runs whose characters an effect draws this frame (left blank here).
     fn shape_rows(&mut self, pane: u64, frame: &Frame, width: f32, hidden: &std::collections::HashSet<String>) {
         let mut old = self.rows.remove(&pane).unwrap_or_default();
-        let mut cache: std::collections::HashMap<u64, Buffer> = std::collections::HashMap::with_capacity(frame.rows.len() + 4);
+        let mut cache: std::collections::HashMap<u64, Vec<(f32, Buffer)>> = std::collections::HashMap::with_capacity(frame.rows.len() + 4);
         let mut order = Vec::with_capacity(frame.rows.len() + frame.above.len() + frame.below.len());
         for (row, _, _) in placed(frame, 0.0, self.cell_h) {
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -566,9 +567,25 @@ impl Renderer {
                 cache.insert(key, b);
                 continue;
             }
-            // runs of cells with one style become one span
+            // on the grid: plain characters (their advance is the cell's) go together, each other one
+            // (symbols, icons, wide ones, from fonts of another width) is a segment at its own column,
+            // so an advance a little off never shifts the rest of the row; runs of one style are a span
+            let mut segs: Vec<(usize, Vec<(String, Style2)>)> = Vec::new();
             let mut spans: Vec<(String, Style2)> = Vec::new();
-            for c in row.iter().filter(|c| !c.spacer) {
+            let mut start = 0usize;
+            for (col, c) in row.iter().enumerate() {
+                if c.spacer {
+                    continue;
+                }
+                // (empty cells and powerline shapes are drawn as spaces: plain too)
+                let plain = (c.ch == '\0' || powerline(c.ch).is_some() || (' '..='~').contains(&c.ch)) && c.zw.is_none();
+                if !plain && !spans.is_empty() {
+                    segs.push((start, std::mem::take(&mut spans)));
+                }
+                // a segment starts at its first character's column (after a wide one: past its spacer)
+                if spans.is_empty() {
+                    start = col;
+                }
                 let mut s = String::new();
                 // powerline shapes are drawn as rectangles (rect_list), not as glyphs
                 // an effect drawing this cell's text leaves it blank here
@@ -581,6 +598,12 @@ impl Renderer {
                     Some((t, st)) if *st == c.style => t.push_str(&s),
                     _ => spans.push((s, c.style)),
                 }
+                if !plain {
+                    segs.push((start, std::mem::take(&mut spans)));
+                }
+            }
+            if !spans.is_empty() {
+                segs.push((start, spans));
             }
             let family = self.family.clone();
             let feats = self.features.clone();
@@ -594,12 +617,17 @@ impl Renderer {
                 }
                 a
             };
-            let mut b = Buffer::new(&mut self.font_system, Metrics::new(self.font_px, self.cell_h));
-            b.set_size(Some(width), Some(self.cell_h));
             let default = Attrs::new().family(Family::Name(&family));
-            b.set_rich_text(spans.iter().map(|(t, st)| (t.as_str(), mk(st))), &default, Shaping::Advanced, None);
-            b.shape_until_scroll(&mut self.font_system, false);
-            cache.insert(key, b);
+            let mut shaped = Vec::with_capacity(segs.len());
+            for (col, spans) in segs {
+                let x = col as f32 * self.cell_w;
+                let mut b = Buffer::new(&mut self.font_system, Metrics::new(self.font_px, self.cell_h));
+                b.set_size(Some((width - x).max(self.cell_w)), Some(self.cell_h));
+                b.set_rich_text(spans.iter().map(|(t, st)| (t.as_str(), mk(st))), &default, Shaping::Advanced, None);
+                b.shape_until_scroll(&mut self.font_system, false);
+                shaped.push((x, b));
+            }
+            cache.insert(key, shaped);
         }
         self.rows.insert(pane, cache);
         self.order.insert(pane, order);
@@ -1085,7 +1113,9 @@ impl Renderer {
                 default_color: Color::rgb(255, 255, 255),
                 custom_glyphs: &[],
             };
-            for (b, y, band) in order.iter().zip(places).filter_map(|(key, (_, y, band))| cache.get(key).map(|b| (b, y, band))) {
+            for (segs, y, band) in order.iter().zip(places).filter_map(|(key, (_, y, band))| cache.get(key).map(|b| (b, y, band))) {
+            for (sx, b) in segs {
+                let ox = ox + sx;
                 let (t, bo) = band.map(|(b0, b1)| (b0.max(pane_top), b1.min(p.y + p.h))).unwrap_or((pane_top, p.y + p.h));
                 let all = [p.x, t, p.x + p.w, bo];
                 match moves[pi].filter(|(r, _, _)| y + ch > r[1] && y < r[1] + r[3]) {
@@ -1098,6 +1128,7 @@ impl Renderer {
                     }
                     None => areas.push(area(b, ox, y, all)),
                 }
+            }
             }
             // characters an effect draws: each in its colour this frame, clipped as its row
             let fx = &self.fx;
