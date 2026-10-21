@@ -777,6 +777,9 @@ impl Renderer {
             self.shape_rows(p.id, p.frame, p.w - 2.0 * self.pad, &hidden);
             let (ox, oy) = self.origin(p.x, p.y, p.w, p.h);
             let clip = [p.x, p.y.max(self.top), p.w, p.y + p.h - p.y.max(self.top)];
+            // where the zfloat is drawn this frame: drawn marks inside it are cut at its edges, the ones
+            // under it are cut away where it covers them
+            let mut float_rect: Option<[f32; 4]> = None;
             if let Some(z) = &p.frame.float {
                 // under the text: a soft shadow, the edge (the accent when it has the keyboard), the panel
                 let mut r = [ox + z.x as f32 * self.cell_w, oy + z.y as f32 * self.cell_h, z.w as f32 * self.cell_w, z.h as f32 * self.cell_h];
@@ -888,13 +891,17 @@ impl Renderer {
                 let f = p.frame.fg.f32();
                 // (a tint over the panel, so a see-through panel stays as see-through under it)
                 rects.push(Rect { xywh: [r[0], r[1], r[2], self.cell_h], color: [f[0], f[1], f[2], 0.05], p: [rad.min(self.cell_h / 2.0), 0.0] });
+                float_rect = Some(r);
                 floats.push((r, z.clone(), p.frame.fg, p.frame.cursor_color, p.frame.fail_color));
             }
             rects.extend(moved(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy, clip), moves[pi]));
             if !spans.is_empty() {
                 let d = self.fx.draw(&mut self.font_system, &self.family, self.font_px, self.cell_w, self.cell_h, p.frame, &spans, ox, oy, fx_now);
                 fx_moving |= d.moving;
-                rects.extend(clipped(d.rects, clip));
+                match float_rect {
+                    Some(fr) => rects.extend(split_by_float(d.rects, clip, fr)),
+                    None => rects.extend(clipped(d.rects, clip)),
+                }
                 fx_glyphs.push((pi, d.glyphs));
             }
             over.extend(moved(self.overlay_list(p.frame, ox, oy, clip), moves[pi]));
@@ -1985,4 +1992,38 @@ fn ink_center(fs: &mut FontSystem, swash: &mut SwashCache, b: &Buffer) -> Option
         }
     }
     (l < r && t < bt).then(|| ((l + r) / 2.0, (t + bt) / 2.0))
+}
+
+/// Drawn marks (pen dots) over a pane with a zfloat: a dot inside the zfloat is cut at its edges,
+/// one outside is cut away where the zfloat covers it (the four bands around it), all within `clip`.
+fn split_by_float(rects: Vec<Rect>, clip: [f32; 4], f: [f32; 4]) -> Vec<Rect> {
+    let inside = |r: &Rect| {
+        let (cx, cy) = (r.xywh[0] + r.xywh[2] / 2.0, r.xywh[1] + r.xywh[3] / 2.0);
+        cx >= f[0] && cx < f[0] + f[2] && cy >= f[1] && cy < f[1] + f[3]
+    };
+    let (ins, outs): (Vec<Rect>, Vec<Rect>) = rects.into_iter().partition(inside);
+    let fc = clipped_rect(f, clip);
+    let mut out = clipped(ins, fc);
+    let (cx0, cy0, cx1, cy1) = (clip[0], clip[1], clip[0] + clip[2], clip[1] + clip[3]);
+    let (fx0, fy0, fx1, fy1) = (f[0], f[1], f[0] + f[2], f[1] + f[3]);
+    // above, below, left of, right of the zfloat
+    let bands = [
+        [cx0, cy0, clip[2], (fy0 - cy0).max(0.0)],
+        [cx0, fy1, clip[2], (cy1 - fy1).max(0.0)],
+        [cx0, fy0, (fx0 - cx0).max(0.0), f[3]],
+        [fx1, fy0, (cx1 - fx1).max(0.0), f[3]],
+    ];
+    for b in bands.iter().filter(|b| b[2] > 0.0 && b[3] > 0.0) {
+        out.extend(clipped(outs.clone(), clipped_rect(*b, clip)));
+    }
+    out
+}
+
+/// `r` cut to `clip` (an empty one when they do not meet).
+fn clipped_rect(r: [f32; 4], clip: [f32; 4]) -> [f32; 4] {
+    let x0 = r[0].max(clip[0]);
+    let y0 = r[1].max(clip[1]);
+    let x1 = (r[0] + r[2]).min(clip[0] + clip[2]);
+    let y1 = (r[1] + r[3]).min(clip[1] + clip[3]);
+    [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)]
 }
