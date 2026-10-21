@@ -924,7 +924,8 @@ impl Renderer {
             }
         }
         let mut backdrop: Option<([f32; 4], f32, f32)> = None;
-        if let (Some(pp), Some((cr, cc, _))) = (&frame.popup, frame.cursor) {
+        // (a popup with nothing in it is not drawn: it showed as an empty bar over other panes)
+        if let (Some(pp), Some((cr, cc, _))) = (frame.popup.as_ref().filter(|p| !p.items.is_empty()), frame.cursor) {
             let cr = pp.row.unwrap_or(cr);
             // the completion popup: under the word being completed, above it when there is no room
             let look = frame.popup_look;
