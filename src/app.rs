@@ -99,6 +99,11 @@ struct App {
     search: Option<crate::search::Search>,
     /// several lines waiting to be pasted until the paste guard is answered (copy.rs)
     paste_guard: Option<String>,
+    /// the pen (pen.rs); drawing mode holds it, and where it hovers: (pane, line, col)
+    pen: Option<Arc<crate::pen::PenCtl>>,
+    drawing: bool,
+    pen_last: crate::pen::Pen,
+    pen_hover: Option<(u64, f64, f32)>,
     /// `--float`: the window's size; its app id is "zash-float"
     float: Option<(u32, u32)>,
 }
@@ -108,7 +113,7 @@ pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::Pat
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None, paste_guard: None, float };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None, paste_guard: None, pen: None, drawing: false, pen_last: Default::default(), pen_hover: None, float };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -493,6 +498,84 @@ impl App {
         if let Some(s) = self.sess() {
             s.write(input::mouse(button, motion, pressed, cell.0, cell.1, mods, sgr));
         }
+    }
+
+    /// Drawing mode on or off: while on, zash holds the pen (pen.rs) and it draws; off, the pen
+    /// is a pointer again.
+    fn set_drawing(&mut self, on: bool) {
+        self.drawing = on;
+        if let Some(c) = &self.pen {
+            c.set(on);
+        }
+        if !on {
+            self.pen_hover = None;
+            for t in &self.tabs {
+                for p in &t.panes {
+                    p.session.ink.lock().unwrap().end();
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    /// Keys while drawing: Esc stops, Ctrl+Z takes the last stroke back, Delete clears the pane.
+    /// True when the key was drawing's.
+    fn drawing_key(&mut self, ev: &KeyEvent, mods: Mods) -> bool {
+        let Some(s) = self.sess() else { return false };
+        match &ev.logical_key {
+            Key::Named(NamedKey::Escape) => self.set_drawing(false),
+            Key::Named(NamedKey::Delete) => s.ink.lock().unwrap().clear(),
+            Key::Character(c) if mods.ctrl && c.eq_ignore_ascii_case("z") => {
+                s.ink.lock().unwrap().strokes.pop();
+            }
+            _ => return false,
+        }
+        self.redraw();
+        true
+    }
+
+    /// The pen's frame: the tip draws (by pressure), the eraser end or the lower button held
+    /// erases what it touches, the upper button takes the last stroke back.
+    fn pen_event(&mut self, p: crate::pen::Pen) {
+        let last = std::mem::replace(&mut self.pen_last, p);
+        if !self.drawing {
+            return;
+        }
+        let Some(g) = self.gpu.as_ref() else { return };
+        let scale = g.window.scale_factor();
+        let (x, y) = ((p.x * scale) as f32, (p.y * scale) as f32);
+        let (cw, ch) = (g.renderer.cell_w, g.renderer.cell_h);
+        let rects = self.pane_rects(self.active);
+        // a stroke stays in the pane it began in
+        let keep = if last.down { self.pen_hover.map(|h| h.0) } else { None };
+        let hit = keep.and_then(|id| rects.iter().find(|(i, _)| *i == id)).or_else(|| rects.iter().find(|(_, r)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h));
+        let Some(&(id, r)) = hit else { return };
+        let (ox, oy) = g.renderer.origin(r.x, r.y, r.w, r.h);
+        let Some(pane) = self.tabs.get(self.active).and_then(|t| t.panes.iter().find(|q| q.id == id)) else { return };
+        let s = &pane.session;
+        let top = { let t = s.term.lock(); t.grid().history_size() as f64 - t.grid().display_offset() as f64 };
+        let at = crate::ink::Point { line: top + ((y - oy) / ch) as f64, col: (x - ox) / cw, p: p.pressure };
+        self.pen_hover = p.near.then_some((id, at.line, at.col));
+        {
+            let mut ink = s.ink.lock().unwrap();
+            let erasing = p.eraser || p.b1;
+            if p.b2 && !last.b2 {
+                ink.strokes.pop();
+            }
+            if p.down && erasing {
+                ink.live = None;
+                ink.erase(at, 0.6 + 0.8 * p.pressure);
+            } else if p.down && !last.down {
+                let w = self.cfg.pen.width;
+                let color = self.cfg.pen.color.map(|c| c.f32()).unwrap_or_else(|| self.cfg.palette.cursor_bg.f32());
+                ink.begin(at, color, w);
+            } else if p.down {
+                ink.add(at);
+            } else if last.down {
+                ink.end();
+            }
+        }
+        self.redraw();
     }
 
     /// Pastes, or holds several lines for the paste guard to ask about first ([copy] paste_guard).
@@ -899,6 +982,9 @@ impl App {
         if self.paste_guard.is_some() {
             return self.guard_key(ev);
         }
+        if self.drawing && self.drawing_key(ev, mods) {
+            return;
+        }
         if self.search.is_some() {
             return self.search_key(ev, mods);
         }
@@ -934,6 +1020,11 @@ impl App {
                     "f" => {
                         self.search = Some(crate::search::Search::default());
                         self.redraw();
+                        return;
+                    }
+                    "d" => {
+                        // drawing mode: the pen draws on the terminal (pen.rs, ink.rs)
+                        self.set_drawing(!self.drawing);
                         return;
                     }
                     "o" => {
@@ -1187,7 +1278,7 @@ impl App {
                 let t = s.term.lock();
                 let marks = s.marks.lock().unwrap();
                 let pal = if s.reverse.load(std::sync::atomic::Ordering::Relaxed) { self.cfg.palette.reversed() } else { self.cfg.palette.clone() };
-                let f = Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &s.ui_rows.lock().unwrap()).with_images(&t, &s.graphics.lock().unwrap());
+                let f = Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &s.ui_rows.lock().unwrap()).with_images(&t, &s.graphics.lock().unwrap()).with_ink(&t, &s.ink.lock().unwrap());
                 if id == tab.focus { f.with_scroll(&t, &pal, scroll_px, cell_h) } else { f }
             };
             if id == tab.focus {
@@ -1195,6 +1286,11 @@ impl App {
                 let here = { let t = s.term.lock(); t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize };
                 frame.popup = s.popup.lock().unwrap().clone().filter(|p| p.line.is_none_or(|l| l == here));
                 frame.popup_look = self.cfg.popup.with(&s.popup_style.lock().unwrap());
+                if let Some((_, line, col)) = self.pen_hover.filter(|h| h.0 == id && self.drawing) {
+                    let erasing = self.pen_last.eraser || self.pen_last.b1;
+                    let rad = if erasing { 0.6 + 0.8 * self.pen_last.pressure } else { self.cfg.pen.width * 0.5 };
+                    frame.pen_hover = Some((line, col, rad, erasing));
+                }
                 frame.zfloat_look = self.cfg.zfloat;
                 // the cursor by [cursor]: style, a TUI's own one, where zash's look applies
                 frame.apply_cursor(&self.cfg.cursor, self.cfg.palette.cursor_fg);
@@ -1206,6 +1302,9 @@ impl App {
                     frame.bar = Some(q.bar());
                 } else if self.prefix {
                     frame.bar = Some(self.prefix_hint());
+                }
+                if self.drawing {
+                    frame.bar = Some("\u{f03eb}  Drawing   pen draws · eraser end or lower button erases · upper button undoes · Ctrl+Z undo · Del clears · Esc stops".into());
                 }
                 // a tab without a real title shows the name of the folder its shell is in
                 frame.tabs = self.tabs.iter().enumerate().map(|(i, t)| (Self::tab_title(t), i == self.active)).collect();
@@ -1377,6 +1476,14 @@ impl ApplicationHandler<ZEvent> for App {
                 if let Err(e) = crate::dnd::listen(h.display.as_ptr(), on_drop) {
                     eprintln!("zash: no drag and drop: {e}");
                 }
+                let proxy = self.proxy.clone();
+                let on_pen: crate::pen::OnPen = Box::new(move |p| {
+                    let _ = proxy.send_event(ZEvent::Pen(p));
+                });
+                match crate::pen::listen(h.display.as_ptr(), on_pen) {
+                    Ok(c) => self.pen = Some(c),
+                    Err(e) => eprintln!("zash: no pen: {e}"),
+                }
             }
         }
         let mut watched = vec![self.cfg.colors_file.clone()];
@@ -1397,8 +1504,13 @@ impl ApplicationHandler<ZEvent> for App {
             ZEvent::Theme => "reloading colours",
             ZEvent::Settings => "reloading settings",
             ZEvent::Drop(..) => "taking dropped files",
+            ZEvent::Pen(..) => "drawing with the pen",
         });
         let (id, ev) = match ev {
+            ZEvent::Pen(p) => {
+                self.pen_event(p);
+                return;
+            }
             ZEvent::Drop(paths, x, y) => {
                 let scale = self.gpu.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0);
                 self.drop_files(paths, Some((x * scale, y * scale)));

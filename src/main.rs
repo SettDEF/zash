@@ -19,6 +19,8 @@ mod watchdog;
 mod cli;
 mod config;
 mod copy;
+mod ink;
+mod pen;
 mod desktop;
 mod dnd;
 mod graphics;

@@ -419,6 +419,9 @@ impl State {
             small: Vec::new(),
             tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]],
             images: Vec::new(),
+            ink: Vec::new(),
+            ink_top: 0.0,
+            pen_hover: None,
         }
     }
 }

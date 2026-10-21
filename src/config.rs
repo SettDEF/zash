@@ -164,6 +164,8 @@ pub struct Config {
     pub fx: crate::fx::Settings,
     /// what a copy puts on the clipboard (`[copy]`, copy.rs)
     pub copy: crate::copy::Settings,
+    /// drawing with the pen (`[pen]`, ink.rs)
+    pub pen: PenSettings,
     /// the text centred in the space whole cells do not fill (else top-left), and moved by an offset
     pub center: bool,
     pub offset: (f32, f32),
@@ -210,6 +212,7 @@ impl Default for Config {
             zfloat_shaders: ZfloatShaders::default(),
             fx: crate::fx::Settings::default(),
             copy: crate::copy::Settings::default(),
+            pen: PenSettings::default(),
             center: true,
             offset: (0.0, 0.0),
             palette: Palette::load(),
@@ -290,6 +293,7 @@ struct File {
     zfloat: Option<ZfloatFile>,
     fx: Option<FxFile>,
     copy: Option<CopyFile>,
+    pen: Option<PenFile>,
     desktop: Option<DesktopFile>,
     float: Option<FloatFile>,
 }
@@ -344,6 +348,27 @@ impl CursorConf {
             o => return Err(format!("style = {o:?}: use \"app\", \"block\", \"beam\", \"underline\" or \"hollow\"")),
         })
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PenSettings {
+    /// the widest a stroke gets, in cell heights (full pressure)
+    pub width: f32,
+    /// its colour; None: the cursor colour
+    pub color: Option<Rgb>,
+}
+
+impl Default for PenSettings {
+    fn default() -> Self {
+        PenSettings { width: 0.35, color: None }
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct PenFile {
+    width: Option<f32>,
+    color: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -661,6 +686,13 @@ unwrap = "smart"
 trim = true
 paste_guard = "auto"
 
+# Drawing with the pen: Ctrl+Shift+D (the tip draws by pressure, the eraser end or the lower
+# button erases, the upper button undoes; Ctrl+Z, Del clears, Esc stops). Strokes scroll with the text.
+# width: the widest a stroke gets, in cell heights; color: a hex colour like #e0a050 (empty: the cursor colour)
+[pen]
+width = 0.35
+color = ""
+
 [fx]
 enabled = true
 shaders = true
@@ -788,6 +820,16 @@ impl Config {
             if let Some(v) = x.shaders { c.fx.shaders = v; }
             if let Some(v) = x.fps { c.fx.fps = v.clamp(1.0, 120.0); }
             if let Some(p) = x.presets { c.fx.presets = p; }
+        }
+        if let Some(x) = f.pen {
+            if let Some(w) = x.width { c.pen.width = w.clamp(0.05, 3.0); }
+            match x.color.as_deref() {
+                None | Some("") => {}
+                Some(h) => match Rgb::hex(h) {
+                    Some(rgb) => c.pen.color = Some(rgb),
+                    None => eprintln!("zash: [pen] color = {h:?}: a colour like \"#e0a050\""),
+                },
+            }
         }
         if let Some(x) = f.copy {
             match x.unwrap.as_deref() {

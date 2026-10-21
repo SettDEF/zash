@@ -93,6 +93,11 @@ pub struct Frame {
     pub tones: [Rgb; 4],
     /// images (Kitty graphics) on screen
     pub images: Vec<ImageView>,
+    /// pen strokes near the screen (ink.rs), and the absolute line at its top
+    pub ink: Vec<crate::ink::Stroke>,
+    pub ink_top: f64,
+    /// where the pen hovers while drawing: (line, col, radius in cells, the eraser end)
+    pub pen_hover: Option<(f64, f32, f32, bool)>,
     /// a multiplexer's app popup: zash draws its frame (the cells under it are blanked)
     pub float: Option<crate::graphics::ZFloat>,
 }
@@ -159,7 +164,7 @@ impl Frame {
             ((l + offset) as usize, c, content.cursor.shape)
         }).filter(|(r, _, _)| *r < lines);
         let drawn_cursor = if cursor.is_none() { inverted.iter().rposition(|(n, _)| *n == 1).map(|r| (r, inverted[r].1)) } else { None };
-        let f = Frame { drawn_cursor, cursor_drawn: false, cursor_styled: true, float: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: def_fg, prompts: Vec::new(), cols, rows, cursor, bg: def_bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new() };
+        let f = Frame { drawn_cursor, cursor_drawn: false, cursor_styled: true, float: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: def_fg, prompts: Vec::new(), cols, rows, cursor, bg: def_bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new(), ink: Vec::new(), ink_top: 0.0, pen_hover: None };
         f
     }
 
@@ -781,6 +786,21 @@ impl Renderer {
                 fx_glyphs.push((pi, d.glyphs));
             }
             over.extend(self.overlay_list(p.frame, ox, oy, clip));
+            // pen strokes over the text (ink.rs), and where the pen hovers while drawing
+            if !p.frame.ink.is_empty() {
+                over.extend(clipped(crate::ink::dots(&p.frame.ink, p.frame.ink_top, p.frame.rows.len() as f64, ox, oy, self.cell_w, self.cell_h), clip));
+            }
+            if let Some((line, col, rad, eraser)) = p.frame.pen_hover {
+                let (x, y) = (ox + col * self.cell_w, oy + (line - p.frame.ink_top) as f32 * self.cell_h);
+                let r = (rad * self.cell_h).max(2.0);
+                let mut c = p.frame.cursor_color.f32();
+                c[3] = if eraser { 0.25 } else { 0.55 };
+                over.push(Rect { xywh: [x - r, y - r, 2.0 * r, 2.0 * r], color: c, p: [r, 0.9] });
+                if eraser {
+                    let f = p.frame.fg.f32();
+                    over.push(Rect { xywh: [x - 1.5, y - 1.5, 3.0, 3.0], color: [f[0], f[1], f[2], 0.9], p: [1.5, 0.5] });
+                }
+            }
         }
         if panes.len() > 1 {
             let line = { let mut c = frame.fg.f32(); c[3] = 0.16; c };
@@ -1492,6 +1512,15 @@ pub struct ImageView {
 
 impl Frame {
     /// The placements that show on the screen, given the scroll position.
+    /// The pane's pen strokes that show, given the scroll position.
+    pub fn with_ink<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, ink: &crate::ink::Ink) -> Frame {
+        if !ink.is_empty() {
+            self.ink_top = term.grid().history_size() as f64 - term.grid().display_offset() as f64;
+            self.ink = ink.shown(self.ink_top, self.rows.len() as f64);
+        }
+        self
+    }
+
     pub fn with_images<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, g: &crate::graphics::Graphics) -> Frame {
         // pinned to screen cells by a multiplexer: there while the screen is not scrolled back
         if term.grid().display_offset() == 0 {

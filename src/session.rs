@@ -21,6 +21,8 @@ pub enum ZEvent {
     Settings,
     /// files dropped on the window (Wayland), and where (logical pixels)
     Drop(Vec<std::path::PathBuf>, f64, f64),
+    /// the pen, while drawing mode holds it (pen.rs)
+    Pen(crate::pen::Pen),
 }
 
 /// Where the terminal's events go: the window's event loop, or a channel
@@ -96,6 +98,8 @@ pub struct Session {
     pub claims: Arc<Mutex<Claims>>,
     /// images (Kitty graphics) and where they are placed
     pub graphics: Arc<Mutex<crate::graphics::Graphics>>,
+    /// what the pen drew on this pane (ink.rs)
+    pub ink: Arc<Mutex<crate::ink::Ink>>,
     /// a cell in pixels (images are sized in cells)
     pub cell_px: Arc<Mutex<(f32, f32)>>,
     pub term: Arc<FairMutex<Term<Listener>>>,
@@ -372,7 +376,7 @@ impl Session {
         let claims: Arc<Mutex<Claims>> = Arc::default();
         let (gr, cp, cl) = (graphics.clone(), cell_px.clone(), claims.clone());
         std::thread::Builder::new().name("zash pty".into()).spawn(move || read_loop(reader, t, m, pp, rv, nv, ps, ur, gr, cp, cl, l))?;
-        Ok(Session { term, writer, pty, grid, marks, popup, reverse, nvim_sock, popup_style, ui_rows, graphics, cell_px, claims, pid })
+        Ok(Session { term, writer, pty, grid, marks, popup, reverse, nvim_sock, popup_style, ui_rows, graphics, ink: Arc::default(), cell_px, claims, pid })
     }
 
     /// Bytes for the program, as if typed.
