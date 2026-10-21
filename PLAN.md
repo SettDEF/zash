@@ -122,7 +122,9 @@ it), in the theme's colours, and plain text in every other terminal.
      thin at both ends, which do not meet); one loop per word, the same every time; stays drawn
      without asking for frames; strokes drawn as dots in the rectangle pipeline (no new GPU code)
    - [x] programs check TERM_PROGRAM=zash; [ ] a query that also works over SSH (XTGETTCAP or DA)
-   - [ ] more strokes on the same base: underline, strike, check, arrow, bracket, a box drawing itself
+   - [x] more marks on one pen (smooth strokes through a few points, wandering, tapered, pen lifts):
+     underline, strike, box (sharp corners, overshoot), check, arrow (shaft + head), bracket
+   - [x] ZASH_FX_AT=SECONDS freezes the effects clock: exact, repeatable captures
    - [ ] frames tested headless at set times against kept images (zash --snapshot)
 2. **Pictures and Lottie** — Kitty images exist (`graphics.rs`); add vello + velato for SVG and Lottie
    with named slots (text, colour from the theme); `zash anim check` (what cannot play), `zash anim

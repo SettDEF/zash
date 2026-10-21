@@ -104,7 +104,7 @@ impl FxLayer {
             return out;
         }
         let mut index: HashMap<&str, usize> = HashMap::new();
-        // scribbles: each run's box, text, effect and length
+        // drawings (scribble, underline, box…): each run's box, text, effect and length
         let mut loops: HashMap<String, ([f32; 4], String, Effect, usize)> = HashMap::new();
         // a halo per row segment of a run: (uri, row y, x0, x1, colour)
         let mut halos: Vec<(String, f32, f32, f32, [f32; 4])> = Vec::new();
@@ -124,7 +124,7 @@ impl FxLayer {
                 out.moving |= e.animating(now, n);
                 let x = ox + col as f32 * cw;
                 let w = if c.wide { 2.0 * cw } else { cw };
-                if e.kind == crate::fx::Kind::Scribble {
+                if e.kind.draws() {
                     // its box and text, for the loop drawn after the cells
                     let s = loops.entry(uri.to_string()).or_insert_with(|| ([f32::MAX, f32::MAX, f32::MIN, f32::MIN], String::new(), e.clone(), n));
                     s.0 = [s.0[0].min(x), s.0[1].min(y), s.0[2].max(x + w), s.0[3].max(y + ch)];
@@ -164,7 +164,7 @@ impl FxLayer {
             let p = e.stroke_progress(now, n);
             let seed = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x0100_0000_01b3));
             let color = e.paint(|t| frame.tone(t));
-            for ([x, y], r) in e.scribble(b, ch, seed, p) {
+            for ([x, y], r) in e.stroke(b, ch, seed, p) {
                 out.rects.push(Rect { xywh: [x - r, y - r, 2.0 * r, 2.0 * r], color, p: [r, 0.6] });
             }
         }
