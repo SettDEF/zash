@@ -168,3 +168,24 @@ impl Shaders {
         self.loaded.get(path).and_then(|(_, s)| s.as_ref())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every shader in ~/.config/zash/shaders compiles the way zash compiles it.
+    #[test]
+    fn the_users_shaders_compile() {
+        let dir = std::env::var("HOME").map(|h| PathBuf::from(h).join(".config/zash/shaders")).unwrap();
+        let Ok(files) = std::fs::read_dir(&dir) else { return };
+        for f in files.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "glsl")) {
+            let src = format!("{HEAD}{}{TAIL}", std::fs::read_to_string(&f).unwrap());
+            let module = wgpu::naga::front::glsl::Frontend::default()
+                .parse(&wgpu::naga::front::glsl::Options::from(wgpu::naga::ShaderStage::Fragment), &src)
+                .unwrap_or_else(|e| panic!("{}: {}", f.display(), e.emit_to_string(&src)));
+            wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{}: {e:?}", f.display()));
+        }
+    }
+}
