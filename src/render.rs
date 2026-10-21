@@ -396,6 +396,9 @@ pub struct Renderer {
     pub opacity: f32,
     /// where the mouse is (pixels), for hover on what zash draws itself (zfloat buttons)
     pub pointer: Option<(f32, f32)>,
+    /// a zfloat dragged by its title: where the press was (pixels), its id, cell x, y, w, h then. It is
+    /// drawn where the pointer puts it, to the pixel, while zeit moves it in cells
+    pub float_drag: Option<(f32, f32, u64, usize, usize, usize, usize)>,
     anim: Option<CursorAnim>,
     /// text placement: centred in the leftover space, and moved by an offset (pixels)
     pub center: bool,
@@ -460,6 +463,7 @@ impl Renderer {
             cursor_trail: cfg.cursor_trail,
             opacity: cfg.opacity,
             pointer: None,
+            float_drag: None,
             anim: None,
             fx: crate::fx_draw::FxLayer::new(cfg.fx.clone()),
             zfloat_shaders: cfg.zfloat_shaders.clone(),
@@ -724,6 +728,8 @@ impl Renderer {
         let mut over = Vec::new();
         // floats (a multiplexer's app popups): their pixel rect, for the title and buttons later
         let mut floats: Vec<([f32; 4], crate::graphics::ZFloat, Rgb, Rgb, Rgb)> = Vec::new();
+        // per pane: a dragged zfloat's cell rect and how far it is drawn from it (its contents move along)
+        let mut moves: Vec<Option<([f32; 4], f32, f32)>> = vec![None; panes.len()];
         for (pi, p) in panes.iter().enumerate() {
             let spans = crate::fx_draw::FxLayer::spans(p.frame);
             let hidden = if spans.is_empty() { Default::default() } else { self.fx.hidden(&spans, fx_now) };
@@ -733,6 +739,15 @@ impl Renderer {
             if let Some(z) = &p.frame.float {
                 // under the text: a soft shadow, the edge (the accent when it has the keyboard), the panel
                 let mut r = [ox + z.x as f32 * self.cell_w, oy + z.y as f32 * self.cell_h, z.w as f32 * self.cell_w, z.h as f32 * self.cell_h];
+                // how far from its cell (at most a cell and a half: zeit catches up), its size unchanged (a move, not a resize)
+                let shift = self.float_drag.zip(self.pointer).filter(|((_, _, id, _, _, w, h), _)| *id == z.id && *w == z.w && *h == z.h).map(|((px, py, _, x0, y0, _, _), (mx, my))| {
+                    let dx = (x0 as f32 - z.x as f32) * self.cell_w + (mx - px);
+                    let dy = (y0 as f32 - z.y as f32) * self.cell_h + (my - py);
+                    (dx.clamp(-1.5 * self.cell_w, 1.5 * self.cell_w), dy.clamp(-1.5 * self.cell_h, 1.5 * self.cell_h))
+                });
+                if let Some((dx, dy)) = shift {
+                    moves[pi] = Some((r, dx, dy));
+                }
                 // docked at the last column or row: out to the window's edge (cells rarely fill it)
                 let edge = 4.0;
                 if z.x + z.w >= p.frame.cols {
@@ -740,6 +755,10 @@ impl Renderer {
                 }
                 if z.y + z.h >= p.frame.rows.len() {
                     r[3] = (p.y + p.h - edge - r[1]).max(r[3]);
+                }
+                if let Some((dx, dy)) = shift {
+                    r[0] += dx;
+                    r[1] += dy;
                 }
                 let rad = 12.0;
                 // the look from [zfloat] in zash.toml (live): how solid the panel is, what its frame is
@@ -778,14 +797,14 @@ impl Renderer {
                 rects.push(Rect { xywh: [r[0] + 1.0, r[1] + self.cell_h - 1.0, r[2] - 2.0, 1.0], color: [f[0], f[1], f[2], 0.10], p: [0.0, 0.0] });
                 floats.push((r, z.clone(), p.frame.fg, p.frame.cursor_color, p.frame.fail_color));
             }
-            rects.extend(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy, clip));
+            rects.extend(moved(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy, clip), moves[pi]));
             if !spans.is_empty() {
                 let d = self.fx.draw(&mut self.font_system, &self.family, self.font_px, self.cell_w, self.cell_h, p.frame, &spans, ox, oy, fx_now);
                 fx_moving |= d.moving;
                 rects.extend(clipped(d.rects, clip));
                 fx_glyphs.push((pi, d.glyphs));
             }
-            over.extend(self.overlay_list(p.frame, ox, oy, clip));
+            over.extend(moved(self.overlay_list(p.frame, ox, oy, clip), moves[pi]));
             // pen strokes over the text (ink.rs), and where the pen hovers while drawing
             if !p.frame.ink.is_empty() {
                 over.extend(clipped(crate::ink::dots(&p.frame.ink, p.frame.ink_top, p.frame.rows.len() as f64, ox, oy, self.cell_w, self.cell_h), clip));
@@ -1006,18 +1025,29 @@ impl Renderer {
             // each pane's text stays inside its pane (and out of the tab bar); a gliding region's rows inside the region
             let pane_top = p.y.max(self.top);
             let places = placed(p.frame, oy, ch);
-            areas.extend(order.iter().zip(places).filter_map(|(key, (_, y, band))| cache.get(key).map(|b| (b, y, band))).map(|(b, y, band)| TextArea {
+            let area = |b, left: f32, top: f32, bounds: [f32; 4]| TextArea {
                 buffer: b,
-                left: ox,
-                top: y,
+                left,
+                top,
                 scale: 1.0,
-                bounds: {
-                    let (t, bo) = band.map(|(b0, b1)| (b0.max(pane_top), b1.min(p.y + p.h))).unwrap_or((pane_top, p.y + p.h));
-                    TextBounds { left: p.x as i32, top: t as i32, right: (p.x + p.w) as i32, bottom: bo as i32 }
-                },
+                bounds: TextBounds { left: bounds[0] as i32, top: bounds[1] as i32, right: bounds[2] as i32, bottom: bounds[3] as i32 },
                 default_color: Color::rgb(255, 255, 255),
                 custom_glyphs: &[],
-            }));
+            };
+            for (b, y, band) in order.iter().zip(places).filter_map(|(key, (_, y, band))| cache.get(key).map(|b| (b, y, band))) {
+                let (t, bo) = band.map(|(b0, b1)| (b0.max(pane_top), b1.min(p.y + p.h))).unwrap_or((pane_top, p.y + p.h));
+                let all = [p.x, t, p.x + p.w, bo];
+                match moves[pi].filter(|(r, _, _)| y + ch > r[1] && y < r[1] + r[3]) {
+                    // a row through a dragged zfloat: beside it as it is, its part inside it moved with it
+                    Some((r, dx, dy)) => {
+                        areas.push(area(b, ox, y, [all[0], all[1], r[0], all[3]]));
+                        areas.push(area(b, ox, y, [r[0] + r[2], all[1], all[2], all[3]]));
+                        let inside = [r[0] + dx, r[1] + dy, r[0] + r[2] + dx, r[1] + r[3] + dy];
+                        areas.push(area(b, ox + dx, y + dy, [inside[0].max(all[0]), inside[1].max(pane_top), inside[2].min(all[2]), inside[3].min(p.y + p.h)]));
+                    }
+                    None => areas.push(area(b, ox, y, all)),
+                }
+            }
             // characters an effect draws: each in its colour this frame, clipped as its row
             let fx = &self.fx;
             for (_, glyphs) in fx_glyphs.iter().filter(|(i, _)| *i == pi) {
@@ -1783,4 +1813,18 @@ mod cursor_tests {
         assert_eq!(g.cursor.map(|c| c.2), Some(CursorShape::Block));
         assert!(CursorConf::shape("wobbly").is_err());
     }
+}
+
+/// A dragged zfloat's rects (cells, cursor, lines) drawn as far from their cells as it is.
+fn moved(mut rects: Vec<Rect>, m: Option<([f32; 4], f32, f32)>) -> Vec<Rect> {
+    if let Some((r, dx, dy)) = m {
+        for q in rects.iter_mut() {
+            let (cx, cy) = (q.xywh[0] + q.xywh[2] / 2.0, q.xywh[1] + q.xywh[3] / 2.0);
+            if cx >= r[0] && cx < r[0] + r[2] && cy >= r[1] && cy < r[1] + r[3] {
+                q.xywh[0] += dx;
+                q.xywh[1] += dy;
+            }
+        }
+    }
+    rects
 }

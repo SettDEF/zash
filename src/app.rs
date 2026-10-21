@@ -1746,6 +1746,17 @@ impl ApplicationHandler<ZEvent> for App {
                     self.nvim_btn = pressed.then_some(b);
                     return;
                 }
+                // a zfloat taken by its title row: drawn following the pointer to the pixel (zeit moves it in cells)
+                if button == MouseButton::Left {
+                    let drag = pressed.then(|| {
+                        let z = self.sess()?.graphics.lock().unwrap().float.clone()?;
+                        let (col, row) = self.cell_at(self.mouse.0, self.mouse.1);
+                        (row == z.y && col >= z.x && col < z.x + z.w).then_some((self.mouse.0 as f32, self.mouse.1 as f32, z.id, z.x, z.y, z.w, z.h))
+                    }).flatten();
+                    if let Some(g) = self.gpu.as_mut() {
+                        g.renderer.float_drag = drag;
+                    }
+                }
                 if self.app_mouse() {
                     let cell = self.cell_at(self.mouse.0, self.mouse.1);
                     self.mouse_btn = if pressed { Some(code) } else { None };
