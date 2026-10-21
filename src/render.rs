@@ -1514,10 +1514,11 @@ pub struct ImageView {
 impl Frame {
     /// The placements that show on the screen, given the scroll position.
     /// The pane's pen strokes that show, given the scroll position.
-    pub fn with_ink<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, ink: &crate::ink::Ink) -> Frame {
+    /// The pen's strokes on this screen; `float`: where the zfloat is now (its strokes go with it).
+    pub fn with_ink<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, ink: &crate::ink::Ink, float: crate::ink::FloatAt) -> Frame {
         if !ink.is_empty() {
             self.ink_top = term.grid().history_size() as f64 - term.grid().display_offset() as f64;
-            self.ink = ink.shown(self.ink_top, self.rows.len() as f64);
+            self.ink = ink.shown(self.ink_top, self.rows.len() as f64, float);
         }
         self
     }

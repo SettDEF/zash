@@ -555,6 +555,11 @@ impl App {
         let s = &pane.session;
         let top = { let t = s.term.lock(); t.grid().history_size() as f64 - t.grid().display_offset() as f64 };
         let at = crate::ink::Point { line: top + ((y - oy) / ch) as f64, col: (x - ox) / cw, p: p.pressure };
+        // the zfloat now (x, y, w, h in cells): a stroke begun on it belongs to it, kept relative to it
+        let float = s.graphics.lock().unwrap().float.as_ref().map(|z| (z.id, z.x, z.y, z.w, z.h));
+        let row = at.line - top;
+        let on = |f: &(u64, usize, usize, usize, usize)| at.col >= f.1 as f32 && at.col < (f.1 + f.3) as f32 && row >= f.2 as f64 && row < (f.2 + f.4) as f64;
+        let local = |f: (u64, usize, usize, usize, usize)| crate::ink::Point { line: row - f.2 as f64, col: at.col - f.1 as f32, p: at.p };
         self.pen_hover = p.near.then_some((id, at.line, at.col));
         {
             let mut ink = s.ink.lock().unwrap();
@@ -564,13 +569,23 @@ impl App {
             }
             if p.down && erasing {
                 ink.live = None;
-                ink.erase(at, 0.6 + 0.8 * p.pressure);
+                ink.erase(at, 0.6 + 0.8 * p.pressure, top, float.map(|f| (f.0, f.1, f.2)));
             } else if p.down && !last.down {
                 let w = self.cfg.pen.width;
                 let color = self.cfg.pen.color.map(|c| c.f32()).unwrap_or_else(|| self.cfg.palette.cursor_bg.f32());
-                ink.begin(at, color, w);
+                match float.filter(on) {
+                    Some(f) => ink.begin_on(Some(f.0), local(f), color, w),
+                    None => ink.begin(at, color, w),
+                }
             } else if p.down {
-                ink.add(at);
+                // a zfloat's stroke goes on inside it (and ends if the zfloat closed meanwhile)
+                match ink.live_anchor() {
+                    None => ink.add(at),
+                    Some(id) => match float.filter(|f| f.0 == id) {
+                        Some(f) => ink.add(local(f)),
+                        None => ink.end(),
+                    },
+                }
             } else if last.down {
                 ink.end();
             }
@@ -1278,7 +1293,9 @@ impl App {
                 let t = s.term.lock();
                 let marks = s.marks.lock().unwrap();
                 let pal = if s.reverse.load(std::sync::atomic::Ordering::Relaxed) { self.cfg.palette.reversed() } else { self.cfg.palette.clone() };
-                let f = Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &s.ui_rows.lock().unwrap()).with_images(&t, &s.graphics.lock().unwrap()).with_ink(&t, &s.ink.lock().unwrap());
+                // the zfloat now: strokes drawn on it are drawn where it is
+                let float = s.graphics.lock().unwrap().float.as_ref().map(|z| (z.id, z.x, z.y));
+                let f = Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &s.ui_rows.lock().unwrap()).with_images(&t, &s.graphics.lock().unwrap()).with_ink(&t, &s.ink.lock().unwrap(), float);
                 if id == tab.focus { f.with_scroll(&t, &pal, scroll_px, cell_h) } else { f }
             };
             if id == tab.focus {

@@ -48,6 +48,8 @@ pub struct Graphics {
 /// Where a float is (cells, frame included), whether it has the keyboard, its name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ZFloat {
+    /// the multiplexer's number for it (pen strokes on it keep to it)
+    pub id: u64,
     /// the preset, hide and close buttons (a zfloat's settings can leave them out)
     pub buttons: bool,
     /// its panel colour, as the multiplexer draws its own (zeit: its pill colour); None: zash's
@@ -247,7 +249,7 @@ impl Graphics {
             let (head, title) = body.split_once(";title=").unwrap_or((body, ""));
             let kv: HashMap<&str, &str> = head.split(';').filter_map(|p| p.split_once('=')).collect();
             let n = |k: &str| kv.get(k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-            self.float = Some(ZFloat { bg: kv.get("bg").and_then(|h| crate::config::Rgb::hex(h)), buttons: kv.get("buttons") != Some(&"0"), x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
+            self.float = Some(ZFloat { id: kv.get("id").and_then(|v| v.parse().ok()).unwrap_or(0), bg: kv.get("bg").and_then(|h| crate::config::Rgb::hex(h)), buttons: kv.get("buttons") != Some(&"0"), x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
             self.generation += 1;
             return;
         }
