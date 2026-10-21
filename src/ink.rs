@@ -1,6 +1,11 @@
 //! Drawing on the terminal with a pen (pen.rs brings the pen): strokes kept per pane in cell units,
 //! on the absolute line they were drawn at, so they scroll with the text and survive a new font
 //! size; drawn as round dots in the rect pipeline (like fx's marks), over the text.
+//!
+//! TODO (planned 2026-10-21): drawings that move with the terminal everywhere: inside zeit a stroke
+//! belongs to the zeit pane it was drawn on (zeit tells zash each pane's rect and scroll, OSC 7733),
+//! so it moves, resizes, hides with its tab and scrolls with that pane's own history; when a
+//! resize re-wraps the text, strokes follow their line (anchored to the text cell, not the row).
 
 use crate::render::Rect;
 

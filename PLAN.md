@@ -144,7 +144,10 @@ it), in the theme's colours, and plain text in every other terminal.
 4. **Widgets** — button, progress, table, list, input on the same layer; `zash ui …` for scripts.
 5. **Shaders and type** — custom GPU effects within a cost limit, variable fonts, animated weight,
    fonts for titles.
-6. **Recording, pen, made by the agent, sound** — **Pen brushes from PhotoCraft (planned 2026-10-21, not built):** drawing mode draws with
+6. **Recording, pen, made by the agent, sound** — **Drawings that move with the terminal (planned 2026-10-21):** inside zeit a stroke belongs to
+   the zeit pane it was drawn on and moves, resizes, hides and scrolls with it (zeit reports pane
+   rects and scroll over OSC 7733); a resize that re-wraps text keeps strokes on their text (see
+   ink.rs). — **Pen brushes from PhotoCraft (planned 2026-10-21, not built):** drawing mode draws with
    photocraft-paint (github.com/storytold/photocraft, MIT or Apache-2.0, pure Rust; a git dependency
    pinned to a commit, never the craft-sync build cache): its built-in presets (General, Dry Media, Wet
    Media, Special Effects: pencil, ink, marker, airbrush, watercolour…), pressure / tilt / rotation
