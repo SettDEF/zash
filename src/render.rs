@@ -796,6 +796,15 @@ impl Renderer {
                     let right = if z.x + z.w >= p.frame.cols { 0.0 } else { (p.x + p.w - (r[0] + r[2])).max(0.0) };
                     let down = if z.y + z.h >= p.frame.rows.len() { 0.0 } else { (p.y + p.h - (r[1] + r[3])).max(0.0) };
                     let (left, up) = ((r[0] - p.x).max(0.0), (r[1] - p.y.max(self.top)).max(0.0));
+                    // and never past the multiplexer's area (zeit's tab bar stays clear)
+                    let (left, right, up, down) = match z.area {
+                        Some((ax, ay, aw, ah)) => {
+                            let (x0, y0) = (ox + ax as f32 * self.cell_w, oy + ay as f32 * self.cell_h);
+                            let (x1, y1) = (ox + (ax + aw) as f32 * self.cell_w, oy + (ay + ah) as f32 * self.cell_h);
+                            (left.min((r[0] - x0).max(0.0)), right.min((x1 - r[0] - r[2]).max(0.0)), up.min((r[1] - y0).max(0.0)), down.min((y1 - r[1] - r[3]).max(0.0)))
+                        }
+                        None => (left, right, up, down),
+                    };
                     (dx.clamp(-1.5 * self.cell_w, 1.5 * self.cell_w).clamp(-left, right), dy.clamp(-1.5 * self.cell_h, 1.5 * self.cell_h).clamp(-up, down))
                 });
                 // always (not only while dragged): the rows through it are cut at its edges, so glyphs wider

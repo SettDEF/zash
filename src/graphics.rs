@@ -96,6 +96,9 @@ pub struct ZFloat {
     pub shader: Option<String>,
     /// how long a change of its shader's preset morphs (seconds), over zash.toml's
     pub morph: Option<f32>,
+    /// the multiplexer's area it is kept in (cells x, y, w, h: below its tab bar); a drag's pixel
+    /// shift never takes it past this
+    pub area: Option<(usize, usize, usize, usize)>,
     /// the multiplexer's number for it (pen strokes on it keep to it)
     pub id: u64,
     /// the preset, hide and close buttons (a zfloat's settings can leave them out)
@@ -302,7 +305,7 @@ impl Graphics {
             let (head, title) = body.split_once(";title=").unwrap_or((body, ""));
             let kv: HashMap<&str, &str> = head.split(';').filter_map(|p| p.split_once('=')).collect();
             let n = |k: &str| kv.get(k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-            self.float = Some(ZFloat { shader: kv.get("shader").filter(|s| !s.is_empty()).map(|s| s.to_string()), morph: kv.get("morph").and_then(|v| v.parse().ok()), id: kv.get("id").and_then(|v| v.parse().ok()).unwrap_or(0), bg: kv.get("bg").and_then(|h| crate::config::Rgb::hex(h)), buttons: kv.get("buttons") != Some(&"0"), x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
+            self.float = Some(ZFloat { area: kv.get("area").and_then(|a| { let v: Vec<usize> = a.split(',').filter_map(|n| n.parse().ok()).collect(); (v.len() == 4).then(|| (v[0], v[1], v[2], v[3])) }), shader: kv.get("shader").filter(|s| !s.is_empty()).map(|s| s.to_string()), morph: kv.get("morph").and_then(|v| v.parse().ok()), id: kv.get("id").and_then(|v| v.parse().ok()).unwrap_or(0), bg: kv.get("bg").and_then(|h| crate::config::Rgb::hex(h)), buttons: kv.get("buttons") != Some(&"0"), x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
             self.generation += 1;
             return;
         }
