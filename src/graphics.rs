@@ -63,11 +63,12 @@ pub struct ZUnder {
     pub id: u64,
     pub x: usize,
     pub y: usize,
-    pub cells: Vec<(usize, usize, String, UColor, UColor)>,
+    /// col, row, text, fg, bg, style flags (zeit-proto's: 1 bold, 2 italic, 8 reverse, 16 dim)
+    pub cells: Vec<(usize, usize, String, UColor, UColor, u8)>,
 }
 
 impl ZUnder {
-    /// id=;x=;y=;w=;h=;cells=rows "/", cells ".", each "hex-text,fg,bg" (empty: not sent)
+    /// id=;x=;y=;w=;h=;cells=rows "/", cells ".", each "hex-text,fg,bg[,flags]" (empty: not sent)
     pub fn parse(body: &str) -> Option<ZUnder> {
         let kv: HashMap<&str, &str> = body.split(';').filter_map(|p| p.split_once('=')).collect();
         let n = |k: &str| kv.get(k).and_then(|v| v.parse::<u64>().ok());
@@ -82,7 +83,8 @@ impl ZUnder {
                 let mut f = c.split(',');
                 let (Some(t), Some(fg), Some(bg)) = (f.next(), f.next().and_then(color), f.next().and_then(color)) else { continue };
                 let bytes: Option<Vec<u8>> = (0..t.len() / 2).map(|i| u8::from_str_radix(t.get(2 * i..2 * i + 2)?, 16).ok()).collect();
-                cells.push((col, row, String::from_utf8(bytes?).ok()?, fg, bg));
+                let flags = f.next().and_then(|v| v.parse::<u8>().ok()).unwrap_or(0);
+                cells.push((col, row, String::from_utf8(bytes?).ok()?, fg, bg, flags));
             }
         }
         Some(ZUnder { id: n("id")?, x: n("x")? as usize, y: n("y")? as usize, cells })
@@ -407,8 +409,8 @@ mod tests {
         let u = ZUnder::parse("id=7;x=3;y=2;w=3;h=1;cells=61,d,ff0000..c3a9,i4,d").unwrap();
         assert_eq!((u.id, u.x, u.y), (7, 3, 2));
         assert_eq!(u.cells.len(), 2);
-        assert_eq!(u.cells[0], (0, 0, "a".to_string(), UColor::Default, UColor::Rgb(crate::config::Rgb(255, 0, 0))));
-        assert_eq!(u.cells[1], (2, 0, "é".to_string(), UColor::Index(4), UColor::Default));
+        assert_eq!(u.cells[0], (0, 0, "a".to_string(), UColor::Default, UColor::Rgb(crate::config::Rgb(255, 0, 0)), 0));
+        assert_eq!(u.cells[1], (2, 0, "é".to_string(), UColor::Index(4), UColor::Default, 0));
     }
 
     fn rgba_cmd(id: u32, w: u32, h: u32, extra: &str) -> String {
@@ -455,5 +457,19 @@ mod tests {
         let o = g.command(&format!("m=0;{b}"), (10.0, 20.0), (0, 0));
         assert_eq!(o.reply.as_deref(), Some("\x1b_Gi=3;OK\x1b\\"));
         assert_eq!(g.images[&3].w, 4);
+    }
+}
+
+#[cfg(test)]
+mod under_tests {
+    use super::*;
+
+    #[test]
+    fn under_cells_carry_their_style() {
+        // "A" bold, "b" plain; the old three-field form still reads (flags 0)
+        let u = ZUnder::parse("id=7;x=2;y=3;w=2;h=1;cells=41,d,d,1.62,i1,d").expect("parsed");
+        assert_eq!(u.cells.len(), 2);
+        assert_eq!((u.cells[0].2.as_str(), u.cells[0].5), ("A", 1));
+        assert_eq!((u.cells[1].2.as_str(), u.cells[1].5), ("b", 0));
     }
 }

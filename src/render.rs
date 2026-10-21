@@ -101,7 +101,7 @@ pub struct Frame {
     /// a multiplexer's app popup: zash draws its frame (the cells under it are blanked)
     pub float: Option<crate::graphics::ZFloat>,
     /// while the zfloat is dragged: the cells under its edge (its id; column, row in the pane, text, fg, bg)
-    pub under: Option<(u64, Vec<(usize, usize, String, Rgb, Option<Rgb>)>)>,
+    pub under: Option<(u64, Vec<(usize, usize, String, Rgb, Option<Rgb>, u8)>)>,
 }
 
 fn resolve(c: AColor, term_colors: &alacritty_terminal::term::color::Colors, p: &Palette, bold: bool) -> Rgb {
@@ -833,7 +833,7 @@ impl Renderer {
                         let side = if dx > 0.0 { [x0, y0, (x0 + dx).min(x1), y1] } else { [(x1 + dx).max(x0), y0, x1, y1] };
                         let (vx0, vx1) = if dx > 0.0 { (side[2], x1) } else { (x0, side[0]) };
                         let top = if dy > 0.0 { [vx0, y0, vx1, (y0 + dy).min(y1)] } else { [vx0, (y1 + dy).max(y0), vx1, y1] };
-                        for (col, row, text, fg, bg) in cells {
+                        for (col, row, text, fg, bg, flags) in cells {
                             let cell = [ox + *col as f32 * self.cell_w, oy + *row as f32 * self.cell_h];
                             for s in [side, top] {
                                 let cut = [cell[0].max(s[0]), cell[1].max(s[1]), (cell[0] + self.cell_w).min(s[2]), (cell[1] + self.cell_h).min(s[3])];
@@ -846,7 +846,15 @@ impl Renderer {
                                 if !text.trim().is_empty() {
                                     let mut b = Buffer::new(&mut self.font_system, Metrics::new(self.font_px, self.cell_h));
                                     b.set_size(None, Some(self.cell_h));
-                                    b.set_text(text, &Attrs::new().family(Family::Name(&self.family)).color(Color::rgb(fg.0, fg.1, fg.2)), Shaping::Advanced, None);
+                                    // as the pane draws its text: the font's features, bold, italic
+                                    let mut a = Attrs::new().family(Family::Name(&self.family)).color(Color::rgb(fg.0, fg.1, fg.2)).font_features(self.features.clone());
+                                    if flags & 1 != 0 {
+                                        a = a.weight(Weight::BOLD);
+                                    }
+                                    if flags & 2 != 0 {
+                                        a = a.style(Style::Italic);
+                                    }
+                                    b.set_text(text, &a, Shaping::Advanced, None);
                                     b.shape_until_scroll(&mut self.font_system, false);
                                     self.unders.push((b, cell[0], cell[1], cut));
                                 }
@@ -1691,7 +1699,12 @@ impl Frame {
         use crate::graphics::UColor;
         self.under = g.under.as_ref().map(|u| {
             let c = |c: UColor| match c { UColor::Default => None, UColor::Index(i) => Some(p.indexed(i)), UColor::Rgb(r) => Some(r) };
-            (u.id, u.cells.iter().map(|(x, y, t, fg, bg)| (u.x + x, u.y + y, t.clone(), c(*fg).unwrap_or(self.fg), c(*bg))).collect())
+            (u.id, u.cells.iter().map(|(x, y, t, fg, bg, fl)| {
+                let (f, b) = (c(*fg).unwrap_or(self.fg), c(*bg));
+                // reverse video: its colours swapped, as the pane draws it
+                let (f, b) = if fl & 8 != 0 { (b.unwrap_or(self.bg), Some(f)) } else { (f, b) };
+                (u.x + x, u.y + y, t.clone(), f, b, *fl)
+            }).collect())
         });
         self
     }
