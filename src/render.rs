@@ -841,11 +841,10 @@ impl Renderer {
                     }
                     None => rects.push(Rect { xywh: r, color: panel, p: [rad, 0.0] }),
                 }
-                // the title bar: a slightly lighter band on its row (square under it), a hairline below
+                // the title bar: a slightly lighter band on its row (square under it) (no line under it: the user, 2026-10-21)
                 let f = p.frame.fg.f32();
                 // (a tint over the panel, so a see-through panel stays as see-through under it)
                 rects.push(Rect { xywh: [r[0], r[1], r[2], self.cell_h], color: [f[0], f[1], f[2], 0.05], p: [rad.min(self.cell_h / 2.0), 0.0] });
-                rects.push(Rect { xywh: [r[0] + 1.0, r[1] + self.cell_h - 1.0, r[2] - 2.0, 1.0], color: [f[0], f[1], f[2], 0.10], p: [0.0, 0.0] });
                 floats.push((r, z.clone(), p.frame.fg, p.frame.cursor_color, p.frame.fail_color));
             }
             rects.extend(moved(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy, clip), moves[pi]));
