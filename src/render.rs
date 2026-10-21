@@ -765,9 +765,10 @@ impl Renderer {
                     let dy = (y0 as f32 - z.y as f32) * self.cell_h + (my - py);
                     (dx.clamp(-1.5 * self.cell_w, 1.5 * self.cell_w), dy.clamp(-1.5 * self.cell_h, 1.5 * self.cell_h))
                 });
-                if let Some((dx, dy)) = shift {
-                    moves[pi] = Some((r, dx, dy));
-                }
+                // always (not only while dragged): the rows through it are cut at its edges, so glyphs wider
+                // than their cell neither reach out of it nor into it from the text beside it
+                let (sdx, sdy) = shift.unwrap_or((0.0, 0.0));
+                moves[pi] = Some((r, sdx, sdy));
                 // docked at the last column or row: out to the window's edge (cells rarely fill it)
                 let edge = 4.0;
                 if z.x + z.w >= p.frame.cols {
