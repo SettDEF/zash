@@ -791,7 +791,12 @@ impl Renderer {
                 let shift = self.float_drag.zip(self.pointer).filter(|((_, _, id, _, _, w, h), _)| *id == z.id && *w == z.w && *h == z.h).filter(|_| dragging).map(|((px, py, _, x0, y0, _, _), (mx, my))| {
                     let dx = (x0 as f32 - z.x as f32) * self.cell_w + (mx - px);
                     let dy = (y0 as f32 - z.y as f32) * self.cell_h + (my - py);
-                    (dx.clamp(-1.5 * self.cell_w, 1.5 * self.cell_w), dy.clamp(-1.5 * self.cell_h, 1.5 * self.cell_h))
+                    // never out of the window: as far as the pane's edges (none past an edge it is docked at,
+                    // which it is stretched to already)
+                    let right = if z.x + z.w >= p.frame.cols { 0.0 } else { (p.x + p.w - (r[0] + r[2])).max(0.0) };
+                    let down = if z.y + z.h >= p.frame.rows.len() { 0.0 } else { (p.y + p.h - (r[1] + r[3])).max(0.0) };
+                    let (left, up) = ((r[0] - p.x).max(0.0), (r[1] - p.y.max(self.top)).max(0.0));
+                    (dx.clamp(-1.5 * self.cell_w, 1.5 * self.cell_w).clamp(-left, right), dy.clamp(-1.5 * self.cell_h, 1.5 * self.cell_h).clamp(-up, down))
                 });
                 // always (not only while dragged): the rows through it are cut at its edges, so glyphs wider
                 // than their cell neither reach out of it nor into it from the text beside it
