@@ -474,12 +474,15 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                     }
                     Found::Fx(body) => {
                         // the effect rides the cells' hyperlink: it stays on them through scrolling,
-                        // scrollback and resizing, and ends where the run ends
-                        use alacritty_terminal::vte::ansi::{Handler, Hyperlink};
-                        match crate::fx::Escape::parse(&body) {
-                            crate::fx::Escape::Start(uri) => t.set_hyperlink(Some(Hyperlink { id: None, uri })),
-                            crate::fx::Escape::End => t.set_hyperlink(None),
-                        }
+                        // scrollback and resizing, and ends where the run ends. Given to the parser as
+                        // OSC 8, in order with the text: inside a synchronized update (?2026) the parser
+                        // holds the text back, and a link set on the terminal directly had come and
+                        // gone before its text arrived (zett's drawn help marks, 2026-10-21)
+                        let osc = match crate::fx::Escape::parse(&body) {
+                            crate::fx::Escape::Start(uri) => format!("\x1b]8;;{uri}\x1b\\"),
+                            crate::fx::Escape::End => "\x1b]8;;\x1b\\".to_string(),
+                        };
+                        parser.advance(&mut *t, osc.as_bytes());
                         continue;
                     }
                     Found::WebPin(kind, body) => {
