@@ -32,6 +32,8 @@ pub struct Graphics {
     pub generation: u64,
     /// web areas (OSC 7733;web), by the id their placement carries
     pub webs: HashMap<u32, Arc<crate::web::View>>,
+    /// Lottie animations (OSC 7733;anim, anim.rs), by the id their placement carries
+    pub anims: HashMap<u32, Arc<crate::anim::Anim>>,
     /// a web area that asked for the keyboard (zash --web)
     pub autofocus: Option<u32>,
     /// web areas a multiplexer (zeit) pins to screen cells: their rect (x, y, w, h) while
@@ -312,6 +314,13 @@ impl Graphics {
     pub fn add_web(&mut self, view: Arc<crate::web::View>, at: (usize, usize), cols: usize, rows: usize) {
         self.places.push(Placement { img: view.id, line: at.0, col: at.1, cols, rows });
         self.webs.insert(view.id, view);
+        self.generation += 1;
+    }
+
+    /// An animation at the cursor: `cols`×`rows` cells showing its frames.
+    pub fn add_anim(&mut self, a: Arc<crate::anim::Anim>, at: (usize, usize), cols: usize, rows: usize) {
+        self.places.push(Placement { img: a.id, line: at.0, col: at.1, cols, rows });
+        self.anims.insert(a.id, a);
         self.generation += 1;
     }
 

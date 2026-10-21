@@ -4,3 +4,5 @@ scribble-1  scribble.bytes   24x6    0.6     the loop half drawn
 scribble-2  scribble.bytes   24x6    3.0     the loop done, around the word, ends apart
 marks-1     marks.bytes      40x14   0.2     every mark part drawn
 marks-2     marks.bytes      40x14   3.0     every mark done
+anim-0      anim.bytes       30x8    0.0     a Lottie square, still, in the accent colour
+anim-1      anim.bytes       30x8    0.5     the square turned (a quarter of its ease)

@@ -1568,6 +1568,12 @@ impl Frame {
                     let generation = v.generation.load(std::sync::atomic::Ordering::Relaxed);
                     self.images.push(ImageView { img, live: Some((p.img as u64 | 1 << 40, generation)), row, col: p.col, cols: p.cols, rows: p.rows });
                 }
+            } else if let Some(a) = g.anims.get(&p.img) {
+                let frame = a.frame.lock().unwrap().clone();
+                if let Some(img) = frame {
+                    let generation = a.generation.load(std::sync::atomic::Ordering::Relaxed);
+                    self.images.push(ImageView { img, live: Some((p.img as u64 | 1 << 40, generation)), row, col: p.col, cols: p.cols, rows: p.rows });
+                }
             } else if let Some(img) = g.images.get(&p.img) {
                 self.images.push(ImageView { img: img.clone(), live: None, row, col: p.col, cols: p.cols, rows: p.rows });
             }

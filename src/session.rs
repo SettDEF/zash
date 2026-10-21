@@ -135,6 +135,8 @@ pub enum Found {
     Graphics(String),
     /// a web area: OSC 7733;web;rows=N;url=…
     Web(String),
+    /// a Lottie animation: OSC 7733;anim;file=…;rows=N (anim.rs)
+    Anim(String),
     /// a web area pinned to screen cells by a multiplexer: webrect, webhide or webclose, and the rest
     WebPin(String, String),
     /// keys a program wants for itself: OSC 7733;keys;all|none|claim=…|release=…
@@ -277,6 +279,8 @@ impl MarkScanner {
                 out.push((at, Found::WebPin(kind.to_string(), rest.to_string())));
             } else if let Some(w) = body.strip_prefix("7733;web;") {
                 out.push((at, Found::Web(w.to_string())));
+            } else if let Some(a) = body.strip_prefix("7733;anim;") {
+                out.push((at, Found::Anim(a.to_string())));
             } else if let Some(list) = body.strip_prefix("7733;rows;").or_else(|| (body == "7733;rows").then_some("")) {
                 out.push((at, Found::Rows(UiRow::parse_list(list))));
             } else if let Some(sock) = body.strip_prefix("7733;nvim;") {
@@ -507,6 +511,32 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                                 g.add_web(v, at, cols, rows);
                             }
                         }
+                        continue;
+                    }
+                    Found::Anim(body) => {
+                        let Some(ask) = crate::anim::parse(&body, &crate::config::Palette::load()) else { continue };
+                        let c = match crate::anim::load(&ask.file) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!("zash: anim: {e}");
+                                continue;
+                            }
+                        };
+                        let at = (t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize, t.grid().cursor.point.column.0);
+                        let (cw, ch) = *cell_px.lock().unwrap();
+                        // as wide as its shape needs at that height, unless told; never past the line
+                        let fit = ((ask.rows as f32 * ch) * (c.width as f32 / c.height.max(1) as f32) / cw.max(1.0)).ceil() as usize;
+                        let cols = ask.cols.unwrap_or(fit).clamp(1, t.grid().columns().saturating_sub(at.1).max(1));
+                        let id = graphics.lock().unwrap().next_web_id();
+                        let wl = listener.clone();
+                        let wake: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                            use alacritty_terminal::event::EventListener;
+                            wl.send_event(alacritty_terminal::event::Event::Wakeup);
+                        });
+                        let a = crate::anim::Anim::start(id, c, (cols as f32 * cw) as u32, (ask.rows as f32 * ch) as u32, &ask, wake);
+                        graphics.lock().unwrap().add_anim(a, at, cols, ask.rows);
+                        // below it, as after an image
+                        parser.advance(&mut *t, "\n".repeat(ask.rows).as_bytes());
                         continue;
                     }
                     Found::Query => {

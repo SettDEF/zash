@@ -84,7 +84,7 @@ fn now_ms() -> u64 {
     if frozen().is_some() { 0 } else { epoch().elapsed().as_millis() as u64 }
 }
 
-fn frozen() -> Option<f32> {
+pub(crate) fn frozen() -> Option<f32> {
     static F: OnceLock<Option<f32>> = OnceLock::new();
     *F.get_or_init(|| std::env::var("ZASH_FX_AT").ok().and_then(|s| s.parse::<f32>().ok()).filter(|t| t.is_finite() && *t >= 0.0))
 }

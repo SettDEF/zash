@@ -129,9 +129,16 @@ it), in the theme's colours, and plain text in every other terminal.
    - [x] frames tested headless at set times against kept images: scripts/visual.sh (tests/visual:
      cases, bytes, images; the built-in look, no user theme; --update keeps new ones); proven to fail
      on a change (2.2 → 1.8 turns)
-2. **Pictures and Lottie** — Kitty images exist (`graphics.rs`); add vello + velato for SVG and Lottie
-   with named slots (text, colour from the theme); `zash anim check` (what cannot play), `zash anim
-   play file --text Buffers` (preview with a scrubber); EffectCraft exports with `effectcraft-cli`.
+2. **Pictures and Lottie** — Kitty images exist (`graphics.rs`).
+   - [x] Lottie (2026-10-21, `src/anim.rs`): velato reads it, vello_cpu draws each frame on the CPU
+     (velato 0.12 is tied to vello 0.10 / wgpu 29, zash is on wgpu 30: its RenderSink drawn onto
+     vello_cpu instead, no second GPU stack); OSC 7733;anim;file=…;rows=N;loop;speed;color.RRGGBB=
+     accent|fg|red…|hex (theme colours swapped in); a thread per animation, at most 30 frames a
+     second, stopping when done or gone; `zash anim check` (size, length, what will not play: text
+     layers, pictures, effects, expressions), `zash anim play file --rows 4 --color ff0000=accent`;
+     visual tests anim-0/anim-1 (the frozen clock drives it too)
+   - [ ] text slots (the program's text drawn in the animation), SVG (VectorCraft), a scrubber in
+     `zash anim play`, EffectCraft exports with `effectcraft-cli`; vello on the GPU once velato moves on
 3. **Interaction** — hover and click on what is drawn, named states (idle, hover, active, done) with
    smooth changes, events back to the program, Tab and Enter reach everything.
 4. **Widgets** — button, progress, table, list, input on the same layer; `zash ui …` for scripts.

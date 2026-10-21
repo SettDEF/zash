@@ -19,6 +19,7 @@ mod watchdog;
 mod cli;
 mod config;
 mod copy;
+mod anim;
 mod ink;
 mod pen;
 mod desktop;
@@ -145,6 +146,50 @@ fn main() {
     }
 
     // --desktop: on the wallpaper, click-through ([desktop] in the settings); -- CMD runs CMD in it
+    // zash anim check FILE · zash anim play FILE [--rows N] [--loop N] [--speed X] [--color RRGGBB=name]…
+    if matches!(args.first().map(String::as_str), Some("anim")) {
+        let (sub, file) = (args.get(1).map(String::as_str), args.get(2));
+        let code = match (sub, file) {
+            (Some("check"), Some(f)) => {
+                let json: serde_json::Value = match std::fs::read(f).ok().and_then(|d| serde_json::from_slice(&d).ok()) {
+                    Some(j) => j,
+                    None => { eprintln!("zash: {f}: not a Lottie file (JSON)"); std::process::exit(1) }
+                };
+                match anim::load(f) {
+                    Err(e) => { eprintln!("zash: {e}"); 1 }
+                    Ok(c) => {
+                        println!("{f}: {}×{}, {} frames at {} a second ({:.1} s)", c.width, c.height, (c.frames.end - c.frames.start) as i64, c.frame_rate, (c.frames.end - c.frames.start) / c.frame_rate.max(1.0));
+                        let issues = anim::check(&json);
+                        for i in &issues { println!("  · {i}"); }
+                        if issues.is_empty() { println!("  everything in it plays"); }
+                        0
+                    }
+                }
+            }
+            (Some("play"), Some(f)) => {
+                // the escape for this terminal: zash draws it; elsewhere it is simply skipped
+                let path = std::fs::canonicalize(f).map(|p| p.display().to_string()).unwrap_or(f.clone());
+                let mut body = format!("file={path}");
+                let mut it = args[3..].iter();
+                while let Some(a) = it.next() {
+                    let v = it.next().cloned().unwrap_or_default();
+                    match a.as_str() {
+                        "--rows" => body.push_str(&format!(";rows={v}")),
+                        "--cols" => body.push_str(&format!(";cols={v}")),
+                        "--loop" => body.push_str(&format!(";loop={v}")),
+                        "--speed" => body.push_str(&format!(";speed={v}")),
+                        "--color" => if let Some((from, to)) = v.split_once('=') { body.push_str(&format!(";color.{}={to}", from.trim_start_matches('#'))) },
+                        other => { eprintln!("zash anim play: unknown {other}"); std::process::exit(2) }
+                    }
+                }
+                if !body.contains(";rows=") { body.push_str(";rows=4"); }
+                print!("\x1b]7733;anim;{body}\x1b\\");
+                0
+            }
+            _ => { eprintln!("zash anim check FILE · zash anim play FILE [--rows N] [--cols N] [--loop N] [--speed X] [--color RRGGBB=accent]"); 2 }
+        };
+        std::process::exit(code);
+    }
     if matches!(args.first().map(String::as_str), Some("--desktop" | "desktop")) {
         if args.iter().any(|a| a == "-h" || a == "--help") {
             return cli::print(cli::DESKTOP_HELP);
