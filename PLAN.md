@@ -136,6 +136,13 @@ it), in the theme's colours, and plain text in every other terminal.
    fonts for titles.
 6. **Recording, pen, made by the agent, sound** — video/GIF of what is drawn (tinct-cast), the Z13 pen
    as vector strokes, effects written by the agent from a sentence, optional small sounds.
+   **The pen** (2026-10-21): winit 0.30 has no pen events, so zash binds the Wayland tablet protocol
+   (zwp_tablet_manager_v2, already in wayland-protocols' unstable set) on its own connection, as the
+   desktop mode does; strokes (points with pressure, tilt, rotation) are drawn with fx.rs's pen and kept
+   as vectors attached to the cells they were drawn over (scroll, resize, scrollback, saved with a
+   session); `[pen]` in zash.toml (on/off, colour, width from pressure, eraser end erases, a button
+   clears, smoothing); zeit draws over panes, zett keeps handwriting and sketches in notes. The pen's
+   own feel (curves, buttons, profiles, plugins) comes from Knurl's pen layer (knurl PLAN, M11).
 Always: under 2 ms a frame, nothing drawn while nothing moves, paused when hidden, slower on battery,
 reduced motion, no flashing, limits on size and time, graphics from SSH limited by default.
 
