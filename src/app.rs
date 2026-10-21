@@ -1295,7 +1295,8 @@ impl App {
                 let pal = if s.reverse.load(std::sync::atomic::Ordering::Relaxed) { self.cfg.palette.reversed() } else { self.cfg.palette.clone() };
                 // the zfloat now: strokes drawn on it are drawn where it is
                 let float = s.graphics.lock().unwrap().float.as_ref().map(|z| (z.id, z.x, z.y));
-                let f = Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &s.ui_rows.lock().unwrap()).with_images(&t, &s.graphics.lock().unwrap()).with_under(&s.graphics.lock().unwrap(), &pal).with_ink(&t, &s.ink.lock().unwrap(), float);
+                // the graphics locked once: a second lock in the same statement waits for the first forever
+                let f = { let g = s.graphics.lock().unwrap(); Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &s.ui_rows.lock().unwrap()).with_images(&t, &g).with_under(&g, &pal).with_ink(&t, &s.ink.lock().unwrap(), float) };
                 if id == tab.focus { f.with_scroll(&t, &pal, scroll_px, cell_h) } else { f }
             };
             if id == tab.focus {
