@@ -408,7 +408,7 @@ pub struct Renderer {
     /// (the shader and the rectangle index it is drawn at, between the panel's frame and its cells)
     pub zfloat_shaders: crate::config::ZfloatShaders,
     shaders: crate::panel_shader::Shaders,
-    panel_shader: Option<(std::path::PathBuf, u32)>,
+    panel_shader: Option<(crate::panel_shader::Choice, u32)>,
     format: wgpu::TextureFormat,
 }
 
@@ -1731,7 +1731,7 @@ impl Images {
 
 /// The rectangles under the text, with a zfloat's shader panel drawn in their midst (between
 /// its frame and the cells inside it). Fields, not the renderer: the blur stage borrows it.
-fn draw_rects(rects: &Rects, shaders: &crate::panel_shader::Shaders, panel: &Option<(std::path::PathBuf, u32)>, pass: &mut wgpu::RenderPass) {
+fn draw_rects(rects: &Rects, shaders: &crate::panel_shader::Shaders, panel: &Option<(crate::panel_shader::Choice, u32)>, pass: &mut wgpu::RenderPass) {
     match panel.as_ref().and_then(|(path, at)| shaders.loaded(path).map(|s| (s, *at))) {
         Some((shader, at)) => {
             rects.draw_range(pass, 0, at);

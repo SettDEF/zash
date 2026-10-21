@@ -395,17 +395,19 @@ struct ZfloatFile {
     border: Option<String>,
     shader: Option<String>,
     shaders: Option<std::collections::HashMap<String, String>>,
+    /// options per shader ("ps3/wave" → speed = 0.8), over its package's defaults (pack.toml)
+    shader_options: Option<std::collections::HashMap<String, std::collections::HashMap<String, f64>>>,
 }
 
 /// Panel shaders (panel_shader.rs): one for every zfloat, and one per title on top.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ZfloatShaders {
-    pub default: Option<PathBuf>,
-    pub by_title: std::collections::HashMap<String, PathBuf>,
+    pub default: Option<crate::panel_shader::Choice>,
+    pub by_title: std::collections::HashMap<String, crate::panel_shader::Choice>,
 }
 
 impl ZfloatShaders {
-    pub fn for_title(&self, title: &str) -> Option<&PathBuf> {
+    pub fn for_title(&self, title: &str) -> Option<&crate::panel_shader::Choice> {
         self.by_title.get(title).or(self.default.as_ref())
     }
 }
@@ -660,7 +662,9 @@ scope = "all"
 # through) and its frame: "panel" (its own colour), "accent" (the cursor colour while it
 # has the keyboard) or "none".
 # shader: a GLSL file drawn as the panel (Shadertoy style: mainImage, iTime, iResolution, plus
-# iPanel, iAccent, iFocus); [zfloat.shaders] gives one per title, e.g. Claude = "~/x.glsl".
+# iPanel, iAccent, iFocus, iOrigin and iScreen for a camera-like scene, iMonth); [zfloat.shaders]
+# gives one per title, e.g. Claude = "~/x.glsl", or a package's: Claude = "ps3/wave" (in
+# ~/.config/zash/shaders/ps3, its options in pack.toml); [zfloat.shader_options."ps3/wave"] sets them.
 [zfloat]
 opacity = 0.6
 border = "panel"
@@ -876,9 +880,15 @@ impl Config {
         if let Some([w, h]) = f.float.and_then(|f| f.size) { c.float_size = (w.max(200), h.max(120)); }
         if let Some(z) = f.zfloat {
             if let Some(v) = z.opacity { c.zfloat.opacity = v.clamp(0.0, 1.0); }
-            let path = |s: &str| PathBuf::from(s.strip_prefix("~/").map(|r| format!("{}/{r}", std::env::var("HOME").unwrap_or_default())).unwrap_or_else(|| s.to_string()));
-            c.zfloat_shaders.default = z.shader.as_deref().filter(|s| !s.is_empty()).map(path);
-            c.zfloat_shaders.by_title = z.shaders.unwrap_or_default().iter().map(|(k, v)| (k.clone(), path(v))).collect();
+            // "ps3/wave" (a package's shader) or a path, with its options from [zfloat.shader_options]
+            let all = z.shader_options.unwrap_or_default();
+            let pick = |s: &str| {
+                let mut o: Vec<(String, String)> = all.get(s).map(|m| m.iter().map(|(k, v)| (k.clone(), v.to_string())).collect()).unwrap_or_default();
+                o.sort();
+                crate::panel_shader::Choice::resolve(s, o)
+            };
+            c.zfloat_shaders.default = z.shader.as_deref().filter(|s| !s.is_empty()).map(pick);
+            c.zfloat_shaders.by_title = z.shaders.unwrap_or_default().iter().map(|(k, v)| (k.clone(), pick(v))).collect();
             match z.border.as_deref() {
                 Some("panel") | Some("same") => c.zfloat.border = ZfloatBorder::Panel,
                 Some("accent") => c.zfloat.border = ZfloatBorder::Accent,
