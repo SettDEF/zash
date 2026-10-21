@@ -92,6 +92,10 @@ impl ZUnder {
 /// Where a float is (cells, frame included), whether it has the keyboard, its name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ZFloat {
+    /// the shader the multiplexer names for it (zeit's z.zfloat{shader=}), over zash.toml's; "none": plain
+    pub shader: Option<String>,
+    /// how long a change of its shader's preset morphs (seconds), over zash.toml's
+    pub morph: Option<f32>,
     /// the multiplexer's number for it (pen strokes on it keep to it)
     pub id: u64,
     /// the preset, hide and close buttons (a zfloat's settings can leave them out)
@@ -298,7 +302,7 @@ impl Graphics {
             let (head, title) = body.split_once(";title=").unwrap_or((body, ""));
             let kv: HashMap<&str, &str> = head.split(';').filter_map(|p| p.split_once('=')).collect();
             let n = |k: &str| kv.get(k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-            self.float = Some(ZFloat { id: kv.get("id").and_then(|v| v.parse().ok()).unwrap_or(0), bg: kv.get("bg").and_then(|h| crate::config::Rgb::hex(h)), buttons: kv.get("buttons") != Some(&"0"), x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
+            self.float = Some(ZFloat { shader: kv.get("shader").filter(|s| !s.is_empty()).map(|s| s.to_string()), morph: kv.get("morph").and_then(|v| v.parse().ok()), id: kv.get("id").and_then(|v| v.parse().ok()).unwrap_or(0), bg: kv.get("bg").and_then(|h| crate::config::Rgb::hex(h)), buttons: kv.get("buttons") != Some(&"0"), x: n("x"), y: n("y"), w: n("w"), h: n("h"), focus: n("focus") == 1, title: title.to_string() });
             self.generation += 1;
             return;
         }

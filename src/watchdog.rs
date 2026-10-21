@@ -15,8 +15,7 @@ fn now_ms() -> u64 {
 }
 
 fn log(line: &str) {
-    let Some(home) = std::env::var_os("HOME") else { return };
-    let dir = std::path::PathBuf::from(home).join(".local/state/zash");
+    let Some(dir) = state_dir() else { return };
     let _ = std::fs::create_dir_all(&dir);
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("zash.log")) {
@@ -67,8 +66,9 @@ pub fn start() {
 mod tests {
     #[test]
     fn a_stall_is_logged() {
+        // its own folder (not HOME: the other tests, running alongside, read HOME)
         let home = std::env::temp_dir().join(format!("zash-watchdog-{}", std::process::id()));
-        unsafe { std::env::set_var("HOME", &home) };
+        unsafe { std::env::set_var("ZASH_STATE_DIR", home.join(".local/state/zash")) };
         super::start();
         {
             let _b = super::busy("testing a stall");
@@ -88,8 +88,8 @@ mod tests {
 /// Where every thread is, written beside the log (gdb, if there is one): the next freeze
 /// tells its own cause. ptrace is limited to parents here, so gdb is allowed in just for this.
 fn stacks() {
-    let Some(home) = std::env::var_os("HOME") else { return };
-    let out = std::path::PathBuf::from(home).join(format!(".local/state/zash/stall-{}.txt", std::process::id()));
+    let Some(dir) = state_dir() else { return };
+    let out = dir.join(format!("stall-{}.txt", std::process::id()));
     const PR_SET_PTRACER: libc::c_int = 0x5961_6d61;
     unsafe { libc::prctl(PR_SET_PTRACER, libc::c_ulong::MAX, 0, 0, 0) };
     let r = std::process::Command::new("gdb")
@@ -102,4 +102,9 @@ fn stacks() {
         let _ = std::fs::write(&out, o.stdout);
         log(&format!("thread stacks: {}", out.display()));
     }
+}
+
+/// ~/.local/state/zash (ZASH_STATE_DIR instead, for tests).
+fn state_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("ZASH_STATE_DIR").map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state/zash")))
 }

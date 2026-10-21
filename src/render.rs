@@ -396,6 +396,8 @@ pub struct Renderer {
     /// cursor animation: time constant in ms (0: jumps), and the trailing smear
     pub cursor_ms: f32,
     pub cursor_trail: bool,
+    /// where the zfloat was last frame (id, pixel origin): when it moves, the cursor moves with it at once
+    float_at: Option<(u64, (f32, f32))>,
     /// background opacity (pre-multiplied into the clear colour)
     pub opacity: f32,
     /// where the mouse is (pixels), for hover on what zash draws itself (zfloat buttons)
@@ -415,7 +417,7 @@ pub struct Renderer {
     /// (the shader and the rectangle index it is drawn at, between the panel's frame and its cells)
     pub zfloat_shaders: crate::config::ZfloatShaders,
     shaders: crate::panel_shader::Shaders,
-    panel_shader: Option<(crate::panel_shader::Choice, u32)>,
+    panel_shader: Option<(std::path::PathBuf, u32)>,
     format: wgpu::TextureFormat,
 }
 
@@ -466,6 +468,7 @@ impl Renderer {
             pad: 0.0,
             cursor_ms: cfg.cursor_ms,
             cursor_trail: cfg.cursor_trail,
+            float_at: None,
             opacity: cfg.opacity,
             pointer: None,
             float_drag: None,
@@ -729,6 +732,7 @@ impl Renderer {
         let mut fx_moving = false;
         let mut fx_glyphs: Vec<(usize, Vec<crate::fx_draw::Glyph>)> = Vec::new();
         self.panel_shader = None;
+        self.shaders.tick();
         self.unders.clear();
         let mut rects = Vec::new();
         let mut over = Vec::new();
@@ -811,15 +815,18 @@ impl Renderer {
                     rects.push(Rect { xywh: [r[0] - 1.0, r[1] - 1.0, r[2] + 2.0, r[3] + 2.0], color: edge, p: [rad + 1.0, 0.0] });
                 }
                 // the panel: its shader if the title has one that compiles, else its colour
-                let shader = self.zfloat_shaders.for_title(&z.title).filter(|_| self.fx.shaders_on()).cloned()
-                    .filter(|path| self.shaders.get(device, self.format, path).is_some());
+                // the shader zeit names for it, else zash.toml's for its title; a preset's values morph in
+                let name = z.shader.clone().or_else(|| self.zfloat_shaders.for_title(&z.title).cloned()).filter(|n| n != "none" && self.fx.shaders_on());
+                let shader = name.map(|n| { let o = self.zfloat_shaders.options.get(&n).cloned().unwrap_or_default(); self.shaders.resolve(&n, o) })
+                    .filter(|c| self.shaders.get(device, self.format, &c.path).is_some());
                 match shader {
-                    Some(path) => {
+                    Some(choice) => {
                         let place = crate::panel_shader::Place { rect: r, screen: [width as f32, height as f32], panel: { let mut c = z.bg.unwrap_or(p.frame.bar_bg).f32(); c[3] = 1.0; c }, accent: p.frame.cursor_color.f32(), focus: z.focus, opacity: look.opacity.max(0.05), radius: rad };
-                        if let Some(s) = self.shaders.loaded(&path) {
-                            s.update(queue, &place, fx_now);
+                        let (values, phase) = self.shaders.values(z.id, &choice, z.morph.unwrap_or(self.zfloat_shaders.morph), fx_now);
+                        if let Some(s) = self.shaders.loaded(&choice.path) {
+                            s.update(queue, &place, fx_now, phase, &values);
                         }
-                        self.panel_shader = Some((path, rects.len() as u32));
+                        self.panel_shader = Some((choice.path, rects.len() as u32));
                         fx_moving = true;
                     }
                     None => rects.push(Rect { xywh: r, color: panel, p: [rad, 0.0] }),
@@ -1201,6 +1208,19 @@ impl Renderer {
         };
         let now = std::time::Instant::now();
         let a = self.anim.get_or_insert(CursorAnim { head: t, tail: t, target: t, last: now });
+        // the zfloat moved (dragged, or zeit moved it): the cursor goes with it, no glide; only its own
+        // moves inside it glide
+        let fz = frame.float.as_ref().map(|z| (z.id, (ox + z.x as f32 * self.cell_w, oy + z.y as f32 * self.cell_h)));
+        if let (Some((id, p)), Some((id0, p0))) = (fz, self.float_at) {
+            if id == id0 && p != p0 {
+                let d = (p.0 - p0.0, p.1 - p0.1);
+                for q in [&mut a.head, &mut a.tail, &mut a.target] {
+                    q.0 += d.0;
+                    q.1 += d.1;
+                }
+            }
+        }
+        self.float_at = fz;
         if a.target != t {
             // a far jump (another screen, a distant line) snaps instead of flying across
             if (t.1 - a.head.1).abs() > self.cell_h * 6.0 {
@@ -1813,7 +1833,7 @@ impl Images {
 
 /// The rectangles under the text, with a zfloat's shader panel drawn in their midst (between
 /// its frame and the cells inside it). Fields, not the renderer: the blur stage borrows it.
-fn draw_rects(rects: &Rects, shaders: &crate::panel_shader::Shaders, panel: &Option<(crate::panel_shader::Choice, u32)>, pass: &mut wgpu::RenderPass) {
+fn draw_rects(rects: &Rects, shaders: &crate::panel_shader::Shaders, panel: &Option<(std::path::PathBuf, u32)>, pass: &mut wgpu::RenderPass) {
     match panel.as_ref().and_then(|(path, at)| shaders.loaded(path).map(|s| (s, *at))) {
         Some((shader, at)) => {
             rects.draw_range(pass, 0, at);

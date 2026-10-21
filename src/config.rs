@@ -209,7 +209,7 @@ impl Default for Config {
             cursor: CursorConf::default(),
             popup: PopupLook::default(),
             zfloat: ZfloatLook::default(),
-            zfloat_shaders: ZfloatShaders::default(),
+            zfloat_shaders: ZfloatShaders { morph: 1.5, ..Default::default() },
             fx: crate::fx::Settings::default(),
             copy: crate::copy::Settings::default(),
             pen: PenSettings::default(),
@@ -397,17 +397,24 @@ struct ZfloatFile {
     shaders: Option<std::collections::HashMap<String, String>>,
     /// options per shader ("ps3/wave" → speed = 0.8), over its package's defaults (pack.toml)
     shader_options: Option<std::collections::HashMap<String, std::collections::HashMap<String, f64>>>,
+    /// seconds a change of preset morphs
+    morph: Option<f32>,
 }
 
 /// Panel shaders (panel_shader.rs): one for every zfloat, and one per title on top.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ZfloatShaders {
-    pub default: Option<crate::panel_shader::Choice>,
-    pub by_title: std::collections::HashMap<String, crate::panel_shader::Choice>,
+    /// names as written ("ps3/wave" or a path)
+    pub default: Option<String>,
+    pub by_title: std::collections::HashMap<String, String>,
+    /// [zfloat.shader_options."name"]
+    pub options: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// how long a change of preset morphs (seconds; [zfloat] morph)
+    pub morph: f32,
 }
 
 impl ZfloatShaders {
-    pub fn for_title(&self, title: &str) -> Option<&crate::panel_shader::Choice> {
+    pub fn for_title(&self, title: &str) -> Option<&String> {
         self.by_title.get(title).or(self.default.as_ref())
     }
 }
@@ -881,14 +888,14 @@ impl Config {
         if let Some(z) = f.zfloat {
             if let Some(v) = z.opacity { c.zfloat.opacity = v.clamp(0.0, 1.0); }
             // "ps3/wave" (a package's shader) or a path, with its options from [zfloat.shader_options]
-            let all = z.shader_options.unwrap_or_default();
-            let pick = |s: &str| {
-                let mut o: Vec<(String, String)> = all.get(s).map(|m| m.iter().map(|(k, v)| (k.clone(), v.to_string())).collect()).unwrap_or_default();
+            c.zfloat_shaders.options = z.shader_options.unwrap_or_default().into_iter().map(|(k, m)| {
+                let mut o: Vec<(String, String)> = m.into_iter().map(|(n, v)| (n, v.to_string())).collect();
                 o.sort();
-                crate::panel_shader::Choice::resolve(s, o)
-            };
-            c.zfloat_shaders.default = z.shader.as_deref().filter(|s| !s.is_empty()).map(pick);
-            c.zfloat_shaders.by_title = z.shaders.unwrap_or_default().iter().map(|(k, v)| (k.clone(), pick(v))).collect();
+                (k, o)
+            }).collect();
+            c.zfloat_shaders.default = z.shader.filter(|s| !s.is_empty());
+            c.zfloat_shaders.by_title = z.shaders.unwrap_or_default();
+            if let Some(m) = z.morph { c.zfloat_shaders.morph = m.clamp(0.0, 30.0); }
             match z.border.as_deref() {
                 Some("panel") | Some("same") => c.zfloat.border = ZfloatBorder::Panel,
                 Some("accent") => c.zfloat.border = ZfloatBorder::Accent,
