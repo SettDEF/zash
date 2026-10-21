@@ -139,6 +139,8 @@ pub enum Found {
     Fx(String),
     /// DECSCNM: the whole screen in reverse video (light background), on or off
     Reverse(bool),
+    /// OSC 7733;q: a program asks what this zash can do (works over SSH, unlike TERM_PROGRAM)
+    Query,
     Popup(Option<Popup>),
 }
 
@@ -263,6 +265,8 @@ impl MarkScanner {
                 out.push((at, Found::PopupStyle(look.to_string())));
             } else if let Some(k) = body.strip_prefix("7733;keys;") {
                 out.push((at, Found::Keys(k.to_string())));
+            } else if body == "7733;q" {
+                out.push((at, Found::Query));
             } else if let Some(f) = body.strip_prefix("7733;fx;").or_else(|| (body == "7733;fx").then_some("")) {
                 out.push((at, Found::Fx(f.to_string())));
             } else if let Some((kind, rest)) = body.strip_prefix("7733;").and_then(|b| b.split_once(';')).filter(|(k, _)| matches!(*k, "webrect" | "webhide" | "webclose" | "zfloat" | "zfloatclose")) {
@@ -501,6 +505,11 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                         }
                         continue;
                     }
+                    Found::Query => {
+                        use alacritty_terminal::event::EventListener;
+                        listener.send_event(alacritty_terminal::event::Event::PtyWrite(crate::fx::capabilities()));
+                        continue;
+                    }
                     Found::Graphics(body) => {
                         let at = (t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize, t.grid().cursor.point.column.0);
                         let cell = *cell_px.lock().unwrap();
@@ -563,6 +572,16 @@ mod mark_tests {
         assert_eq!(out[1].1, Found::Popup(None));
         assert_eq!(Popup::parse("popup;0;1;a"), Some(Some(Popup { items: vec!["a".into()], sel: None, word: 1, line: None, col: None, row: None })));
         assert_eq!(Popup::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn a_program_can_ask_what_zash_can_do() {
+        let mut s = MarkScanner::default();
+        let out = s.scan(b"x\x1b]7733;q\x1b\\y\x1b]7733;qq\x07");
+        assert_eq!(out.len(), 1, "only the exact query");
+        assert_eq!(out[0].1, Found::Query);
+        let a = crate::fx::capabilities();
+        assert!(a.starts_with("\x1b]7733;zash;v=") && a.ends_with("\x1b\\") && a.contains("marks=scribble"));
     }
 
     #[test]

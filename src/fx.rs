@@ -9,7 +9,9 @@
 //!     Buffers   ESC ] 7733 ; fx ; end ST      (written, then a loop drawn round it by hand; it stays)
 //! ```
 //!
-//! A program knows it may send these when TERM_PROGRAM=zash (zash sets it, with TERM_PROGRAM_VERSION).
+//! A program knows it may send these when TERM_PROGRAM=zash (zash sets it, with TERM_PROGRAM_VERSION),
+//! or, over SSH too, by asking: `ESC ] 7733 ; q ST` is answered `ESC ] 7733 ; zash ; v=… ; fx=… ;
+//! marks=… ; images=kitty ST` (no answer within a moment: not zash).
 //! Unknown keys and values are ignored, so programs written for a newer zash still work here.
 
 use std::collections::HashMap;
@@ -60,6 +62,16 @@ impl Escape {
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Escape::Start(format!("{SCHEME}{id};{};{body}", now_ms()))
     }
+}
+
+/// The answer to OSC 7733;q: `ESC ] 7733 ; zash ; v=VERSION ; fx=…  ; marks=… ; images=kitty ST`.
+/// A program sends the query, reads the answer (or nothing, in another terminal, after a short
+/// wait) and knows what it may send. Over SSH too, where TERM_PROGRAM does not arrive.
+pub fn capabilities() -> String {
+    format!(
+        "\x1b]7733;zash;v={};fx=shimmer,pulse,fade,rainbow,typewriter,glow;marks=scribble,underline,strike,box,check,arrow,bracket;images=kitty\x1b\\",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 /// Seconds on the clock effects share (from zash's start). ZASH_FX_AT=SECONDS freezes it: every

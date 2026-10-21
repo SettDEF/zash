@@ -121,11 +121,14 @@ it), in the theme's colours, and plain text in every other terminal.
      wider and turned, the centre drifting, a superellipse that never runs over the text, the pen
      thin at both ends, which do not meet); one loop per word, the same every time; stays drawn
      without asking for frames; strokes drawn as dots in the rectangle pipeline (no new GPU code)
-   - [x] programs check TERM_PROGRAM=zash; [ ] a query that also works over SSH (XTGETTCAP or DA)
+   - [x] programs check TERM_PROGRAM=zash, or ask (over SSH too): OSC 7733;q is answered with the
+     version, the effects, the marks and images=kitty
    - [x] more marks on one pen (smooth strokes through a few points, wandering, tapered, pen lifts):
      underline, strike, box (sharp corners, overshoot), check, arrow (shaft + head), bracket
    - [x] ZASH_FX_AT=SECONDS freezes the effects clock: exact, repeatable captures
-   - [ ] frames tested headless at set times against kept images (zash --snapshot)
+   - [x] frames tested headless at set times against kept images: scripts/visual.sh (tests/visual:
+     cases, bytes, images; the built-in look, no user theme; --update keeps new ones); proven to fail
+     on a change (2.2 → 1.8 turns)
 2. **Pictures and Lottie** — Kitty images exist (`graphics.rs`); add vello + velato for SVG and Lottie
    with named slots (text, colour from the theme); `zash anim check` (what cannot play), `zash anim
    play file --text Buffers` (preview with a scrubber); EffectCraft exports with `effectcraft-cli`.

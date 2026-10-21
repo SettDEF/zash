@@ -1,0 +1,6 @@
+# name      bytes            size    at (s)  what it checks
+scribble-0  scribble.bytes   24x6    0.1     the word half written, no loop yet
+scribble-1  scribble.bytes   24x6    0.6     the loop half drawn
+scribble-2  scribble.bytes   24x6    3.0     the loop done, around the word, ends apart
+marks-1     marks.bytes      40x14   0.2     every mark part drawn
+marks-2     marks.bytes      40x14   3.0     every mark done
