@@ -405,6 +405,8 @@ pub struct Renderer {
     /// a zfloat dragged by its title: where the press was (pixels), its id, cell x, y, w, h then. It is
     /// drawn where the pointer puts it, to the pixel, while zeit moves it in cells
     pub float_drag: Option<(f32, f32, u64, usize, usize, usize, usize)>,
+    /// zeit has reported this drag (zunder): its end, not only zash's release, ends it
+    pub float_drag_seen: bool,
     anim: Option<CursorAnim>,
     /// text placement: centred in the leftover space, and moved by an offset (pixels)
     pub center: bool,
@@ -472,6 +474,7 @@ impl Renderer {
             opacity: cfg.opacity,
             pointer: None,
             float_drag: None,
+            float_drag_seen: false,
             anim: None,
             fx: crate::fx_draw::FxLayer::new(cfg.fx.clone()),
             zfloat_shaders: cfg.zfloat_shaders.clone(),
@@ -750,7 +753,14 @@ impl Renderer {
                 // under the text: a soft shadow, the edge (the accent when it has the keyboard), the panel
                 let mut r = [ox + z.x as f32 * self.cell_w, oy + z.y as f32 * self.cell_h, z.w as f32 * self.cell_w, z.h as f32 * self.cell_h];
                 // how far from its cell (at most a cell and a half: zeit catches up), its size unchanged (a move, not a resize)
-                let shift = self.float_drag.zip(self.pointer).filter(|((_, _, id, _, _, w, h), _)| *id == z.id && *w == z.w && *h == z.h).map(|((px, py, _, x0, y0, _, _), (mx, my))| {
+                // only while zeit says the drag goes on (it sends what is under the edge then): a release zash
+                // missed must not leave the zfloat following the pointer, its text over the cells beside it
+                let dragging = p.frame.under.as_ref().is_some_and(|(u, _)| *u == z.id);
+                if !dragging && self.float_drag.is_some_and(|d| d.2 == z.id) && p.frame.under.is_none() && self.float_drag_seen {
+                    self.float_drag = None;
+                }
+                self.float_drag_seen |= dragging;
+                let shift = self.float_drag.zip(self.pointer).filter(|((_, _, id, _, _, w, h), _)| *id == z.id && *w == z.w && *h == z.h).filter(|_| dragging).map(|((px, py, _, x0, y0, _, _), (mx, my))| {
                     let dx = (x0 as f32 - z.x as f32) * self.cell_w + (mx - px);
                     let dy = (y0 as f32 - z.y as f32) * self.cell_h + (my - py);
                     (dx.clamp(-1.5 * self.cell_w, 1.5 * self.cell_w), dy.clamp(-1.5 * self.cell_h, 1.5 * self.cell_h))
@@ -1211,8 +1221,11 @@ impl Renderer {
         // the zfloat moved (dragged, or zeit moved it): the cursor goes with it, no glide; only its own
         // moves inside it glide
         let fz = frame.float.as_ref().map(|z| (z.id, (ox + z.x as f32 * self.cell_w, oy + z.y as f32 * self.cell_h)));
+        let size = frame.float.as_ref().map(|z| (z.w as f32 * self.cell_w, z.h as f32 * self.cell_h)).unwrap_or_default();
         if let (Some((id, p)), Some((id0, p0))) = (fz, self.float_at) {
-            if id == id0 && p != p0 {
+            // (a cursor in the panes below stays where it is)
+            let inside = t.0 >= p.0 && t.0 < p.0 + size.0 && t.1 >= p.1 && t.1 < p.1 + size.1;
+            if id == id0 && p != p0 && inside {
                 let d = (p.0 - p0.0, p.1 - p0.1);
                 for q in [&mut a.head, &mut a.tail, &mut a.target] {
                     q.0 += d.0;

@@ -1756,6 +1756,7 @@ impl ApplicationHandler<ZEvent> for App {
                     }).flatten();
                     if let Some(g) = self.gpu.as_mut() {
                         g.renderer.float_drag = drag;
+                        g.renderer.float_drag_seen = false;
                     }
                 }
                 if self.app_mouse() {
