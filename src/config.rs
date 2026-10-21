@@ -351,6 +351,7 @@ impl CursorConf {
 struct CopyFile {
     unwrap: Option<String>,
     trim: Option<bool>,
+    paste_guard: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -653,8 +654,12 @@ shader = ""
 #         command pastes whole; lines ended on purpose (lists, short lines, code fences) stay apart.
 #         "off" copies the rows as they are.
 # trim:   drop spaces at line ends
+# paste_guard: before several lines are pasted, ask (Enter as is · J as one line · Esc cancel):
+#              "auto" when a shell is in front, "always" (inside zeit and full-screen programs too), "off".
+#              Ctrl+Shift+Alt+V always pastes as one line, without asking.
 unwrap = "smart"
 trim = true
+paste_guard = "auto"
 
 [fx]
 enabled = true
@@ -792,6 +797,11 @@ impl Config {
                 Some(other) => eprintln!("zash: [copy] unwrap = {other:?}: use \"smart\" or \"off\""),
             }
             if let Some(t) = x.trim { c.copy.trim = t; }
+            match x.paste_guard.as_deref() {
+                Some(g @ ("auto" | "always" | "off")) => c.copy.paste_guard = g.into(),
+                None => {}
+                Some(other) => eprintln!("zash: [copy] paste_guard = {other:?}: use \"auto\", \"always\" or \"off\""),
+            }
         }
         if let Some(d) = f.desktop {
             let k = &mut c.desktop;

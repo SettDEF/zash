@@ -97,6 +97,8 @@ struct App {
     glide_at: std::time::Instant,
     /// scrollback search (Ctrl+Shift+F) while it is open
     search: Option<crate::search::Search>,
+    /// several lines waiting to be pasted until the paste guard is answered (copy.rs)
+    paste_guard: Option<String>,
     /// `--float`: the window's size; its app id is "zash-float"
     float: Option<(u32, u32)>,
 }
@@ -106,7 +108,7 @@ pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::Pat
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None, float };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None, paste_guard: None, float };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -493,6 +495,34 @@ impl App {
         }
     }
 
+    /// Pastes, or holds several lines for the paste guard to ask about first ([copy] paste_guard).
+    fn paste(&mut self, text: String) {
+        let ask = match self.cfg.copy.paste_guard.as_str() {
+            "always" => true,
+            // a shell in front (a full-screen program, zeit included, handles pastes itself)
+            "auto" => !self.mode().contains(TermMode::ALT_SCREEN),
+            _ => false,
+        };
+        if ask && crate::copy::lines(&text) > 1 {
+            self.paste_guard = Some(text);
+            return;
+        }
+        let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
+        self.write(input::paste(&text, bracketed));
+    }
+
+    /// The paste guard's answer: Enter pastes as it is, J as one line, Esc (or anything else) drops it.
+    fn guard_key(&mut self, ev: &KeyEvent) {
+        let Some(text) = self.paste_guard.take() else { return };
+        let text = match &ev.logical_key {
+            Key::Named(NamedKey::Enter) => text,
+            Key::Character(c) if c.eq_ignore_ascii_case("j") => crate::copy::one_line(&text),
+            _ => return,
+        };
+        let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
+        self.write(input::paste(&text, bracketed));
+    }
+
     fn search_key(&mut self, ev: &KeyEvent, mods: Mods) {
         use alacritty_terminal::index::Direction;
         // fields directly (not self.sess()): the search is borrowed mutably at the same time
@@ -768,11 +798,7 @@ impl App {
             Action::Search => {
                 self.search = Some(crate::search::Search::default());
             }
-            Action::Paste => {
-                let text = clipboard_get(false);
-                let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
-                self.write(input::paste(&text, bracketed));
-            }
+            Action::Paste => self.paste(clipboard_get(false)),
             Action::Seq(list) => {
                 for a in list.clone() {
                     self.run(&a);
@@ -870,6 +896,9 @@ impl App {
         if self.web_focus.is_some() && self.web_key(ev) {
             return;
         }
+        if self.paste_guard.is_some() {
+            return self.guard_key(ev);
+        }
         if self.search.is_some() {
             return self.search_key(ev, mods);
         }
@@ -916,12 +945,17 @@ impl App {
                     }
                     "v" => {
                         let text = clipboard_get(false);
+                        // Ctrl+Shift+Alt+V: as one line, without asking (works inside zeit too)
+                        if mods.alt {
+                            let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
+                            self.write(input::paste(&crate::copy::one_line(&text), bracketed));
+                            return;
+                        }
                         if let Some(n) = self.pane().and_then(|p| p.nvim.as_ref()) {
                             n.paste(&text);
                             return;
                         }
-                        let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
-                        self.write(input::paste(&text, bracketed));
+                        self.paste(text);
                         return;
                     }
                     _ => {}
@@ -1166,6 +1200,8 @@ impl App {
                 frame.apply_cursor(&self.cfg.cursor, self.cfg.palette.cursor_fg);
                 if let Some(a) = &self.web_addr {
                     frame.bar = Some(format!("\u{f0ac}  {a}\u{258f}"));
+                } else if let Some(t) = &self.paste_guard {
+                    frame.bar = Some(format!("\u{f0ea}  Paste {} lines?   Enter as is · J as one line · Esc cancel", crate::copy::lines(t)));
                 } else if let Some(q) = &self.search {
                     frame.bar = Some(q.bar());
                 } else if self.prefix {
@@ -1618,11 +1654,7 @@ impl ApplicationHandler<ZEvent> for App {
                             }
                         }
                     }
-                    (MouseButton::Middle, true) => {
-                        let text = clipboard_get(true);
-                        let bracketed = self.mode().contains(TermMode::BRACKETED_PASTE);
-                        self.write(input::paste(&text, bracketed));
-                    }
+                    (MouseButton::Middle, true) => self.paste(clipboard_get(true)),
                     _ => {}
                 }
             }

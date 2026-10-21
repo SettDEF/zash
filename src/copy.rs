@@ -10,11 +10,13 @@ pub struct Settings {
     pub unwrap: bool,
     /// drop spaces at line ends
     pub trim: bool,
+    /// ask before several lines are pasted: "auto" at a shell prompt, "always", "off"
+    pub paste_guard: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { unwrap: true, trim: true }
+        Settings { unwrap: true, trim: true, paste_guard: "auto".into() }
     }
 }
 
@@ -84,10 +86,28 @@ mod tests {
     }
 
     #[test]
+    fn pasting_as_one_line_and_counting_lines() {
+        assert_eq!(one_line("  sudo cp a\n   /etc/b \n\n  && reload\n"), "sudo cp a /etc/b && reload");
+        assert_eq!(lines("one\ntwo\n"), 2, "a final line break is not a line");
+        assert_eq!(lines("one"), 1);
+    }
+
+    #[test]
     fn spaces_at_line_ends_go_and_off_means_off() {
         assert_eq!(tidy("a   \nb  ", &Settings::default()), "a\nb");
-        let off = Settings { unwrap: false, trim: false };
+        let off = Settings { unwrap: false, trim: false, ..Default::default() };
         let text = "  echo one two three four five six seven\n  eight";
         assert_eq!(tidy(text, &off), text);
     }
+}
+
+/// Several lines as one: each line's ends trimmed, joined with spaces (Ctrl+Shift+Alt+V, and
+/// "J" when the paste guard asks).
+pub fn one_line(text: &str) -> String {
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
+/// The lines a paste would send (a final line break does not count).
+pub fn lines(text: &str) -> usize {
+    text.trim_end_matches('\n').lines().count()
 }
