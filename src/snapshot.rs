@@ -41,14 +41,21 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
     if let Some(keys) = &o.keys {
         // give the program a moment to start, then type at a human-ish pace
         std::thread::sleep(Duration::from_millis(400));
-        let app_cursor = session.term.lock().mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR);
+        // the program's modes as they are when each run of keys goes (it may ask for them late)
+        let modes = || {
+            use alacritty_terminal::term::TermMode;
+            let m = *session.term.lock().mode();
+            let k = if m.contains(TermMode::DISAMBIGUATE_ESC_CODES) { crate::input::KITTY_DISAMBIGUATE } else { 0 } | if m.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) { crate::input::KITTY_ALL_KEYS } else { 0 };
+            (m.contains(TermMode::APP_CURSOR), k)
+        };
         // <Sleep:MS> pauses between keys (a program that needs time to get ready);
         // <Mouse:B;X;Y;M> sends one SGR mouse report whole (M press or motion, m release)
         let mut rest = keys.as_str();
         loop {
             let next = [rest.find("<Sleep:"), rest.find("<Mouse:")].into_iter().flatten().min();
             if let Some(i) = next.filter(|i| rest[*i..].starts_with("<Mouse:")) {
-                for b in crate::input::encode_notation(&rest[..i], app_cursor) {
+                let (app_cursor, kitty) = modes();
+                for b in crate::input::encode_notation_kitty(&rest[..i], app_cursor, kitty) {
                     session.write(b);
                     std::thread::sleep(Duration::from_millis(8));
                 }
@@ -63,7 +70,8 @@ pub fn capture(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
                 Some(i) => (&rest[..i], Some(&rest[i + 7..])),
                 None => (rest, None),
             };
-            for b in crate::input::encode_notation(now, app_cursor) {
+            let (app_cursor, kitty) = modes();
+            for b in crate::input::encode_notation_kitty(now, app_cursor, kitty) {
                 session.write(b);
                 std::thread::sleep(Duration::from_millis(8));
             }
@@ -152,6 +160,20 @@ pub fn render_png(frame: &Frame, cfg: &Config, path: &str) -> Result<(u32, u32),
     r.cursor_ms = 0.0;
     let pane = crate::render::PaneView { id: 0, x: 0.0, y: 0.0, w: width as f32, h: height as f32, frame, focused: true };
     r.render(&device, &queue, &view, width, height, &[pane]);
+    // ZASH_LAYERS_AT=MS / ZASH_LAYERS_GONE_AT=MS: the floats as MS after they came, or after they
+    // went (layers.rs), drawn again: pictures of the animation's frames
+    let env_ms = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
+    if let Some(ms) = env_ms("ZASH_LAYERS_AT") {
+        r.layer_anim.came_ago(ms, Instant::now());
+        r.render(&device, &queue, &view, width, height, &[crate::render::PaneView { id: 0, x: 0.0, y: 0.0, w: width as f32, h: height as f32, frame, focused: true }]);
+    }
+    if let Some(ms) = env_ms("ZASH_LAYERS_GONE_AT") {
+        r.layer_anim.went_ago(ms, Instant::now());
+        // the screen as it is once the float went: what was under it (here: the same cells; the
+        // copy drawn over them shows the fade)
+        r.layer_anim.none_this_frame = true;
+        r.render(&device, &queue, &view, width, height, &[crate::render::PaneView { id: 0, x: 0.0, y: 0.0, w: width as f32, h: height as f32, frame, focused: true }]);
+    }
     // ZASH_BENCH=SECONDS: keep drawing as the window would (only when an effect or shader asks for a
     // frame, at its rate), then report the frame times: what effects cost on this machine
     if let Some(secs) = std::env::var("ZASH_BENCH").ok().and_then(|s| s.parse::<f32>().ok()) {

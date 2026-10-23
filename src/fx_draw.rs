@@ -39,6 +39,8 @@ pub(crate) struct FxLayer {
     /// frames a second for effects; lowered when frames come out slow (old machines)
     fps: f32,
     slow: u32,
+    /// switched off by the budget guard: back on then, with the effect settings it had (enabled, shaders)
+    paused_until: Option<(Instant, bool, bool)>,
     /// when the next effect frame is wanted; None while nothing moves
     pub due: Option<Instant>,
 }
@@ -49,13 +51,14 @@ const SLOW_FRAME: Duration = Duration::from_millis(8);
 impl FxLayer {
     pub fn new(settings: Settings) -> FxLayer {
         let fps = settings.fps.clamp(1.0, 120.0);
-        FxLayer { settings, effects: HashMap::new(), glyphs: HashMap::new(), fps, slow: 0, due: None }
+        FxLayer { settings, effects: HashMap::new(), glyphs: HashMap::new(), fps, slow: 0, paused_until: None, due: None }
     }
 
     /// New settings (zash.toml changed): presets may read differently now.
     pub fn set_settings(&mut self, s: Settings) {
         if s != self.settings {
             self.fps = s.fps.clamp(1.0, 120.0);
+            self.paused_until = None;
             self.settings = s;
             self.effects.clear();
         }
@@ -137,7 +140,7 @@ impl FxLayer {
                 let bg = c.bg.unwrap_or(frame.bg).f32();
                 let look = e.look(now, at, n, fg, bg, |t| frame.tone(t));
                 if let Some(color) = look.bg {
-                    out.rects.push(Rect { xywh: [x, y, w, ch], color, p: [0.0, 0.0] });
+                    out.rects.push(Rect { xywh: [x, y, w, ch], color, p: [0.0, 0.0], hole: crate::render::NO_HOLE });
                 }
                 if let Some(color) = look.halo {
                     match halos.last_mut() {
@@ -165,13 +168,13 @@ impl FxLayer {
             let seed = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x0100_0000_01b3));
             let color = e.paint(|t| frame.tone(t));
             for ([x, y], r) in e.stroke(b, ch, seed, p) {
-                out.rects.push(Rect { xywh: [x - r, y - r, 2.0 * r, 2.0 * r], color, p: [r, 0.6] });
+                out.rects.push(Rect { xywh: [x - r, y - r, 2.0 * r, 2.0 * r], color, p: [r, 0.6], hole: crate::render::NO_HOLE });
             }
         }
         // a soft glow around each segment, under the text
         for (_, y, x0, x1, color) in halos {
             let spread = ch * 0.3;
-            out.rects.push(Rect { xywh: [x0 - spread, y - spread * 0.5, x1 - x0 + 2.0 * spread, ch + spread], color, p: [ch * 0.5, ch * 0.45] });
+            out.rects.push(Rect { xywh: [x0 - spread, y - spread * 0.5, x1 - x0 + 2.0 * spread, ch + spread], color, p: [ch * 0.5, ch * 0.45], hole: crate::render::NO_HOLE });
         }
         out
     }
@@ -189,18 +192,33 @@ impl FxLayer {
     /// Frames that keep coming out slow halve the rate (down to 10 a second); if even that is
     /// too much, effects stop and their text shows plain.
     pub fn frame_done(&mut self, moving: bool, took: Duration) {
+        // switched off a while ago: back on, at the configured rate (a slow spell, a zfloat dragged,
+        // must not cost them for the rest of the session: it did until zash restarted)
+        if let Some((until, enabled, shaders)) = self.paused_until {
+            if Instant::now() >= until {
+                self.paused_until = None;
+                self.settings.enabled = enabled;
+                self.settings.shaders = shaders;
+                self.fps = self.settings.fps.clamp(1.0, 120.0);
+                self.slow = 0;
+                crate::watchdog::log("effects and panel shaders back on");
+            }
+        }
         if moving && took > SLOW_FRAME {
             self.slow += 1;
-            if self.slow >= 10 {
+            // ten slow frames halve the rate; at the lowest rate it takes 3 s of them to give up
+            let limit = if self.fps > 10.0 { 10 } else { 30 };
+            if self.slow >= limit {
                 self.slow = 0;
                 if self.fps > 10.0 {
                     self.fps = (self.fps / 2.0).max(10.0);
-                    eprintln!("zash: effect frames take {} ms: {} a second now", took.as_millis(), self.fps);
-                } else {
+                    crate::watchdog::log(&format!("effect frames take {} ms: {} a second now", took.as_millis(), self.fps));
+                } else if self.paused_until.is_none() {
+                    self.paused_until = Some((Instant::now() + Duration::from_secs(20), self.settings.enabled, self.settings.shaders));
                     self.settings.enabled = false;
                     self.settings.shaders = false;
                     self.effects.clear();
-                    eprintln!("zash: effect frames still take {} ms at 10 a second: effects and panel shaders off ([fx] in zash.toml)", took.as_millis());
+                    crate::watchdog::log(&format!("effect frames still take {} ms at 10 a second: effects and panel shaders off for 20 s", took.as_millis()));
                 }
             }
         } else if moving {
@@ -229,4 +247,32 @@ fn shape(fs: &mut FontSystem, family: &str, font_px: f32, ch: f32, key: &GlyphKe
 /// The cell's own text, for a row that leaves an effect's characters blank.
 pub(crate) fn hides(c: &CellView, hidden: &HashSet<String>) -> bool {
     c.fx.as_ref().is_some_and(|h| hidden.contains(h.uri()))
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::FxLayer;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_slow_spell_pauses_effects_then_they_come_back() {
+        let mut fx = FxLayer::new(crate::fx::Settings::default());
+        // a burst of slow frames (a zfloat dragged): the rate drops, the shaders stay on
+        for _ in 0..25 {
+            fx.frame_done(true, Duration::from_millis(20));
+        }
+        assert!(fx.shaders_on(), "a short slow spell must not switch shaders off");
+        // slow for long at the lowest rate: off, for a while
+        for _ in 0..40 {
+            fx.frame_done(true, Duration::from_millis(20));
+        }
+        assert!(!fx.shaders_on());
+        // its time up: back on, at the configured rate
+        if let Some(p) = fx.paused_until.as_mut() {
+            p.0 = Instant::now() - Duration::from_millis(1);
+        }
+        fx.frame_done(false, Duration::ZERO);
+        assert!(fx.shaders_on(), "back on after the pause");
+        assert_eq!(fx.fps, 30.0);
+    }
 }

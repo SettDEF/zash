@@ -7,6 +7,8 @@
 //! ESC ] 7733 ; fx ; done ST   text   ESC ] 7733 ; fx ; end ST          (a preset from [fx.presets])
 //! ESC ] 7733 ; fx ; scribble ; color=accent ; turns=2.2 ; wobble=0.1 ; width=0.13 ; draw=900ms ST
 //!     Buffers   ESC ] 7733 ; fx ; end ST      (written, then a loop drawn round it by hand; it stays)
+//! ESC ] 7733 ; fx ; underline ; delay=400ms ; sound=draw ; volume=0.4 ; sound_delay=250ms ST
+//!     (starts 0.4 s late; the sound waits for delay= unless sound_delay= says otherwise)
 //! ```
 //!
 //! A program knows it may send these when TERM_PROGRAM=zash (zash sets it, with TERM_PROGRAM_VERSION),
@@ -63,6 +65,18 @@ impl Escape {
         // since=MS: it began that long ago (zeit sends a pane's run again with each redraw of
         // its row; the line goes on being drawn instead of starting over)
         let since = body.split(';').find_map(|p| p.trim().strip_prefix("since=")?.parse::<u64>().ok()).unwrap_or(0);
+        // sound=NAME: played as the drawing begins (after its delay=, or its own sound_delay=), not
+        // when a run that began earlier is sent again
+        let param = |k: &str| body.split(';').find_map(|p| p.trim().strip_prefix(k)?.strip_prefix('='));
+        if let Some(name) = param("sound") {
+            let wait = param("sound_delay").or(param("delay")).and_then(secs).map(|s| (s * 1000.0) as u64).unwrap_or(0);
+            if since < wait + 80 {
+                let vol = param("volume").and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.5);
+                // input still coming (a click, a scroll): the run waits for it, and so does its sound
+                let rest = if busy() { BUSY_UNTIL.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(now_ms()) } else { 0 };
+                play(name, vol, wait.saturating_sub(since) + rest);
+            }
+        }
         Escape::Start(format!("{SCHEME}{id};{};{body}", now_ms().saturating_sub(since)))
     }
 }
@@ -72,7 +86,7 @@ impl Escape {
 /// wait) and knows what it may send. Over SSH too, where TERM_PROGRAM does not arrive.
 pub fn capabilities() -> String {
     format!(
-        "\x1b]7733;zash;v={};fx=shimmer,pulse,fade,rainbow,typewriter,glow;marks=scribble,underline,strike,box,check,arrow,bracket;images=kitty\x1b\\",
+        "\x1b]7733;zash;v={};fx=shimmer,pulse,fade,rainbow,typewriter,glow;marks=scribble,underline,strike,box,check,arrow,bracket;sound=1;images=kitty\x1b\\",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -85,6 +99,32 @@ pub fn now() -> f32 {
 
 fn now_ms() -> u64 {
     if frozen().is_some() { 0 } else { epoch().elapsed().as_millis() as u64 }
+}
+
+/// zash's own input coming fast (a held key repeating, the wheel, a drag): from when, till when
+/// (ms). A run that starts inside it waits till it rests; its sound too.
+static BUSY_FROM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BUSY_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Input came: effects wait at least `ms` more.
+pub fn input_busy(ms: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let now = now_ms();
+    if now >= BUSY_UNTIL.load(Relaxed) {
+        BUSY_FROM.store(now, Relaxed);
+    }
+    BUSY_UNTIL.fetch_max(now + ms, Relaxed);
+}
+
+fn busy() -> bool {
+    now_ms() < BUSY_UNTIL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Where a run that began at `ms` starts: one begun while input came starts when it rests.
+fn rested_start(ms: u64) -> u64 {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (from, until) = (BUSY_FROM.load(Relaxed), BUSY_UNTIL.load(Relaxed));
+    if ms >= from && ms < until { until } else { ms }
 }
 
 pub(crate) fn frozen() -> Option<f32> {
@@ -172,6 +212,8 @@ pub struct Effect {
     /// draw it, and whether the text is written first
     pub turns: f32,
     pub wobble: f32,
+    /// scribble: extra room round the text, in line heights (pad=0.6: a big loop)
+    pub pad: f32,
     pub draw: f32,
     pub write: bool,
     life: Life,
@@ -196,7 +238,7 @@ impl Effect {
         let rest = addr.strip_prefix(SCHEME)?;
         let mut parts = rest.split(';');
         let _id = parts.next()?;
-        let start = parts.next()?.parse::<u64>().ok()? as f32 / 1000.0;
+        let start = rested_start(parts.next()?.parse::<u64>().ok()?) as f32 / 1000.0;
         let name = parts.next()?.trim();
         let own: Vec<&str> = parts.collect();
         let (kind_name, preset): (&str, Vec<&str>) = match s.presets.get(name) {
@@ -238,6 +280,7 @@ impl Effect {
             delay: 0.0,
             turns: 2.2,
             wobble: 0.1,
+            pad: 0.0,
             // seconds the pen takes: longer shapes take longer
             draw: match kind {
                 Kind::Scribble => 0.9,
@@ -274,6 +317,7 @@ impl Effect {
             "delay" => self.delay = secs(v).unwrap_or(self.delay),
             "turns" => self.turns = num(v).map(|t| t.clamp(0.2, 8.0)).unwrap_or(self.turns),
             "wobble" => self.wobble = num(v).map(|w| w.clamp(0.0, 0.5)).unwrap_or(self.wobble),
+            "pad" => self.pad = num(v).map(|p| p.clamp(0.0, 3.0)).unwrap_or(self.pad),
             "draw" => self.draw = secs(v).filter(|d| *d > 0.0).unwrap_or(self.draw),
             "write" => self.write = !matches!(v, "0" | "false" | "no" | "off"),
             "color" => self.color = paint(v).unwrap_or(self.color),
@@ -377,8 +421,8 @@ impl Effect {
         // the box's corners it is 2^(1/3) its half sides. Room on top for the pen,
         // the wobble pulling inwards and the drift, so the loop never runs over the text
         let inner = 1.0 / (1.0 - self.wobble).max(0.5);
-        let rx = ((b[2] - b[0]) / 2.0 * 2f32.powf(1.0 / 3.0) + ch * (0.3 + 0.22)) * inner;
-        let ry = ((b[3] - b[1]) / 2.0 * 2f32.powf(1.0 / 3.0) + ch * (0.25 + 0.12)) * inner;
+        let rx = ((b[2] - b[0]) / 2.0 * 2f32.powf(1.0 / 3.0) + ch * (0.3 + 0.22 + self.pad)) * inner;
+        let ry = ((b[3] - b[1]) / 2.0 * 2f32.powf(1.0 / 3.0) + ch * (0.25 + 0.12 + self.pad * 0.6)) * inner;
         let start = rnd() * TAU;
         let tilt = (rnd() - 0.5) * 0.12;
         let phase: [f32; 3] = [rnd() * TAU, rnd() * TAU, rnd() * TAU];
@@ -766,4 +810,44 @@ mod tests {
         assert_eq!(t.look(mid, 9, 10, fg, bg, tone).fg.unwrap()[3], 0.0);
         assert!(eff("rainbow;loop=forever", &s).live(1e6, 3));
     }
+}
+
+/// A sound for an effect: `NAME` from ~/.local/share/zash/sounds (NAME.ogg, .wav or .flac) or a
+/// path, played by PipeWire's pw-play in the background. At most one every 150 ms (a page of
+/// headings drawn at once makes one sound); ZASH_FX_SOUND=0 turns them off. `after_ms`: a wait first.
+pub fn play(name: &str, volume: f32, after_ms: u64) {
+    if after_ms > 0 {
+        let name = name.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(after_ms));
+            play(&name, volume, 0);
+        });
+        return;
+    }
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if std::env::var("ZASH_FX_SOUND").is_ok_and(|v| v == "0") {
+        return;
+    }
+    let now = now_ms();
+    let last = LAST.load(std::sync::atomic::Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < 150 {
+        return;
+    }
+    LAST.store(now.max(1), std::sync::atomic::Ordering::Relaxed);
+    let path = if name.contains('/') {
+        std::path::PathBuf::from(name)
+    } else {
+        let data = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(".local/share"));
+        let dir = data.join("zash/sounds");
+        let Some(p) = ["ogg", "wav", "flac"].iter().map(|e| dir.join(format!("{name}.{e}"))).find(|p| p.exists()) else { return };
+        p
+    };
+    let _ = std::process::Command::new("pw-play")
+        .arg("--volume")
+        .arg(format!("{:.2}", volume.clamp(0.0, 1.0)))
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }

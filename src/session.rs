@@ -137,6 +137,8 @@ pub enum Found {
     Web(String),
     /// a Lottie animation: OSC 7733;anim;file=…;rows=N (anim.rs)
     Anim(String),
+    /// OSC 7733;zoom;+1|-1|0: the font a point bigger, smaller, or back to the set size
+    Zoom(i32),
     /// a web area pinned to screen cells by a multiplexer: webrect, webhide or webclose, and the rest
     WebPin(String, String),
     /// keys a program wants for itself: OSC 7733;keys;all|none|claim=…|release=…
@@ -275,10 +277,12 @@ impl MarkScanner {
                 out.push((at, Found::Query));
             } else if let Some(f) = body.strip_prefix("7733;fx;").or_else(|| (body == "7733;fx").then_some("")) {
                 out.push((at, Found::Fx(f.to_string())));
-            } else if let Some((kind, rest)) = body.strip_prefix("7733;").and_then(|b| b.split_once(';')).filter(|(k, _)| matches!(*k, "webrect" | "webhide" | "webclose" | "zfloat" | "zfloatclose" | "zunder")) {
+            } else if let Some((kind, rest)) = body.strip_prefix("7733;").and_then(|b| b.split_once(';')).filter(|(k, _)| matches!(*k, "webrect" | "webhide" | "webclose" | "zfloat" | "zfloatclose" | "zunder" | "panes" | "layers")) {
                 out.push((at, Found::WebPin(kind.to_string(), rest.to_string())));
             } else if let Some(w) = body.strip_prefix("7733;web;") {
                 out.push((at, Found::Web(w.to_string())));
+            } else if let Some(z) = body.strip_prefix("7733;zoom;") {
+                out.push((at, Found::Zoom(z.trim().trim_start_matches('+').parse().unwrap_or(0))));
             } else if let Some(a) = body.strip_prefix("7733;anim;") {
                 out.push((at, Found::Anim(a.to_string())));
             } else if let Some(list) = body.strip_prefix("7733;rows;").or_else(|| (body == "7733;rows").then_some("")) {
@@ -347,7 +351,7 @@ impl Session {
 
     /// Starts `cmd` (or the login shell) in a new pty, read by zash's own loop.
     pub fn spawn(cmd: Option<Vec<String>>, workdir: Option<std::path::PathBuf>, grid: Grid, scrollback: usize, sink: Sink) -> std::io::Result<Session> {
-        let config = term::Config { scrolling_history: scrollback, kitty_keyboard: false, ..Default::default() };
+        let config = term::Config { scrolling_history: scrollback, kitty_keyboard: true, ..Default::default() };
         let replies = Arc::new(std::sync::OnceLock::new());
         let listener = Listener(sink, replies.clone());
         let term = Arc::new(FairMutex::new(Term::new(config, &grid.term_size(), listener.clone())));
@@ -493,6 +497,12 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                             wl.send_event(alacritty_terminal::event::Event::Wakeup);
                         });
                         graphics.lock().unwrap().pin(&kind, &body, cell, wake);
+                        continue;
+                    }
+                    Found::Zoom(z) => {
+                        graphics.lock().unwrap().zoom = Some(z);
+                        use alacritty_terminal::event::EventListener;
+                        listener.send_event(alacritty_terminal::event::Event::Wakeup);
                         continue;
                     }
                     Found::Web(body) => {

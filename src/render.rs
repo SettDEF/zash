@@ -96,6 +96,8 @@ pub struct Frame {
     /// pen strokes near the screen (ink.rs), and the absolute line at its top
     pub ink: Vec<crate::ink::Stroke>,
     pub ink_top: f64,
+    /// the program's floats in cells (OSC 7733;layers): a shadow and an edge under each
+    pub layers: Vec<[usize; 4]>,
     /// where the pen hovers while drawing: (line, col, radius in cells, the eraser end)
     pub pen_hover: Option<(f64, f32, f32, bool)>,
     /// a multiplexer's app popup: zash draws its frame (the cells under it are blanked)
@@ -166,7 +168,7 @@ impl Frame {
             ((l + offset) as usize, c, content.cursor.shape)
         }).filter(|(r, _, _)| *r < lines);
         let drawn_cursor = if cursor.is_none() { inverted.iter().rposition(|(n, _)| *n == 1).map(|r| (r, inverted[r].1)) } else { None };
-        let f = Frame { drawn_cursor, cursor_drawn: false, cursor_styled: true, float: None, under: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: def_fg, prompts: Vec::new(), cols, rows, cursor, bg: def_bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new(), ink: Vec::new(), ink_top: 0.0, pen_hover: None };
+        let f = Frame { drawn_cursor, cursor_drawn: false, cursor_styled: true, float: None, under: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: def_fg, prompts: Vec::new(), cols, rows, cursor, bg: def_bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new(), ink: Vec::new(), ink_top: 0.0, layers: Vec::new(), pen_hover: None };
         f
     }
 
@@ -222,8 +224,9 @@ struct VOut {
     @location(1) local: vec2<f32>,
     @location(2) half: vec2<f32>,
     @location(3) p: vec2<f32>,
+    @location(4) hole: vec4<f32>,
 };
-@vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) rect: vec4<f32>, @location(1) color: vec4<f32>, @location(2) p: vec2<f32>) -> VOut {
+@vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) rect: vec4<f32>, @location(1) color: vec4<f32>, @location(2) p: vec2<f32>, @location(3) hole: vec4<f32>) -> VOut {
     var corners = array<vec2<f32>, 6>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
     let c = corners[vi];
     let q = rect.xy + c * rect.zw;
@@ -233,10 +236,12 @@ struct VOut {
     o.local = (c - vec2(0.5)) * rect.zw;
     o.half = rect.zw * 0.5;
     o.p = p;
+    o.hole = hole;
     return o;
 }
 // p.x: corner radius, p.y: edge softness (a shadow is a large softness); both 0: a plain box
 @fragment fn fs(i: VOut) -> @location(0) vec4<f32> {
+    if (i.hole.z > 0.0 && i.pos.x >= i.hole.x && i.pos.x < i.hole.x + i.hole.z && i.pos.y >= i.hole.y && i.pos.y < i.hole.y + i.hole.w) { return vec4(0.0); }
     // p.y -1: a triangle pointing right, -2: pointing left (powerline separators)
     if (i.p.y < -0.5) {
         let uv = i.local / (2.0 * i.half) + vec2(0.5);
@@ -262,7 +267,11 @@ pub(crate) struct Rect {
     pub(crate) color: [f32; 4],
     /// corner radius and edge softness (0, 0: a plain box)
     pub(crate) p: [f32; 2],
+    /// nothing drawn inside this (x, y, w, h; w 0: none): a shadow cut out under its float
+    pub(crate) hole: [f32; 4],
 }
+
+pub(crate) const NO_HOLE: [f32; 4] = [0.0; 4];
 
 struct Rects {
     pipeline: wgpu::RenderPipeline,
@@ -275,6 +284,12 @@ struct Rects {
 
 impl Rects {
     fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Rects {
+        Rects::with_blend(device, format, wgpu::BlendState::ALPHA_BLENDING)
+    }
+
+    /// `blend` other than the usual: the veil mixes colour but keeps the window's alpha (see-through
+    /// as the cells it stands for)
+    fn with_blend(device: &wgpu::Device, format: wgpu::TextureFormat, blend: wgpu::BlendState) -> Rects {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("zash rects"), source: wgpu::ShaderSource::Wgsl(RECT_WGSL.into()) });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -288,7 +303,7 @@ impl Rects {
         });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &bgl, entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }] });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], ..Default::default() });
-        let attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x2];
+        let attrs = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x2, 3 => Float32x4];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("zash rects"),
             layout: Some(&layout),
@@ -296,13 +311,13 @@ impl Rects {
                 module: &module,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout { array_stride: 40, step_mode: wgpu::VertexStepMode::Instance, attributes: &attrs })],
+                buffers: &[Some(wgpu::VertexBufferLayout { array_stride: 56, step_mode: wgpu::VertexStepMode::Instance, attributes: &attrs })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
             }),
             primitive: Default::default(),
             depth_stencil: None,
@@ -311,7 +326,7 @@ impl Rects {
             cache: None,
         });
         let cap = 4096;
-        let buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (cap * 40) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (cap * 56) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         Rects { pipeline, uniform, bind, buf, cap, count: 0 }
     }
 
@@ -319,9 +334,9 @@ impl Rects {
         queue.write_buffer(&self.uniform, 0, &as_bytes(&[w, h, 0.0, 0.0]));
         if rects.len() > self.cap {
             self.cap = rects.len().next_power_of_two();
-            self.buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (self.cap * 40) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            self.buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (self.cap * 56) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         }
-        let flat: Vec<f32> = rects.iter().flat_map(|r| r.xywh.into_iter().chain(r.color).chain(r.p)).collect();
+        let flat: Vec<f32> = rects.iter().flat_map(|r| r.xywh.into_iter().chain(r.color).chain(r.p).chain(r.hole)).collect();
         if !flat.is_empty() {
             queue.write_buffer(&self.buf, 0, &as_bytes(&flat));
         }
@@ -383,6 +398,8 @@ pub struct Renderer {
     images: Images,
     /// drawn after the text: marks that must stay visible over glyphs
     overlay: Rects,
+    /// over the text, under the overlay: floats' covers coming and going, see-through as the window
+    veil: Rects,
     /// shaped rows per pane (by pane id)
     /// per pane, per row content: its segments (x offset in pixels, shaped text), each on its column
     rows: std::collections::HashMap<u64, std::collections::HashMap<u64, Vec<(f32, Buffer)>>>,
@@ -419,6 +436,14 @@ pub struct Renderer {
     /// GLSL panels for zfloats: which file for which title, the compiled ones, and this frame's
     /// (the shader and the rectangle index it is drawn at, between the panel's frame and its cells)
     pub zfloat_shaders: crate::config::ZfloatShaders,
+    /// programs' floats animated in, out and along (layers.rs), and how (`[layers]`)
+    pub layer_anim: crate::layers::Layers,
+    pub layers_conf: crate::config::LayersConf,
+    /// the shader over the floats' shadows ([layers] shader), compiled when first needed
+    pub layer_shader: Option<String>,
+    layer_fx: Option<crate::layer_fx::LayerFx>,
+    layer_fx_failed: Option<String>,
+    layer_fx_t0: std::time::Instant,
     shaders: crate::panel_shader::Shaders,
     panel_shader: Option<(std::path::PathBuf, u32)>,
     format: wgpu::TextureFormat,
@@ -452,6 +477,7 @@ impl Renderer {
             rects: Rects::new(device, format),
             images: Images::new(device, format),
             overlay: Rects::new(device, format),
+            veil: Rects::with_blend(device, format, wgpu::BlendState { color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add }, alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add } }),
             font_system: { let _ = &mut font_system; font_system },
             swash: SwashCache::new(),
             viewport,
@@ -479,6 +505,12 @@ impl Renderer {
             anim: None,
             fx: crate::fx_draw::FxLayer::new(cfg.fx.clone()),
             zfloat_shaders: cfg.zfloat_shaders.clone(),
+            layer_anim: Default::default(),
+            layers_conf: cfg.layers,
+            layer_shader: cfg.layer_shader.clone(),
+            layer_fx: None,
+            layer_fx_failed: None,
+            layer_fx_t0: std::time::Instant::now(),
             shaders: Default::default(),
             panel_shader: None,
             blur: None,
@@ -643,7 +675,7 @@ impl Renderer {
             let mut col = if failed { frame.fail_color.f32() } else { frame.cursor_color.f32() };
             col[3] = if failed { 1.0 } else { 0.7 };
             let w = (self.font_px / 7.0).max(2.0).round();
-            out.push(Rect { xywh: [ox - self.pad, oy + *r as f32 * ch, w, ch], color: col, p: [0.0, 0.0] });
+            out.push(Rect { xywh: [ox - self.pad, oy + *r as f32 * ch, w, ch], color: col, p: [0.0, 0.0], hole: NO_HOLE });
         }
         clipped(out, clip)
     }
@@ -671,7 +703,7 @@ impl Renderer {
                     (Some((s, e, col)), Some(b)) if b == col && e == c => run = Some((s, c + 1, col)),
                     (prev, bg) => {
                         if let Some((s, e, col)) = prev {
-                            out.push(Rect { xywh: [pad + s as f32 * cw, y, (e - s) as f32 * cw, ch], color: col.f32(), p: [0.0, 0.0] });
+                            out.push(Rect { xywh: [pad + s as f32 * cw, y, (e - s) as f32 * cw, ch], color: col.f32(), p: [0.0, 0.0], hole: NO_HOLE });
                         }
                         run = bg.map(|b| (c, c + 1, b));
                     }
@@ -684,23 +716,23 @@ impl Renderer {
                     let r = (ch / 2.0).min(cw);
                     fore.push(match shape {
                         // a rounded end reaches into the next cell (the pill's body, same colour)
-                        Powerline::RoundLeft => Rect { xywh: [x, y, 2.0 * cw, ch], color: fg, p: [r, 0.0] },
-                        Powerline::RoundRight => Rect { xywh: [x - cw, y, 2.0 * cw, ch], color: fg, p: [r, 0.0] },
-                        Powerline::TriRight => Rect { xywh: [x, y, cw, ch], color: fg, p: [0.0, -1.0] },
-                        Powerline::TriLeft => Rect { xywh: [x, y, cw, ch], color: fg, p: [0.0, -2.0] },
+                        Powerline::RoundLeft => Rect { xywh: [x, y, 2.0 * cw, ch], color: fg, p: [r, 0.0], hole: NO_HOLE },
+                        Powerline::RoundRight => Rect { xywh: [x - cw, y, 2.0 * cw, ch], color: fg, p: [r, 0.0], hole: NO_HOLE },
+                        Powerline::TriRight => Rect { xywh: [x, y, cw, ch], color: fg, p: [0.0, -1.0], hole: NO_HOLE },
+                        Powerline::TriLeft => Rect { xywh: [x, y, cw, ch], color: fg, p: [0.0, -2.0], hole: NO_HOLE },
                     });
                 }
                 let w = if cell.wide { 2.0 * cw } else { cw };
                 let thick = (self.font_px / 14.0).max(1.0).round();
                 if cell.underline {
-                    fore.push(Rect { xywh: [pad + c as f32 * cw, y + ch - thick * 2.0, w, thick], color: fg, p: [0.0, 0.0] });
+                    fore.push(Rect { xywh: [pad + c as f32 * cw, y + ch - thick * 2.0, w, thick], color: fg, p: [0.0, 0.0], hole: NO_HOLE });
                 }
                 if cell.strike {
-                    fore.push(Rect { xywh: [pad + c as f32 * cw, y + ch * 0.55, w, thick], color: fg, p: [0.0, 0.0] });
+                    fore.push(Rect { xywh: [pad + c as f32 * cw, y + ch * 0.55, w, thick], color: fg, p: [0.0, 0.0], hole: NO_HOLE });
                 }
             }
             if let Some((s, e, col)) = run {
-                out.push(Rect { xywh: [pad + s as f32 * cw, y, (e - s) as f32 * cw, ch], color: col.f32(), p: [0.0, 0.0] });
+                out.push(Rect { xywh: [pad + s as f32 * cw, y, (e - s) as f32 * cw, ch], color: col.f32(), p: [0.0, 0.0], hole: NO_HOLE });
             }
             out_row.extend(fore);
             match band {
@@ -717,7 +749,7 @@ impl Renderer {
                     let (a, b) = (tx.min(x), tx.max(x));
                     let mut col = frame.cursor_color.f32();
                     col[3] = 0.35;
-                    out.push(Rect { xywh: [a, y + ch * 0.15, b - a, ch * 0.7], color: col, p: [0.0, 0.0] });
+                    out.push(Rect { xywh: [a, y + ch * 0.15, b - a, ch * 0.7], color: col, p: [0.0, 0.0], hole: NO_HOLE });
                 }
             }
             // a cursor the program draws itself: it has its block, zash only adds the trail above
@@ -729,17 +761,17 @@ impl Renderer {
             let col = frame.cursor_color.f32();
             let t = (self.font_px / 9.0).max(1.0).round();
             match shape {
-                CursorShape::Beam => out.push(Rect { xywh: [x, y, t, ch], color: col, p: [0.0, 0.0] }),
-                CursorShape::Underline => out.push(Rect { xywh: [x, y + ch - t, w, t], color: col, p: [0.0, 0.0] }),
+                CursorShape::Beam => out.push(Rect { xywh: [x, y, t, ch], color: col, p: [0.0, 0.0], hole: NO_HOLE }),
+                CursorShape::Underline => out.push(Rect { xywh: [x, y + ch - t, w, t], color: col, p: [0.0, 0.0], hole: NO_HOLE }),
                 CursorShape::HollowBlock => {
-                    out.push(Rect { xywh: [x, y, w, t], color: col, p: [0.0, 0.0] });
-                    out.push(Rect { xywh: [x, y + ch - t, w, t], color: col, p: [0.0, 0.0] });
-                    out.push(Rect { xywh: [x, y, t, ch], color: col, p: [0.0, 0.0] });
-                    out.push(Rect { xywh: [x + w - t, y, t, ch], color: col, p: [0.0, 0.0] });
+                    out.push(Rect { xywh: [x, y, w, t], color: col, p: [0.0, 0.0], hole: NO_HOLE });
+                    out.push(Rect { xywh: [x, y + ch - t, w, t], color: col, p: [0.0, 0.0], hole: NO_HOLE });
+                    out.push(Rect { xywh: [x, y, t, ch], color: col, p: [0.0, 0.0], hole: NO_HOLE });
+                    out.push(Rect { xywh: [x + w - t, y, t, ch], color: col, p: [0.0, 0.0], hole: NO_HOLE });
                 }
                 _ => {
                     // a block; the character on it is drawn in the cursor's text colour (Frame::extract)
-                    out.push(Rect { xywh: [x, y, w, ch], color: col, p: [0.0, 0.0] });
+                    out.push(Rect { xywh: [x, y, w, ch], color: col, p: [0.0, 0.0], hole: NO_HOLE });
                 }
             }
         }
@@ -756,7 +788,7 @@ impl Renderer {
         self.rows.retain(|id, _| panes.iter().any(|p| p.id == *id));
         self.order.retain(|id, _| panes.iter().any(|p| p.id == *id));
         let (fox, foy) = self.origin(focus.x, focus.y, focus.w, focus.h);
-        let (cur, animating) = self.cursor_motion(frame, fox, foy);
+        let (cur, mut animating) = self.cursor_motion(frame, fox, foy);
         // text effects: one clock for the whole frame, and its cost for the budget (fx_draw.rs)
         let fx_start = std::time::Instant::now();
         let fx_now = crate::fx::now();
@@ -767,6 +799,12 @@ impl Renderer {
         self.unders.clear();
         let mut rects = Vec::new();
         let mut over = Vec::new();
+        let mut veil: Vec<Rect> = Vec::new();
+        // the shadows' shader: the floats it gets (pixels, how far each has come), the cell height
+        let fx_on = self.layer_fx_ready(device);
+        let shadow_k = if fx_on { 0.0 } else { self.layers_conf.shadow };
+        let mut fx_floats: Vec<([f32; 4], f32)> = Vec::new();
+        let mut fx_cell = 0.0f32;
         // floats (a multiplexer's app popups): their pixel rect, for the title and buttons later
         let mut floats: Vec<([f32; 4], crate::graphics::ZFloat, Rgb, Rgb, Rgb)> = Vec::new();
         // per pane: a dragged zfloat's cell rect and how far it is drawn from it (its contents move along)
@@ -841,7 +879,7 @@ impl Renderer {
                                     continue;
                                 }
                                 if let Some(bg) = bg {
-                                    rects.push(Rect { xywh: [cut[0], cut[1], cut[2] - cut[0], cut[3] - cut[1]], color: bg.f32(), p: [0.0, 0.0] });
+                                    rects.push(Rect { xywh: [cut[0], cut[1], cut[2] - cut[0], cut[3] - cut[1]], color: bg.f32(), p: [0.0, 0.0], hole: NO_HOLE });
                                 }
                                 if !text.trim().is_empty() {
                                     let mut b = Buffer::new(&mut self.font_system, Metrics::new(self.font_px, self.cell_h));
@@ -866,7 +904,7 @@ impl Renderer {
                 // the look from [zfloat] in zash.toml (live): how solid the panel is, what its frame is
                 let look = p.frame.zfloat_look;
                 // the shadow fades with the panel (under a see-through one it only muddies it)
-                rects.push(Rect { xywh: [r[0] - 8.0, r[1] - 6.0, r[2] + 16.0, r[3] + 16.0], color: [0.0, 0.0, 0.0, 0.30 * look.opacity * look.opacity], p: [rad, 8.0] });
+                rects.push(Rect { xywh: [r[0] - 8.0, r[1] - 6.0, r[2] + 16.0, r[3] + 16.0], color: [0.0, 0.0, 0.0, 0.30 * look.opacity * look.opacity], p: [rad, 8.0], hole: NO_HOLE });
                 let mut panel = z.bg.unwrap_or(p.frame.bar_bg).f32();
                 panel[3] = look.opacity;
                 let edge = match look.border {
@@ -876,13 +914,13 @@ impl Renderer {
                     crate::config::ZfloatBorder::Panel | crate::config::ZfloatBorder::None => None,
                 };
                 if let Some(edge) = edge {
-                    rects.push(Rect { xywh: [r[0] - 1.0, r[1] - 1.0, r[2] + 2.0, r[3] + 2.0], color: edge, p: [rad + 1.0, 0.0] });
+                    rects.push(Rect { xywh: [r[0] - 1.0, r[1] - 1.0, r[2] + 2.0, r[3] + 2.0], color: edge, p: [rad + 1.0, 0.0], hole: NO_HOLE });
                 }
                 // the panel: its shader if the title has one that compiles, else its colour
                 // the shader zeit names for it, else zash.toml's for its title; a preset's values morph in
                 let name = z.shader.clone().or_else(|| self.zfloat_shaders.for_title(&z.title).cloned()).filter(|n| n != "none" && self.fx.shaders_on());
                 let shader = name.map(|n| { let o = self.zfloat_shaders.options.get(&n).cloned().unwrap_or_default(); self.shaders.resolve(&n, o) })
-                    .filter(|c| self.shaders.get(device, self.format, &c.path).is_some());
+                    .filter(|c| self.shaders.get(device, queue, self.format, &c.path).is_some());
                 match shader {
                     Some(choice) => {
                         let place = crate::panel_shader::Place { rect: r, screen: [width as f32, height as f32], panel: { let mut c = z.bg.unwrap_or(p.frame.bar_bg).f32(); c[3] = 1.0; c }, accent: p.frame.cursor_color.f32(), focus: z.focus, opacity: look.opacity.max(0.05), radius: rad };
@@ -893,16 +931,112 @@ impl Renderer {
                         self.panel_shader = Some((choice.path, rects.len() as u32));
                         fx_moving = true;
                     }
-                    None => rects.push(Rect { xywh: r, color: panel, p: [rad, 0.0] }),
+                    None => rects.push(Rect { xywh: r, color: panel, p: [rad, 0.0], hole: NO_HOLE }),
                 }
                 // the title bar: a slightly lighter band on its row (square under it) (no line under it: the user, 2026-10-21)
                 let f = p.frame.fg.f32();
                 // (a tint over the panel, so a see-through panel stays as see-through under it)
-                rects.push(Rect { xywh: [r[0], r[1], r[2], self.cell_h], color: [f[0], f[1], f[2], 0.05], p: [rad.min(self.cell_h / 2.0), 0.0] });
+                rects.push(Rect { xywh: [r[0], r[1], r[2], self.cell_h], color: [f[0], f[1], f[2], 0.05], p: [rad.min(self.cell_h / 2.0), 0.0], hole: NO_HOLE });
                 float_rect = Some(r);
                 floats.push((r, z.clone(), p.frame.fg, p.frame.cursor_color, p.frame.fail_color));
             }
+            // the program's floats (zett's popups, OSC 7733;layers) raised: a soft shadow and a hairline
+            // edge under the float's cells, which cover the rest (as zeit's zfloat panel, as Neovide)
             rects.extend(moved(self.rect_list(p.frame, if p.focused { cur } else { None }, ox, oy, clip), moves[pi]));
+            // after the cells (the pane's background is one of them): a drop shadow below and to the
+            // right, outside the float so it does not tint it, and a hairline round it
+            // the floats this frame matched to last frame's (layers.rs): one coming fades in from the
+            // background, one moving has its frame slide, one gone fades and shrinks out (below)
+            let (cw, ch) = (self.cell_w, self.cell_h);
+            let px = |l: &[usize; 4]| [ox + l[0] as f32 * cw, oy + l[1] as f32 * ch, l[2] as f32 * cw, l[3] as f32 * ch];
+            let dur = std::time::Duration::from_millis(self.layers_conf.ms as u64);
+            let anim = self.layers_conf.animate && !dur.is_zero();
+            let t_now = std::time::Instant::now();
+            if anim {
+                let rows = &p.frame.rows;
+                let cursor = p.frame.cursor.map(|(r, c, _)| (r, c));
+                self.layer_anim.update(p.id, &p.frame.layers, t_now, |r| layer_cells(rows, r), |r| crate::layers::side_of(r, cursor, rows.len()));
+            }
+            let shown: Vec<([f32; 4], f32, crate::layers::Side)> = if anim {
+                self.layer_anim.seen.get(&p.id).into_iter().flatten().map(|s| {
+                    let k = |since: std::time::Instant| crate::layers::ease(t_now.duration_since(since).as_secs_f32() / dur.as_secs_f32());
+                    let to = px(&s.rect);
+                    let at = match s.from {
+                        Some((f, t)) if k(t) < 1.0 => {
+                            let (from, e) = (px(&f), k(t));
+                            [0, 1, 2, 3].map(|i| from[i] + (to[i] - from[i]) * e)
+                        }
+                        _ => to,
+                    };
+                    (at, k(s.born), s.side)
+                }).collect()
+            } else {
+                p.frame.layers.iter().map(|l| (px(l), 1.0, crate::layers::Side::Centre)).collect()
+            };
+            for (r, a, side) in &shown {
+                // coming: it unrolls from the side it opens on (the background holds the rest) and
+                // the background over what is out thins away
+                // "none": there at once (as Neovide); "fade": in place, only the fade
+                let a = &if self.layers_conf.open == crate::config::LayerOpen::None { 1.0 } else { *a };
+                let open = if self.layers_conf.open == crate::config::LayerOpen::Unroll { crate::layers::unrolled(*r, *side, *a) } else { *r };
+                // shadow_over: drawn after the text (on the veil, the window's alpha kept), so it darkens it
+                let frame = clipped(layer_frame(open, ch, p.frame.fg.f32(), (*a * 2.0).min(1.0), shadow_k), clip);
+                fx_floats.push((open, (*a * 2.0).min(1.0)));
+                fx_cell = ch;
+                if self.layers_conf.shadow_over { veil.extend(frame) } else { rects.extend(frame) }
+                if *a < 1.0 {
+                    // as the window clears: its colour times its opacity (pre-multiplied), on the veil
+                    let o = self.opacity;
+                    let mut bg = { let b = p.frame.bg.f32(); [b[0] * o, b[1] * o, b[2] * o, 1.0] };
+                    let mut cover = outside(*r, open).into_iter().map(|xywh| Rect { xywh, color: bg, p: [0.0, 0.0], hole: NO_HOLE }).collect::<Vec<_>>();
+                    bg[3] = (1.0 - a) * 0.8;
+                    cover.push(Rect { xywh: open, color: bg, p: [0.0, 0.0], hole: NO_HOLE });
+                    veil.extend(clipped(cover, clip));
+                }
+            }
+            // gone: its last cells over what is under it now, fading and rolling back to its side
+            if anim && self.layers_conf.fade_out && self.layers_conf.open != crate::config::LayerOpen::None {
+                let ghosts: Vec<([usize; 4], Vec<crate::layers::GhostCell>, f32, crate::layers::Side)> = self.layer_anim.gone.iter().filter(|g| g.pane == p.id).map(|g| (g.rect, g.cells.clone(), 1.0 - crate::layers::ease(t_now.duration_since(g.at).as_secs_f32() / dur.as_secs_f32()), g.side)).collect();
+                for (rect, cells, k, side) in ghosts {
+                    let full = px(&rect);
+                    let r = if self.layers_conf.open == crate::config::LayerOpen::Unroll { crate::layers::unrolled(full, side, k) } else { full };
+                    // its text stays put, cut by the box as that draws in
+                    let s = 1.0;
+                    let (cx, cy) = (full[0] + full[2] / 2.0, full[1] + full[3] / 2.0);
+                    over.extend(clipped(layer_frame(r, ch, p.frame.fg.f32(), k, shadow_k), clip));
+                    fx_floats.push((r, k));
+                    fx_cell = ch;
+                    // its backgrounds as they were drawn: the window's under the cells without their
+                    // own, each cell's own over it (one colour for all of it flashed the highlight's)
+                    let o = self.opacity;
+                    let base = { let b = p.frame.bg.f32(); [b[0] * o, b[1] * o, b[2] * o] };
+                    veil.push(Rect { xywh: r, color: [base[0], base[1], base[2], k], p: [0.0, 0.0], hole: NO_HOLE });
+                    for (col, row, _, _, bg, _) in &cells {
+                        let Some(b) = bg else { continue };
+                        let (x, y) = (ox + (rect[0] + col) as f32 * cw, oy + (rect[1] + row) as f32 * ch);
+                        let cut = [x.max(r[0]), y.max(r[1]), (x + cw).min(r[0] + r[2]), (y + ch).min(r[1] + r[3])];
+                        if cut[2] - cut[0] > 0.5 && cut[3] - cut[1] > 0.5 {
+                            over.push(Rect { xywh: [cut[0], cut[1], cut[2] - cut[0], cut[3] - cut[1]], color: [b.0 as f32 / 255.0, b.1 as f32 / 255.0, b.2 as f32 / 255.0, k], p: [0.0, 0.0], hole: NO_HOLE });
+                        }
+                    }
+                    for (col, row, text, fg, _, flags) in cells.iter().filter(|c| !c.2.trim().is_empty()) {
+                        let x = cx + (ox + *col as f32 * cw + rect[0] as f32 * cw - cx) * s;
+                        let y = cy + (oy + *row as f32 * ch + rect[1] as f32 * ch - cy) * s;
+                        let mut b = Buffer::new(&mut self.font_system, Metrics::new(self.font_px, ch));
+                        b.set_size(None, Some(ch));
+                        let mut at = Attrs::new().family(Family::Name(&self.family)).color(Color::rgba(fg.0, fg.1, fg.2, (k * 255.0) as u8)).font_features(self.features.clone());
+                        if flags & 1 != 0 {
+                            at = at.weight(Weight::BOLD);
+                        }
+                        if flags & 2 != 0 {
+                            at = at.style(Style::Italic);
+                        }
+                        b.set_text(text, &at, Shaping::Advanced, None);
+                        b.shape_until_scroll(&mut self.font_system, false);
+                        self.unders.push((b, x, y, [r[0], r[1], r[0] + r[2], r[1] + r[3]]));
+                    }
+                }
+            }
             if !spans.is_empty() {
                 let d = self.fx.draw(&mut self.font_system, &self.family, self.font_px, self.cell_w, self.cell_h, p.frame, &spans, ox, oy, fx_now);
                 fx_moving |= d.moving;
@@ -922,10 +1056,10 @@ impl Renderer {
                 let r = (rad * self.cell_h).max(2.0);
                 let mut c = p.frame.cursor_color.f32();
                 c[3] = if eraser { 0.25 } else { 0.55 };
-                over.push(Rect { xywh: [x - r, y - r, 2.0 * r, 2.0 * r], color: c, p: [r, 0.9] });
+                over.push(Rect { xywh: [x - r, y - r, 2.0 * r, 2.0 * r], color: c, p: [r, 0.9], hole: NO_HOLE });
                 if eraser {
                     let f = p.frame.fg.f32();
-                    over.push(Rect { xywh: [x - 1.5, y - 1.5, 3.0, 3.0], color: [f[0], f[1], f[2], 0.9], p: [1.5, 0.5] });
+                    over.push(Rect { xywh: [x - 1.5, y - 1.5, 3.0, 3.0], color: [f[0], f[1], f[2], 0.9], p: [1.5, 0.5], hole: NO_HOLE });
                 }
             }
         }
@@ -935,14 +1069,14 @@ impl Renderer {
             for p in panes {
                 // a hairline where a pane meets its left or upper neighbour
                 if p.x > 0.5 {
-                    over.push(Rect { xywh: [p.x.round() - 1.0, p.y, 1.0, p.h], color: line, p: [0.0, 0.0] });
+                    over.push(Rect { xywh: [p.x.round() - 1.0, p.y, 1.0, p.h], color: line, p: [0.0, 0.0], hole: NO_HOLE });
                 }
                 if p.y > self.top + 0.5 {
-                    over.push(Rect { xywh: [p.x, p.y.round() - 1.0, p.w, 1.0], color: line, p: [0.0, 0.0] });
+                    over.push(Rect { xywh: [p.x, p.y.round() - 1.0, p.w, 1.0], color: line, p: [0.0, 0.0], hole: NO_HOLE });
                 }
                 // panes without the keyboard step back a little
                 if !p.focused {
-                    over.push(Rect { xywh: [p.x, p.y, p.w, p.h], color: shade, p: [0.0, 0.0] });
+                    over.push(Rect { xywh: [p.x, p.y, p.w, p.h], color: shade, p: [0.0, 0.0], hole: NO_HOLE });
                 }
             }
         }
@@ -983,7 +1117,7 @@ impl Renderer {
                 let hot = self.pointer.is_some_and(|(px, py)| (px - cx).hypot(py - cy) < self.cell_h * 0.6);
                 let d = self.cell_h * if hot { 0.86 } else { 0.74 };
                 let col = if glyph == "×" { let mut c = fail.f32(); c[3] = if hot { 1.0 } else if z.focus { 0.85 } else { 0.35 }; c } else { let mut c = fg.f32(); c[3] = if hot { 0.30 } else { 0.12 }; c };
-                over.push(Rect { xywh: [cx - d / 2.0, cy - d / 2.0, d, d], color: col, p: [d / 2.0, 0.0] });
+                over.push(Rect { xywh: [cx - d / 2.0, cy - d / 2.0, d, d], color: col, p: [d / 2.0, 0.0], hole: NO_HOLE });
                 let (b, w) = label(&mut self.font_system, &self.family, glyph, if glyph == "×" { Rgb(255, 255, 255) } else { *fg }, self.font_px * 0.9, self.cell_h);
                 // centred by what the glyph draws, not by its line: ⌄ sits on the baseline, – on the
                 // middle, × on the maths axis, and a font of another shape moves each its own way
@@ -1031,7 +1165,7 @@ impl Renderer {
                 if let Some(pr) = sr.progress {
                     let mut c = p.frame.tone('r').f32();
                     c[3] = 0.9;
-                    over.push(Rect { xywh: [x0 + cw * 0.3, y + ch - 2.0, (x1 - x0 - cw * 0.6) * pr, 2.0], color: c, p: [0.0, 0.0] });
+                    over.push(Rect { xywh: [x0 + cw * 0.3, y + ch - 2.0, (x1 - x0 - cw * 0.6) * pr, 2.0], color: c, p: [0.0, 0.0], hole: NO_HOLE });
                 }
             }
         }
@@ -1043,7 +1177,7 @@ impl Renderer {
             for (i, (title, active)) in frame.tabs.iter().enumerate() {
                 let x = self.cell_w * 0.5 + i as f32 * tw;
                 if *active {
-                    over.push(Rect { xywh: [x + 2.0, h * 0.12, tw - 4.0, h * 0.76], color: frame.bar_bg.f32(), p: [0.0, 0.0] });
+                    over.push(Rect { xywh: [x + 2.0, h * 0.12, tw - 4.0, h * 0.76], color: frame.bar_bg.f32(), p: [0.0, 0.0], hole: NO_HOLE });
                 }
                 let max_chars = ((tw / self.cell_w) as usize).saturating_sub(3).max(4);
                 let mut t: String = title.chars().take(max_chars).collect();
@@ -1090,25 +1224,25 @@ impl Renderer {
             if look.shadow {
                 // a soft shadow, a little lower than the popup
                 let s = 14.0;
-                over.push(Rect { xywh: [x - s, y - s + 4.0, pw + 2.0 * s, ph + 2.0 * s], color: [0.0, 0.0, 0.0, 0.38], p: [r, s] });
+                over.push(Rect { xywh: [x - s, y - s + 4.0, pw + 2.0 * s, ph + 2.0 * s], color: [0.0, 0.0, 0.0, 0.38], p: [r, s], hole: NO_HOLE });
             }
             if look.blur > 0.0 {
                 backdrop = Some(([x, y, pw, ph], r, look.blur));
             }
             if look.border {
                 let e = frame.fg.f32();
-                over.push(Rect { xywh: [x - 1.0, y - 1.0, pw + 2.0, ph + 2.0], color: [e[0], e[1], e[2], 0.16], p: [r + 1.0, 0.0] });
+                over.push(Rect { xywh: [x - 1.0, y - 1.0, pw + 2.0, ph + 2.0], color: [e[0], e[1], e[2], 0.16], p: [r + 1.0, 0.0], hole: NO_HOLE });
             }
             let mut bg = frame.bar_bg.f32();
             bg[3] = look.opacity;
-            over.push(Rect { xywh: [x, y, pw, ph], color: bg, p: [r, 0.0] });
+            over.push(Rect { xywh: [x, y, pw, ph], color: bg, p: [r, 0.0], hole: NO_HOLE });
             let dim = dim6(frame.fg);
             for (k, i) in rows.iter().enumerate() {
                 let ry = y + self.cell_h * 0.25 + k as f32 * row_h;
                 let chosen = pp.sel == Some(*i);
                 if chosen {
                     let c = frame.cursor_color.f32();
-                    over.push(Rect { xywh: [x + 4.0, ry, pw - 8.0, row_h], color: [c[0], c[1], c[2], 0.30], p: [(r * 0.6).max(2.0), 0.0] });
+                    over.push(Rect { xywh: [x + 4.0, ry, pw - 8.0, row_h], color: [c[0], c[1], c[2], 0.30], p: [(r * 0.6).max(2.0), 0.0], hole: NO_HOLE });
                 }
                 let (b, _) = label(&mut self.font_system, &self.family, &pp.items[*i], if chosen || pp.sel.is_none() { frame.fg } else { dim }, self.font_px, self.cell_h);
                 labels.push((b, x + self.cell_w, ry + (row_h - self.cell_h) / 2.0));
@@ -1125,11 +1259,19 @@ impl Renderer {
             let (bw, bh) = (w + 2.0 * self.cell_w, self.cell_h * 1.5);
             // bottom right of the focused pane: found lines are scrolled to the top, so the bar never covers them
             let (x, y) = ((focus.x + focus.w - bw - self.cell_w).max(focus.x), focus.y + focus.h - bh - self.cell_h * 0.5);
-            over.push(Rect { xywh: [x, y, bw, bh], color: frame.bar_bg.f32(), p: [0.0, 0.0] });
+            over.push(Rect { xywh: [x, y, bw, bh], color: frame.bar_bg.f32(), p: [0.0, 0.0], hole: NO_HOLE });
             labels.push((b, x + self.cell_w, y + self.cell_h * 0.25));
         }
         self.bars = labels;
+        // floats coming, going or moving: frames until they are still (layers.rs)
+        {
+            let dur = std::time::Duration::from_millis(self.layers_conf.ms as u64);
+            let t = std::time::Instant::now();
+            self.layer_anim.prune(t, dur);
+            animating |= self.layers_conf.animate && self.layer_anim.busy(t, dur);
+        }
         self.overlay.upload(device, queue, &over, width as f32, height as f32);
+        self.veil.upload(device, queue, &veil, width as f32, height as f32);
         self.viewport.update(queue, Resolution { width, height });
         let ch = self.cell_h;
         let mut areas: Vec<TextArea> = Vec::new();
@@ -1219,12 +1361,57 @@ impl Renderer {
             }).forget_lifetime()
         };
         match backdrop {
+            // floats whose shadows a shader draws: the frame offscreen, shown, then the shader over
+            // the shadows reading it
+            None if fx_on && !fx_floats.is_empty() => {
+                let blur = self.blur.get_or_insert_with(|| Blur::new(device, self.format));
+                blur.textures(device, width, height);
+                let (_, _, _, scene, _, plain) = blur.tex.as_ref().unwrap();
+                // the frame without its text too: where the two differ is text (zText), what is
+                // under a letter the shader can see (zPlain)
+                {
+                    let mut p = pass(&mut enc, plain, wgpu::LoadOp::Clear(clear));
+                    draw_rects(&self.rects, &self.shaders, &self.panel_shader, &mut p);
+                    self.images.draw(&mut p, width, height);
+                    self.veil.draw(&mut p);
+                }
+                {
+                    let mut p = pass(&mut enc, scene, wgpu::LoadOp::Clear(clear));
+                    draw_rects(&self.rects, &self.shaders, &self.panel_shader, &mut p);
+                    self.images.draw(&mut p, width, height);
+                    let _ = self.text.render(&self.atlas, &self.viewport, &mut p);
+                    self.veil.draw(&mut p);
+                }
+                let to_screen = blur.bind(device, scene, 3);
+                fullscreen(&mut enc, view, &blur.blit, &to_screen, wgpu::LoadOp::Clear(clear), None);
+                // where shadows can fall: the floats and the reach of their shadows
+                let m = fx_cell * 3.0;
+                let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, 0.0f32, 0.0f32);
+                for (r, _) in &fx_floats {
+                    x0 = x0.min(r[0] - m);
+                    y0 = y0.min(r[1] - m);
+                    x1 = x1.max(r[0] + r[2] + m);
+                    y1 = y1.max(r[1] + r[3] + m);
+                }
+                let (w, h) = (width as f32, height as f32);
+                let (sx, sy) = (x0.clamp(0.0, w) as u32, y0.clamp(0.0, h) as u32);
+                let scissor = [sx, sy, (x1.clamp(0.0, w) as u32).saturating_sub(sx), (y1.clamp(0.0, h) as u32).saturating_sub(sy)];
+                let o = self.opacity;
+                let bgp = [bg[0] * o, bg[1] * o, bg[2] * o, o];
+                if let Some(fx) = self.layer_fx.as_ref() {
+                    fx.draw(device, queue, &mut enc, view, scene, plain, &fx_floats, [w, h], self.layer_fx_t0.elapsed().as_secs_f32(), bgp, fx_cell, self.layers_conf.shadow, scissor);
+                }
+                let mut p = pass(&mut enc, view, wgpu::LoadOp::Load);
+                self.overlay.draw(&mut p);
+                let _ = self.text2.render(&self.atlas, &self.viewport, &mut p);
+            }
             None => {
                 // the usual frame: one pass
                 let mut p = pass(&mut enc, view, wgpu::LoadOp::Clear(clear));
                 draw_rects(&self.rects, &self.shaders, &self.panel_shader, &mut p);
                 self.images.draw(&mut p, width, height);
                 let _ = self.text.render(&self.atlas, &self.viewport, &mut p);
+                self.veil.draw(&mut p);
                 self.overlay.draw(&mut p);
                 let _ = self.text2.render(&self.atlas, &self.viewport, &mut p);
             }
@@ -1265,10 +1452,13 @@ impl Renderer {
                 fullscreen(&mut enc, scene, &blur.blur, &v_pass, wgpu::LoadOp::Load, Some([sx, sy, sw, sh]));
                 fullscreen(&mut enc, view, &blur.mask, &masked, wgpu::LoadOp::Load, Some([sx, sy, sw, sh]));
                 let mut p = pass(&mut enc, view, wgpu::LoadOp::Load);
+                self.veil.draw(&mut p);
                 self.overlay.draw(&mut p);
                 let _ = self.text2.render(&self.atlas, &self.viewport, &mut p);
             }
         }
+        // the shader moves on its own while a float shows
+        let animating = animating || (fx_on && !fx_floats.is_empty());
         queue.submit(Some(enc.finish()));
         self.atlas.trim();
         self.fx.frame_done(fx_moving, fx_start.elapsed());
@@ -1474,7 +1664,7 @@ fn clipped(rects: Vec<Rect>, clip: [f32; 4]) -> Vec<Rect> {
         .filter_map(|r| {
             let [x, y, w, h] = r.xywh;
             let (x0, y0, x1, y1) = (x.max(cx0), y.max(cy0), (x + w).min(cx1), (y + h).min(cy1));
-            (x1 > x0 && y1 > y0).then_some(Rect { xywh: [x0, y0, x1 - x0, y1 - y0], color: r.color, p: r.p })
+            (x1 > x0 && y1 > y0).then_some(Rect { xywh: [x0, y0, x1 - x0, y1 - y0], color: r.color, p: r.p, hole: r.hole })
         })
         .collect()
 }
@@ -1686,10 +1876,10 @@ impl Frame {
     /// The placements that show on the screen, given the scroll position.
     /// The pane's pen strokes that show, given the scroll position.
     /// The pen's strokes on this screen; `float`: where the zfloat is now (its strokes go with it).
-    pub fn with_ink<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, ink: &crate::ink::Ink, float: crate::ink::FloatAt) -> Frame {
+    pub fn with_ink<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, ink: &crate::ink::Ink, float: crate::ink::FloatAt, panes: &[crate::ink::ZPane]) -> Frame {
         if !ink.is_empty() {
             self.ink_top = term.grid().history_size() as f64 - term.grid().display_offset() as f64;
-            self.ink = ink.shown(self.ink_top, self.rows.len() as f64, float);
+            self.ink = ink.shown(self.ink_top, self.rows.len() as f64, float, panes);
         }
         self
     }
@@ -1710,6 +1900,10 @@ impl Frame {
     }
 
     pub fn with_images<T: alacritty_terminal::event::EventListener>(mut self, term: &Term<T>, g: &crate::graphics::Graphics) -> Frame {
+        // floats only on the live screen (scrolled back, the program's screen is not what shows)
+        if term.grid().display_offset() == 0 && term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN) {
+            self.layers = g.layers.clone();
+        }
         // pinned to screen cells by a multiplexer: there while the screen is not scrolled back
         if term.grid().display_offset() == 0 {
             for (id, (rect, _)) in &g.pinned {
@@ -2039,4 +2233,76 @@ fn clipped_rect(r: [f32; 4], clip: [f32; 4]) -> [f32; 4] {
     let x1 = (r[0] + r[2]).min(clip[0] + clip[2]);
     let y1 = (r[1] + r[3]).min(clip[1] + clip[3]);
     [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)]
+}
+
+/// A float's cells (inside it): for its fade-out once it is gone.
+fn layer_cells(rows: &[Vec<CellView>], r: &[usize; 4]) -> Vec<crate::layers::GhostCell> {
+    let mut out = Vec::new();
+    for (y, row) in rows.iter().enumerate().skip(r[1]).take(r[3]) {
+        for (x, c) in row.iter().enumerate().skip(r[0]).take(r[2]) {
+            if c.spacer {
+                continue;
+            }
+            let mut text = c.ch.to_string();
+            if let Some(z) = &c.zw {
+                text.extend(z.iter());
+            }
+            let flags = u8::from(c.style.bold) | (u8::from(c.style.italic) << 1);
+            out.push((x - r[0], y - r[1], text, c.style.fg, c.bg.map(|b| (b.0, b.1, b.2)), flags));
+        }
+    }
+    out
+}
+
+/// The parts of `r` outside `inner` (which lies inside it): up to four strips.
+fn outside(r: [f32; 4], inner: [f32; 4]) -> Vec<[f32; 4]> {
+    let (x0, y0, x1, y1) = (r[0], r[1], r[0] + r[2], r[1] + r[3]);
+    let (ix0, iy0, ix1, iy1) = (inner[0].max(x0), inner[1].max(y0), (inner[0] + inner[2]).min(x1), (inner[1] + inner[3]).min(y1));
+    [[x0, y0, r[2], iy0 - y0], [x0, iy1, r[2], y1 - iy1], [x0, iy0, ix0 - x0, iy1 - iy0], [ix1, iy0, x1 - ix1, iy1 - iy0]]
+        .into_iter().filter(|s| s[2] > 0.5 && s[3] > 0.5).collect()
+}
+
+/// A float's frame, as Neovide lights its floats: a faint shadow all round and a soft one cast
+/// down by a light above, both cut out under it (no line round it: the text's own border shows). `a` how far it has come
+/// (0 nothing, 1 all of it), `shadow` how dark (`[layers] shadow`).
+fn layer_frame(r: [f32; 4], ch: f32, _fg: [f32; 4], a: f32, shadow: f32) -> Vec<Rect> {
+    let (soft, drop) = (ch * 0.9, ch * 0.4);
+    let mut out = Vec::new();
+    if shadow > 0.0 {
+        let around = (ch * 0.25).round();
+        // the shape is drawn inset by its softness: out by 1.5 of it, its middle at the edge
+        out.push(Rect { xywh: [r[0] - 2.0 * around, r[1] - 2.0 * around, r[2] + 4.0 * around, r[3] + 4.0 * around], color: [0.0, 0.0, 0.0, 0.12 * shadow * a], p: [2.0, around], hole: r });
+        out.push(Rect { xywh: [r[0] - soft * 1.5, r[1] + drop - soft * 1.5, r[2] + soft * 3.0, r[3] + soft * 3.0], color: [0.0, 0.0, 0.0, 0.45 * shadow * a], p: [2.0, soft], hole: r });
+    }
+    out
+}
+
+impl Renderer {
+    /// The shadows' shader is there to draw with: compiled when it is named, or its file changed;
+    /// one that does not compile is said once and the usual shadow drawn.
+    fn layer_fx_ready(&mut self, device: &wgpu::Device) -> bool {
+        let Some(name) = self.layer_shader.clone() else {
+            self.layer_fx = None;
+            return false;
+        };
+        if self.layer_fx.as_ref().is_some_and(|f| f.source == name && !f.stale()) {
+            return true;
+        }
+        if self.layer_fx.is_none() && self.layer_fx_failed.as_deref() == Some(name.as_str()) {
+            return false;
+        }
+        match crate::layer_fx::LayerFx::load(device, self.format, &name) {
+            Ok(f) => {
+                self.layer_fx = Some(f);
+                self.layer_fx_failed = None;
+                true
+            }
+            Err(e) => {
+                eprintln!("zash: [layers] shader: {e}");
+                self.layer_fx = None;
+                self.layer_fx_failed = Some(name);
+                false
+            }
+        }
+    }
 }

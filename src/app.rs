@@ -89,6 +89,8 @@ struct App {
     nvim_btn: Option<&'static str>,
     /// the button held down for a program that wants the mouse
     mouse_btn: Option<u8>,
+    /// a mouse button down in this window, whatever it went to (effects wait while it drags)
+    btn_down: bool,
     last_cell: (usize, usize),
     /// (time, count, cell) of the last left click: double = word, triple = line
     clicks: (std::time::Instant, u8, (usize, usize)),
@@ -113,7 +115,7 @@ pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::Pat
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None, paste_guard: None, pen: None, drawing: false, pen_last: Default::default(), pen_hover: None, float };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, btn_down: false, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None, paste_guard: None, pen: None, drawing: false, pen_last: Default::default(), pen_hover: None, float };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -557,7 +559,10 @@ impl App {
         let at = crate::ink::Point { line: top + ((y - oy) / ch) as f64, col: (x - ox) / cw, p: p.pressure };
         // the zfloat now (x, y, w, h in cells): a stroke begun on it belongs to it, kept relative to it
         let float = s.graphics.lock().unwrap().float.as_ref().map(|z| (z.id, z.x, z.y, z.w, z.h));
+        // zeit's panes as shown: a stroke begun on one is kept on that pane's own lines
+        let zpanes = s.graphics.lock().unwrap().zpanes.clone();
         let row = at.line - top;
+        let in_pane = |p: &crate::ink::ZPane| crate::ink::Point { line: p.top as f64 + (row - p.y as f64), col: at.col - p.x as f32, p: at.p };
         let on = |f: &(u64, usize, usize, usize, usize)| at.col >= f.1 as f32 && at.col < (f.1 + f.3) as f32 && row >= f.2 as f64 && row < (f.2 + f.4) as f64;
         let local = |f: (u64, usize, usize, usize, usize)| crate::ink::Point { line: row - f.2 as f64, col: at.col - f.1 as f32, p: at.p };
         self.pen_hover = p.near.then_some((id, at.line, at.col));
@@ -569,22 +574,27 @@ impl App {
             }
             if p.down && erasing {
                 ink.live = None;
-                ink.erase(at, 0.6 + 0.8 * p.pressure, top, float.map(|f| (f.0, f.1, f.2)));
+                ink.erase(at, 0.6 + 0.8 * p.pressure, top, float.map(|f| (f.0, f.1, f.2)), &zpanes);
             } else if p.down && !last.down {
                 let w = self.cfg.pen.width;
                 let color = self.cfg.pen.color.map(|c| c.f32()).unwrap_or_else(|| self.cfg.palette.cursor_bg.f32());
-                match float.filter(on) {
-                    Some(f) => ink.begin_on(Some(f.0), local(f), color, w),
-                    None => ink.begin(at, color, w),
+                match (float.filter(on), crate::ink::ZPane::at(&zpanes, row, at.col)) {
+                    (Some(f), _) => ink.begin_on(Some(f.0), local(f), color, w),
+                    (None, Some(zp)) => ink.begin_on_pane(zp.id, in_pane(&zp), color, w),
+                    (None, None) => ink.begin(at, color, w),
                 }
             } else if p.down {
-                // a zfloat's stroke goes on inside it (and ends if the zfloat closed meanwhile)
-                match ink.live_anchor() {
-                    None => ink.add(at),
-                    Some(id) => match float.filter(|f| f.0 == id) {
+                // a zfloat's or a zeit pane's stroke goes on inside it (and ends if it went meanwhile)
+                match (ink.live_anchor(), ink.live_pane()) {
+                    (Some(id), _) => match float.filter(|f| f.0 == id) {
                         Some(f) => ink.add(local(f)),
                         None => ink.end(),
                     },
+                    (None, Some(pid)) => match zpanes.iter().find(|z| z.id == pid) {
+                        Some(zp) => ink.add(in_pane(zp)),
+                        None => ink.end(),
+                    },
+                    (None, None) => ink.add(at),
                 }
             } else if last.down {
                 ink.end();
@@ -1187,16 +1197,20 @@ impl App {
                 _ => return None,
             })
         };
+        // the Kitty keyboard protocol, when the program asked for it (CSI > 1 u: zett, Neovim, Helix)
+        let m = self.mode();
+        let kitty = if m.contains(TermMode::DISAMBIGUATE_ESC_CODES) { input::KITTY_DISAMBIGUATE } else { 0 } | if m.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) { input::KITTY_ALL_KEYS } else { 0 };
         let bytes = match &ev.logical_key {
-            Key::Named(NamedKey::Space) => input::encode(&input::Key::Text(" "), mods, app_cursor),
-            Key::Named(k) => named(k).and_then(|n| input::encode(&input::Key::Named(n), mods, app_cursor)),
+            Key::Named(NamedKey::Space) => input::encode_kitty(&input::Key::Text(" "), mods, app_cursor, kitty),
+            Key::Named(k) => named(k).and_then(|n| input::encode_kitty(&input::Key::Named(n), mods, app_cursor, kitty)),
             Key::Character(c) => {
                 // with Ctrl the layout's character matters (Ctrl+C), otherwise the typed text
                 let text = if mods.ctrl { c.as_str() } else { ev.text.as_deref().unwrap_or(c.as_str()) };
-                let mods = Mods { shift: false, ..mods };
-                input::encode(&input::Key::Text(text), mods, app_cursor)
+                // Shift is in the character already, except as the protocol reports it (Ctrl+Shift+a)
+                let mods = Mods { shift: mods.shift && kitty != 0 && (mods.ctrl || mods.alt), ..mods };
+                input::encode_kitty(&input::Key::Text(text), mods, app_cursor, kitty)
             }
-            _ => ev.text.as_deref().and_then(|t| input::encode(&input::Key::Text(t), Mods::default(), app_cursor)),
+            _ => ev.text.as_deref().and_then(|t| input::encode_kitty(&input::Key::Text(t), Mods::default(), app_cursor, kitty)),
         };
         if let Some(b) = bytes {
             self.write(b);
@@ -1221,6 +1235,12 @@ impl App {
             }
         };
         let scroll_px = self.glide + frac_px;
+        // a program asked for another font size (OSC 7733;zoom: zett's C-x C-= / C-x C-- / C-x C-0)
+        let zoom = self.tabs.get(self.active).and_then(|t| t.panes.iter().find_map(|p| p.session.graphics.lock().unwrap().zoom.take()));
+        if let Some(z) = zoom {
+            let pt = if z == 0 { self.cfg.font_size_pt } else { self.font_pt + z as f32 };
+            self.set_font(pt);
+        }
         let cell_h = self.gpu.as_ref().map(|g| g.renderer.cell_h).unwrap_or(16.0);
         let Some(tab) = self.tabs.get(self.active) else { return };
         // web areas follow their cells' size in pixels (the window, the font), at the screen's scale
@@ -1296,7 +1316,7 @@ impl App {
                 // the zfloat now: strokes drawn on it are drawn where it is
                 let float = s.graphics.lock().unwrap().float.as_ref().map(|z| (z.id, z.x, z.y));
                 // the graphics locked once: a second lock in the same statement waits for the first forever
-                let f = { let g = s.graphics.lock().unwrap(); Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &s.ui_rows.lock().unwrap()).with_images(&t, &g).with_under(&g, &pal).with_ink(&t, &s.ink.lock().unwrap(), float) };
+                let f = { let g = s.graphics.lock().unwrap(); Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &s.ui_rows.lock().unwrap()).with_images(&t, &g).with_under(&g, &pal).with_ink(&t, &s.ink.lock().unwrap(), float, &g.zpanes) };
                 if id == tab.focus { f.with_scroll(&t, &pal, scroll_px, cell_h) } else { f }
             };
             if id == tab.focus {
@@ -1550,6 +1570,8 @@ impl ApplicationHandler<ZEvent> for App {
                     g.renderer.cursor_trail = self.cfg.cursor_trail;
                     g.renderer.fx.set_settings(self.cfg.fx.clone());
                     g.renderer.zfloat_shaders = self.cfg.zfloat_shaders.clone();
+                    g.renderer.layers_conf = self.cfg.layers;
+                    g.renderer.layer_shader = self.cfg.layer_shader.clone();
                     g.renderer.invalidate();
                 }
                 if font {
@@ -1656,8 +1678,17 @@ impl ApplicationHandler<ZEvent> for App {
             WindowEvent::RedrawRequested => self.render(),
             WindowEvent::DroppedFile(path) => self.drop_files(vec![path], None),
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => self.key(&event),
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // a held key (repeating): effects begun meanwhile wait for it to be let go
+                if event.repeat {
+                    crate::fx::input_busy(300);
+                }
+                self.key(&event)
+            }
             WindowEvent::Focused(f) => {
+                if !f {
+                    self.btn_down = false;
+                }
                 if let Some(n) = self.pane().and_then(|p| p.nvim.as_ref()) {
                     n.focus(f);
                 }
@@ -1668,6 +1699,10 @@ impl ApplicationHandler<ZEvent> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                // dragging (a button held): effects wait too
+                if self.btn_down {
+                    crate::fx::input_busy(350);
+                }
                 self.mouse = (position.x, position.y);
                 // hover on the zfloat buttons zash draws: only a redraw when there is a zfloat
                 if let Some(g) = self.gpu.as_mut() {
@@ -1712,6 +1747,7 @@ impl ApplicationHandler<ZEvent> for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                self.btn_down = state == ElementState::Pressed;
                 let code = match button { MouseButton::Left => 0, MouseButton::Middle => 1, MouseButton::Right => 2, _ => return };
                 let pressed = state == ElementState::Pressed;
                 // a click in another pane gives it the keyboard first
@@ -1801,6 +1837,7 @@ impl ApplicationHandler<ZEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                crate::fx::input_busy(350);
                 let cell_h = self.gpu.as_ref().map(|g| g.renderer.cell_h as f64).unwrap_or(16.0);
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y as f64 * 3.0,

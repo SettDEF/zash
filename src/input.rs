@@ -46,6 +46,47 @@ pub enum Key<'a> {
     Text(&'a str),
 }
 
+/// The Kitty keyboard protocol's flags a program asked for (CSI > flags u): 1 disambiguate (Esc
+/// and modified keys as CSI code;mods u), 8 every key as an escape code. 0: the classic encoding.
+pub const KITTY_DISAMBIGUATE: u8 = 1;
+pub const KITTY_ALL_KEYS: u8 = 8;
+
+/// As [`encode`], under the Kitty keyboard protocol's `flags` (0 is [`encode`] itself). Arrows,
+/// Home/End, F-keys and the ~ keys keep their forms, which the protocol shares.
+pub fn encode_kitty(key: &Key, mods: Mods, app_cursor: bool, flags: u8) -> Option<Vec<u8>> {
+    if flags & (KITTY_DISAMBIGUATE | KITTY_ALL_KEYS) == 0 {
+        return encode(key, mods, app_cursor);
+    }
+    let all = flags & KITTY_ALL_KEYS != 0;
+    let csi_u = |code: u32| -> Vec<u8> {
+        if mods.any() { format!("\x1b[{code};{}u", mods.param()) } else { format!("\x1b[{code}u") }.into_bytes()
+    };
+    match key {
+        Key::Text(t) => {
+            let mut cs = t.chars();
+            let (Some(c), None) = (cs.next(), cs.next()) else { return encode(key, mods, app_cursor) };
+            // Ctrl or Alt with a key (Shift alone just types its character): the key's own code
+            if all || mods.ctrl || mods.alt {
+                return Some(csi_u(c.to_lowercase().next().unwrap_or(c) as u32));
+            }
+            encode(key, mods, app_cursor)
+        }
+        Key::Named(n) => {
+            let code = match n {
+                Named::Escape => Some(27),
+                Named::Enter if all || mods.any() => Some(13),
+                Named::Tab if all || mods.any() => Some(9),
+                Named::Backspace if all || mods.any() => Some(127),
+                _ => None,
+            };
+            match code {
+                Some(c) => Some(csi_u(c)),
+                None => encode(key, mods, app_cursor),
+            }
+        }
+    }
+}
+
 /// `app_cursor`: the program asked for application cursor keys (DECCKM).
 pub fn encode(key: &Key, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
     match key {
@@ -155,7 +196,13 @@ pub fn mouse(button: u8, motion: bool, pressed: bool, col: usize, row: usize, mo
 
 /// Keys in Vim-like notation (`echo hi<CR>`, `<C-a>`, `<Up>`, `<S-Tab>`,
 /// `<M-b>`), encoded exactly as the window would: for headless tests.
+#[cfg(test)]
 pub fn encode_notation(s: &str, app_cursor: bool) -> Vec<Vec<u8>> {
+    encode_notation_kitty(s, app_cursor, 0)
+}
+
+/// As [`encode_notation`], under the Kitty keyboard protocol's flags the program asked for.
+pub fn encode_notation_kitty(s: &str, app_cursor: bool, kitty: u8) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
@@ -184,10 +231,10 @@ pub fn encode_notation(s: &str, app_cursor: bool) -> Vec<Vec<u8>> {
                     _ => None,
                 };
                 let bytes = match key {
-                    Some(k) => encode(&k, mods, app_cursor),
+                    Some(k) => encode_kitty(&k, mods, app_cursor, kitty),
                     None if base.chars().count() == 1 => {
                         let b = base.clone();
-                        encode(&Key::Text(&b), mods, app_cursor)
+                        encode_kitty(&Key::Text(&b), mods, app_cursor, kitty)
                     }
                     None => None,
                 };
@@ -199,7 +246,9 @@ pub fn encode_notation(s: &str, app_cursor: bool) -> Vec<Vec<u8>> {
             }
         }
         let mut buf = [0u8; 4];
-        out.push(chars[i].encode_utf8(&mut buf).as_bytes().to_vec());
+        let c = chars[i].encode_utf8(&mut buf);
+        // a plain character: as itself, but as an escape code when the program asked for every key
+        out.push(if kitty & KITTY_ALL_KEYS != 0 { encode_kitty(&Key::Text(c), Mods::default(), app_cursor, kitty).unwrap_or_default() } else { c.as_bytes().to_vec() });
         i += 1;
     }
     out
@@ -283,6 +332,24 @@ mod tests {
         assert_eq!(encode_notation("a<CR>", false), vec![b"a".to_vec(), b"\r".to_vec()]);
         assert_eq!(encode_notation("<C-a><M-f><Up>", false), vec![vec![1], b"\x1bf".to_vec(), b"\x1b[A".to_vec()]);
         assert_eq!(encode_notation("<S-Tab>", false), vec![b"\x1b[Z".to_vec()]);
+    }
+
+    #[test]
+    fn kitty_keyboard() {
+        let k = |s: &str, f: u8| encode_notation_kitty(s, false, f);
+        // disambiguate: Esc and modified keys as CSI code;mods u, plain typing as it was
+        assert_eq!(k("<Esc>", KITTY_DISAMBIGUATE), vec![b"\x1b[27u".to_vec()]);
+        assert_eq!(k("<C-a>", KITTY_DISAMBIGUATE), vec![b"\x1b[97;5u".to_vec()]);
+        assert_eq!(k("<C-=>", KITTY_DISAMBIGUATE), vec![b"\x1b[61;5u".to_vec()], "C-= has no C0 code: only the protocol tells it");
+        assert_eq!(k("<C-\\>", KITTY_DISAMBIGUATE), vec![b"\x1b[92;5u".to_vec()]);
+        assert_eq!(k("<M-f>", KITTY_DISAMBIGUATE), vec![b"\x1b[102;3u".to_vec()]);
+        assert_eq!(k("<C-CR>", KITTY_DISAMBIGUATE), vec![b"\x1b[13;5u".to_vec()]);
+        assert_eq!(k("a<CR><Tab><BS>", KITTY_DISAMBIGUATE), vec![b"a".to_vec(), b"\r".to_vec(), b"\t".to_vec(), vec![0x7f]]);
+        assert_eq!(k("<Up><S-Up>", KITTY_DISAMBIGUATE), vec![b"\x1b[A".to_vec(), b"\x1b[1;2A".to_vec()]);
+        // every key: text too
+        assert_eq!(k("a<CR>", KITTY_ALL_KEYS), vec![b"\x1b[97u".to_vec(), b"\x1b[13u".to_vec()]);
+        // no flags: the classic forms
+        assert_eq!(k("<C-a><Esc>", 0), vec![vec![1], vec![0x1b]]);
     }
 
     #[test]

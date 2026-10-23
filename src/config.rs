@@ -158,6 +158,10 @@ pub struct Config {
     pub popup: PopupLook,
     /// a multiplexer's zfloats: their panel and frame (`[zfloat]`)
     pub zfloat: ZfloatLook,
+    /// programs' floats (zett's popups, OSC 7733;layers): animated in and out (`[layers]`)
+    pub layers: LayersConf,
+    /// a GLSL shader over the floats' shadows ("melt" built in, a file in shaders/, or a path)
+    pub layer_shader: Option<String>,
     /// a GLSL shader as a zfloat's background: by its title, else the default (`[zfloat] shader`)
     pub zfloat_shaders: ZfloatShaders,
     /// text effects (OSC 7733;fx): on or off, their frame rate, presets (`[fx]`)
@@ -209,6 +213,8 @@ impl Default for Config {
             cursor: CursorConf::default(),
             popup: PopupLook::default(),
             zfloat: ZfloatLook::default(),
+            layers: LayersConf::default(),
+            layer_shader: None,
             zfloat_shaders: ZfloatShaders { morph: 1.5, ..Default::default() },
             fx: crate::fx::Settings::default(),
             copy: crate::copy::Settings::default(),
@@ -291,6 +297,7 @@ struct File {
     /// the completion popup's look
     popup: Option<PopupFile>,
     zfloat: Option<ZfloatFile>,
+    layers: Option<LayersFile>,
     fx: Option<FxFile>,
     copy: Option<CopyFile>,
     pen: Option<PenFile>,
@@ -386,6 +393,18 @@ struct FxFile {
     shaders: Option<bool>,
     fps: Option<f32>,
     presets: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct LayersFile {
+    animate: Option<bool>,
+    ms: Option<u32>,
+    open: Option<String>,
+    shadow_over: Option<bool>,
+    close: Option<String>,
+    shader: Option<String>,
+    shadow: Option<f32>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -885,6 +904,26 @@ impl Config {
             if let Some(v) = d.size_pt { k.font_size_pt = Some(v.clamp(4.0, 72.0)); }
         }
         if let Some([w, h]) = f.float.and_then(|f| f.size) { c.float_size = (w.max(200), h.max(120)); }
+        if let Some(l) = f.layers {
+            if let Some(v) = l.animate { c.layers.animate = v; }
+            if let Some(v) = l.ms { c.layers.ms = v.clamp(0, 2000); }
+            if let Some(v) = l.shadow { c.layers.shadow = v.clamp(0.0, 3.0); }
+            if let Some(v) = l.shadow_over { c.layers.shadow_over = v; }
+            match l.close.as_deref() {
+                Some("fade") => c.layers.fade_out = true,
+                Some("none") | Some("instant") => c.layers.fade_out = false,
+                Some(o) => eprintln!("zash: [layers] close = {o:?}: fade or none"),
+                None => {}
+            }
+            c.layer_shader = l.shader.clone().filter(|s| !s.is_empty() && s != "none");
+            match l.open.as_deref() {
+                Some("fade") => c.layers.open = LayerOpen::Fade,
+                Some("none") => c.layers.open = LayerOpen::None,
+                Some("unroll") => c.layers.open = LayerOpen::Unroll,
+                Some(o) => eprintln!("zash: [layers] open = {o:?}: unroll, fade or none"),
+                None => {}
+            }
+        }
         if let Some(z) = f.zfloat {
             if let Some(v) = z.opacity { c.zfloat.opacity = v.clamp(0.0, 1.0); }
             // "ps3/wave" (a package's shader) or a path, with its options from [zfloat.shader_options]
@@ -959,5 +998,36 @@ mod glass_tests {
         std::fs::write(&p, "return { opacity = 5 }\n").unwrap();
         assert_eq!(super::Config::read_glass(&p), Some(1.0));
         std::fs::remove_file(&p).unwrap();
+    }
+}
+
+/// Programs' floats (zett's popups, OSC 7733;layers): `[layers]` in zash.toml.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayersConf {
+    /// one coming fades in, one going fades and shrinks out, one moving slides
+    pub animate: bool,
+    /// how long that takes
+    pub ms: u32,
+    /// how one comes and goes: Fade (default, the whole float at once), Unroll from its side (by cells, less smooth), None (at once, as Neovide)
+    pub open: LayerOpen,
+    /// how dark its shadow is (0 none, 1 as Neovide)
+    pub shadow: f32,
+    /// the shadow over the text under it too (darkens it), not only under that text
+    pub shadow_over: bool,
+    /// a float going fades out over what was under it (false: gone at once, as Neovide; its
+    /// fading background over the status line read as a grey flash)
+    pub fade_out: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LayerOpen {
+    Unroll,
+    Fade,
+    None,
+}
+
+impl Default for LayersConf {
+    fn default() -> Self {
+        LayersConf { animate: true, ms: 140, open: LayerOpen::Fade, shadow: 1.0, shadow_over: false, fade_out: false }
     }
 }

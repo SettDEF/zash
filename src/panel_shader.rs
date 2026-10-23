@@ -2,7 +2,9 @@
 //! names for it). Shadertoy style: the file defines `void mainImage(out vec4 fragColor, in vec2
 //! fragCoord)` and may read `iResolution`, `iTime`, `iPanel` (the panel's colour), `iAccent`,
 //! `iFocus` (1 while it has the keyboard), `iOrigin` + `iScreen` (for a scene that stays put while
-//! the panel moves over it), `iMonth`, and its options. zash cuts it to the panel's rounded
+//! the panel moves over it), `iMonth`, its options, and `iChannel0`: a PNG from pack.toml
+//! (`channel0 = "picture.png"`, read with `texture(iChannel0, uv)`, its size `iChannelResolution0`;
+//! v runs down the picture, so `1.0 - uv.y` shows it upright). zash cuts it to the panel's rounded
 //! corners; text and buttons stay on top. A shader that does not compile is reported once and the
 //! panel stays plain.
 //!
@@ -34,6 +36,11 @@ struct U { rect: vec4<f32>, screen: vec4<f32>, panel: vec4<f32>, accent: vec4<f3
 const HEAD: &str = "#version 450
 layout(set = 0, binding = 0) uniform U { vec4 rect; vec4 screen; vec4 panel; vec4 accent; vec4 misc; vec4 zash_opt[8]; };
 layout(location = 0) out vec4 zash_out;
+// iChannel0: the pack's image for this shader (pack.toml channel0), else one clear pixel
+layout(set = 0, binding = 1) uniform texture2D zash_tex0;
+layout(set = 0, binding = 2) uniform sampler zash_smp0;
+#define iChannel0 sampler2D(zash_tex0, zash_smp0)
+#define iChannelResolution0 vec3(textureSize(iChannel0, 0), 1.0)
 vec3 iResolution;
 float iTime;
 vec4 iPanel;
@@ -102,6 +109,8 @@ struct Pack {
 struct PackShader {
     #[serde(default)]
     options: BTreeMap<String, PackOption>,
+    /// a PNG the shader reads as `iChannel0` (`texture(iChannel0, uv)`), beside pack.toml
+    channel0: Option<String>,
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -138,6 +147,35 @@ fn read_pack(dir: &Path) -> Result<Pack, String> {
 fn options_of(pack: &Pack, path: &Path) -> Vec<(String, PackOption)> {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
     pack.shaders.get(stem).map(|s| s.options.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
+}
+
+/// The image a file reads as iChannel0 (pack.toml `channel0`, beside it; ~/ for the home folder).
+fn channel_of(pack: &Pack, path: &Path) -> Option<PathBuf> {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let c = pack.shaders.get(stem)?.channel0.as_ref()?;
+    Some(match c.strip_prefix("~/") {
+        Some(r) => PathBuf::from(format!("{}/{r}", std::env::var("HOME").unwrap_or_default())),
+        None => path.parent().unwrap_or(Path::new(".")).join(c),
+    })
+}
+
+/// A PNG as RGBA8 pixels (width, height, bytes).
+fn read_png(p: &Path) -> Result<(u32, u32, Vec<u8>), String> {
+    let f = std::fs::File::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let mut dec = png::Decoder::new(std::io::BufReader::new(f));
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut r = dec.read_info().map_err(|e| format!("{}: {e}", p.display()))?;
+    let mut buf = vec![0; r.output_buffer_size()];
+    let info = r.next_frame(&mut buf).map_err(|e| format!("{}: {e}", p.display()))?;
+    let px = &buf[..info.buffer_size()];
+    let rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => px.to_vec(),
+        png::ColorType::Rgb => px.chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => px.chunks(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
+        png::ColorType::Grayscale => px.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::Indexed => return Err(format!("{}: an indexed PNG that did not expand", p.display())),
+    };
+    Ok((info.width, info.height, rgba))
 }
 
 /// "ps3/wave" → a preset of the ps3 pack, or ~/.config/zash/shaders/ps3/wave.glsl; a path as it is.
@@ -274,7 +312,7 @@ pub struct PanelShader {
 
 impl PanelShader {
     /// Compiles a shader file. Errors come back as text (a bad file must not take zash down).
-    fn load(device: &wgpu::Device, format: wgpu::TextureFormat, path: &Path, opts: &[(String, PackOption)]) -> Result<PanelShader, String> {
+    fn load(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, path: &Path, opts: &[(String, PackOption)], channel0: Option<&Path>) -> Result<PanelShader, String> {
         let code = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         if !code.contains("mainImage") {
             return Err(format!("{}: no mainImage(out vec4, in vec2)", path.display()));
@@ -287,16 +325,63 @@ impl PanelShader {
             source: wgpu::ShaderSource::Glsl { shader: source.into(), stage: wgpu::naga::ShaderStage::Fragment, defines: &[] },
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 80 + 4 * MAX_OPTIONS as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        // iChannel0: the image (sRGB, so the shader reads linear colour), else one clear pixel
+        let (w, h, px) = match channel0 {
+            Some(p) => read_png(p)?,
+            None => (1, 1, vec![0, 0, 0, 0]),
+        };
+        let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("zash panel iChannel0"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &px,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) },
+            size,
+        );
+        let view = tex.create_view(&Default::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                count: None,
-            }],
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+            ],
         });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &bgl, entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }] });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], ..Default::default() });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("zash panel shader"),
@@ -403,15 +488,17 @@ impl Shaders {
     }
 
     /// The shader for a file, if it compiles (an error is printed once per version of the file).
-    pub fn get(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat, path: &Path) -> Option<&PanelShader> {
+    pub fn get(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, path: &Path) -> Option<&PanelShader> {
         let stale = match self.loaded.get(path) {
             None => true,
             Some((t, _)) => self.recheck && *t != stamp(path),
         };
         if stale {
             let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-            let opts = options_of(&self.pack(&dir), path);
-            let shader = match PanelShader::load(device, format, path, &opts) {
+            let pack = self.pack(&dir);
+            let opts = options_of(&pack, path);
+            let channel = channel_of(&pack, path);
+            let shader = match PanelShader::load(device, queue, format, path, &opts, channel.as_deref()) {
                 Ok(s) => Some(s),
                 Err(e) => {
                     eprintln!("zash: panel shader: {e}");
@@ -546,4 +633,70 @@ mod tests {
         assert!(out.find("float a()").unwrap() < out.find("float b()").unwrap(), "a block before what uses it");
         std::fs::remove_dir_all(&dir).ok();
     }
+}
+
+/// `zash shader-snap NAME OUT.png`: one frame of a panel shader at `time` seconds, drawn offscreen
+/// on the GPU at w × h, over `panel` with `accent` (to look at a shader without a window).
+pub fn snap(name: &str, out: &str, w: u32, h: u32, time: f32, panel: [f32; 4], accent: [f32; 4], options: Vec<(String, String)>) -> Result<(), String> {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).map_err(|e| format!("no GPU adapter: {e}"))?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|e| e.to_string())?;
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let mut shaders = Shaders::default();
+    let choice = shaders.resolve(name, options);
+    if shaders.get(&device, &queue, format, &choice.path).is_none() {
+        return Err(format!("{name}: does not compile (see above), or no such shader"));
+    }
+    let (values, phase) = shaders.values(1, &choice, 0.0, time);
+    let shader = shaders.loaded(&choice.path).ok_or("not loaded")?;
+    let place = Place { rect: [0.0, 0.0, w as f32, h as f32], screen: [w as f32, h as f32], panel, accent, focus: true, opacity: 1.0, radius: 12.0 };
+    shader.update(&queue, &place, time, phase, &values);
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("zash shader-snap"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&Default::default());
+    let mut enc = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        shader.draw(&mut pass);
+    }
+    // read back, rows padded to 256 bytes
+    let row = (w * 4).div_ceil(256) * 256;
+    let buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (row * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    queue.submit(Some(enc.finish()));
+    let slice = buf.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    let data = slice.get_mapped_range().map_err(|e| format!("{e:?}"))?;
+    let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h as usize {
+        pixels.extend_from_slice(&data[y * row as usize..y * row as usize + w as usize * 4]);
+    }
+    drop(data);
+    let file = std::fs::File::create(out).map_err(|e| e.to_string())?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().and_then(|mut wr| wr.write_image_data(&pixels)).map_err(|e| e.to_string())
 }

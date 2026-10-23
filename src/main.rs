@@ -21,6 +21,8 @@ mod config;
 mod copy;
 mod anim;
 mod ink;
+mod layers;
+mod layer_fx;
 mod pen;
 mod desktop;
 mod dnd;
@@ -211,6 +213,49 @@ fn main() {
             args.remove(i);
         }
         float = Some(size.unwrap_or(cfg.float_size));
+    }
+
+    // zash shader-snap NAME OUT.png [--size WxH] [--time S] [--panel RRGGBB] [--accent RRGGBB] [--set k=v]:
+    // one frame of a panel shader, drawn offscreen (to see a shader without a window)
+    if args.first().map(String::as_str) == Some("shader-snap") {
+        let (mut name, mut out, mut size, mut time) = (None, None, (720u32, 450u32), 3.0f32);
+        let (mut panel, mut accent, mut set) = ([0.07, 0.07, 0.09, 1.0], [0.45, 0.62, 1.0, 1.0], Vec::new());
+        let hex = |s: &str| -> Option<[f32; 4]> {
+            let v = u32::from_str_radix(s.trim_start_matches('#'), 16).ok()?;
+            Some([((v >> 16) & 255) as f32 / 255.0, ((v >> 8) & 255) as f32 / 255.0, (v & 255) as f32 / 255.0, 1.0])
+        };
+        let mut it = args.into_iter().skip(1);
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--size" => {
+                    if let Some((w, h)) = it.next().and_then(|s| s.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))) {
+                        size = (w, h);
+                    }
+                }
+                "--time" => time = it.next().and_then(|s| s.parse().ok()).unwrap_or(time),
+                "--panel" => panel = it.next().as_deref().and_then(hex).unwrap_or(panel),
+                "--accent" => accent = it.next().as_deref().and_then(hex).unwrap_or(accent),
+                "--set" => {
+                    if let Some((k, v)) = it.next().and_then(|s| s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))) {
+                        set.push((k, v));
+                    }
+                }
+                _ if name.is_none() => name = Some(a),
+                _ => out = Some(a),
+            }
+        }
+        let (Some(name), Some(out)) = (name, out) else {
+            eprintln!("usage: zash shader-snap NAME OUT.png [--size WxH] [--time S] [--panel RRGGBB] [--accent RRGGBB] [--set option=value]");
+            std::process::exit(2);
+        };
+        match panel_shader::snap(&name, &out, size.0, size.1, time, panel, accent, set) {
+            Ok(()) => println!("wrote {out}"),
+            Err(e) => {
+                eprintln!("zash: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
     }
 
     if matches!(args.first().map(String::as_str), Some("--snapshot" | "snapshot")) {

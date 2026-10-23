@@ -422,6 +422,7 @@ impl State {
             images: Vec::new(),
             ink: Vec::new(),
             ink_top: 0.0,
+            layers: Vec::new(),
             pen_hover: None,
         }
     }

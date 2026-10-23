@@ -36,6 +36,8 @@ pub struct Graphics {
     pub anims: HashMap<u32, Arc<crate::anim::Anim>>,
     /// a web area that asked for the keyboard (zash --web)
     pub autofocus: Option<u32>,
+    /// a program asked for another font size (OSC 7733;zoom;+N|-N|0): points more, or 0 for the set size
+    pub zoom: Option<i32>,
     /// web areas a multiplexer (zeit) pins to screen cells: their rect (x, y, w, h) while
     /// shown, and whether the multiplexer has them focused
     pub pinned: HashMap<u32, (Option<(usize, usize, usize, usize)>, bool)>,
@@ -43,6 +45,10 @@ pub struct Graphics {
     pub pin_focus: Vec<(u32, bool)>,
     /// a multiplexer's app popup (OSC 7733;zfloat): zash draws its frame, title and buttons
     pub float: Option<ZFloat>,
+    /// zeit's panes as shown now (OSC 7733;panes), for the pen's strokes on them (ink.rs)
+    pub zpanes: Vec<crate::ink::ZPane>,
+    /// the program's floats (OSC 7733;layers;x,y,w,h;…, in cells): drawn raised (render.rs)
+    pub layers: Vec<[usize; 4]>,
     /// while the zfloat is dragged (OSC 7733;zunder): the cells under its edge, so a pixel-smooth
     /// drag shows what is really there in the strip it uncovers
     pub under: Option<ZUnder>,
@@ -292,6 +298,27 @@ impl Graphics {
 
     /// OSC 7733;webrect|webhide|webclose from a multiplexer: `id=N;x=;y=;w=;h=;focus=;url=…`.
     pub fn pin(&mut self, kind: &str, body: &str, cell: (f32, f32), wake: Box<dyn Fn() + Send + Sync>) {
+        // the program's floats (zett's popups): rectangles in cells, drawn as raised layers
+        if kind == "layers" {
+            let now: Vec<[usize; 4]> = body.split(';').filter_map(|r| {
+                let n: Vec<usize> = r.split(',').filter_map(|x| x.parse().ok()).collect();
+                (n.len() == 4 && n[2] > 0 && n[3] > 0).then(|| [n[0], n[1], n[2], n[3]])
+            }).collect();
+            if now != self.layers {
+                self.layers = now;
+                self.generation += 1;
+            }
+            return;
+        }
+        // zeit's panes: where each shown one is and the line at its top (the pen's strokes follow)
+        if kind == "panes" {
+            let now = crate::ink::ZPane::parse_all(body);
+            if now != self.zpanes {
+                self.zpanes = now;
+                self.generation += 1;
+            }
+            return;
+        }
         // the float: id=;x=;y=;w=;h=;focus=;title=… (title last), or floatclose
         if kind == "zfloatclose" {
             self.float = None;

@@ -1,0 +1,2 @@
+draw.ogg: the first 0.75 s of "pencil_write" by NachtmahrTV (https://freesound.org/s/571800/),
+from OpenGameArt "Pencil Sounds" (https://opengameart.org/node/132692). License: CC0 1.0.

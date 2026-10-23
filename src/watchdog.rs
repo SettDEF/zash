@@ -14,7 +14,7 @@ fn now_ms() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
 }
 
-fn log(line: &str) {
+pub(crate) fn log(line: &str) {
     let Some(dir) = state_dir() else { return };
     let _ = std::fs::create_dir_all(&dir);
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
