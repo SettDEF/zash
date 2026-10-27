@@ -19,6 +19,10 @@
 
 use crate::config::{Palette, Rgb};
 
+pub mod kit;
+pub mod layout;
+pub mod tokens;
+
 /// Words on a region: what, how big (times the cell font), how heavy, which font.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Label {
@@ -183,83 +187,59 @@ mod tests {
     }
 }
 
-/// `zash ui demo`: a mock zett screen (a sidebar, a heading, a card with buttons, a status line) in
-/// plain cells, and the hints that make zash draw it as a UI (`plain`: the cells only, as another
-/// terminal shows them). `cols` x `rows`: the screen.
+/// `zash ui demo`: zett's editor screen built with the kit (activity bar, explorer, tabs, code, a
+/// terminal panel, the status line); `plain`: as other terminals show it. `cols` x `rows`: the screen.
 pub fn demo(plain: bool, cols: usize, rows: usize) -> String {
+    use kit::*;
+    use layout::Size;
     let (cols, rows) = (cols.max(60), rows.max(18));
-    let mut s = String::from("\x1b[?25l\x1b[H\x1b[2J");
-    let at = |s: &mut String, row: usize, col: usize, text: &str| s.push_str(&format!("\x1b[{};{}H{text}", row + 1, col + 1));
-    let mut ui: Vec<String> = Vec::new();
-    let dim = |t: &str| format!("\x1b[2m{t}\x1b[22m");
-    let enc = |t: &str| t.replace('%', "%25").replace(',', "%2C").replace(';', "%3B");
-    let side = 24;
-    let last = rows - 1;
-    // the sidebar: a lower tone, the app's name, entries with icons, the chosen one a pill
-    ui.push(format!("panel,0,0,{side},{last},role=surface-container-low,r=0,pad=0"));
-    at(&mut s, 1, 3, "\x1b[1mzett\x1b[22m");
-    ui.push("text,3,1,12,1,text=zett,font=ui,weight=650,scale=1.15".into());
-    let items = [("\u{f01c}", "Inbox", "12"), ("\u{f073}", "Today", "3"), ("\u{f07b}", "Projects", ""), ("\u{f15c}", "Notes", ""), ("\u{f187}", "Archive", "")];
-    for (i, (icon, name, n)) in items.iter().enumerate() {
-        let row = 3 + i;
-        let sel = i == 0;
-        let line = format!("{icon}  {name:<11}{n:>3}");
-        at(&mut s, row, 3, &if sel && plain { format!("\x1b[7m {line} \x1b[27m") } else if sel { format!(" {icon}  {name:<11}{n:>3} ") } else { format!(" \x1b[2m{icon}\x1b[22m  {name:<11}{} ", dim(&format!("{n:>3}"))) });
-        if sel {
-            ui.push(format!("pill,3,{row},{},1,role=primary-container", side - 5));
-        }
-        let role = if sel { "on-primary-container" } else { "on-surface" };
-        ui.push(format!("text,7,{row},11,1,text={name},font=ui,weight={},role={role}", if sel { 600 } else { 450 }));
-    }
-    at(&mut s, 9, 4, &dim("PINNED"));
-    ui.push("text,4,9,12,1,text=PINNED,font=ui,weight=600,scale=0.8,role=on-surface-variant".into());
-    for (i, (dot, name)) in [("\x1b[32m●\x1b[39m", "zash"), ("\x1b[35m●\x1b[39m", "zeit")].iter().enumerate() {
-        at(&mut s, 10 + i, 4, &format!("{dot}  {name}"));
-        ui.push(format!("text,7,{},12,1,text={name},font=ui,weight=450", 10 + i));
-    }
-    // the page: a heading, a subtitle, a card with two buttons, a quieter note
-    let x = side + 4;
-    let w = (cols - x - 4).min(60);
-    at(&mut s, 1, x, "\x1b[1mGood morning\x1b[22m");
-    ui.push(format!("text,{x},1,{w},2,text=Good morning,font=ui,weight=600,scale=1.75"));
-    at(&mut s, 3, x, &dim("3 tasks due today · 2 notes changed"));
-    ui.push(format!("text,{x},3,{w},1,text={},font=ui,weight=400,scale=1.0,role=on-surface-variant", enc("3 tasks due today · 2 notes changed")));
-    let (cx, cw) = (x + 1, w - 2);
-    if plain {
-        at(&mut s, 5, x - 1, &dim(&format!("╭{}╮", "─".repeat(w))));
-        for r in 6..10 {
-            at(&mut s, r, x - 1, &dim("│"));
-            at(&mut s, r, x + w, &dim("│"));
-        }
-        at(&mut s, 10, x - 1, &dim(&format!("╰{}╯", "─".repeat(w))));
-    }
-    ui.push(format!("panel,{x},6,{w},4,role=surface-container-high,border=outline-variant,shadow=1,pad=0.6"));
-    at(&mut s, 6, cx, "\x1b[1mShip the ui escape\x1b[22m");
-    ui.push(format!("text,{cx},6,{cw},1,text=Ship the ui escape,font=ui,weight=600,scale=1.15"));
-    at(&mut s, 7, cx, &dim("zash · panels, pills and fonts · due 17:00"));
-    ui.push(format!("text,{cx},7,{cw},1,text={},font=ui,role=on-surface-variant", enc("zash · panels, pills and fonts · due 17:00")));
-    // buttons: their labels in cells, a pill behind each with its words on top
-    at(&mut s, 9, cx, &if plain { "\x1b[7m Open \x1b[27m  [ Later ]".to_string() } else { " Open    Later".to_string() });
-    ui.push(format!("pill,{cx},9,6,1,role=primary,text=Open,font=ui,weight=600,pad=0.8"));
-    ui.push(format!("pill,{},9,7,1,role=surface-container-highest,text=Later,font=ui,weight=500,pad=0.8", cx + 9));
-    // the command on the right: the words before it are narrower in the UI font than in cells
-    let cmd = "zash ui demo --plain";
-    at(&mut s, 13, cx, "Other terminals: plain");
-    at(&mut s, 13, cx + cw - cmd.len(), &format!("\x1b[36m{cmd}\x1b[39m"));
-    ui.push(format!("panel,{x},13,{w},1,role=surface-container,pad=0.6"));
-    let note = "Other terminals: plain";
-    ui.push(format!("text,{cx},13,{},1,text={},font=ui,role=on-surface-variant", note.chars().count(), enc(note)));
-    // the status line, as zett's: the mode, the file, then branch, type and place on the right
-    let right = "\u{e0a0} master   Markdown   Top ";
-    let rx = cols - right.chars().count();
-    at(&mut s, last, 0, &if plain { "\x1b[7m N \x1b[27m".to_string() } else { "    ".to_string() });
-    at(&mut s, last, 5, "\u{f48a} README.md \x1b[2m 1:1\x1b[22m");
-    at(&mut s, last, rx, "\x1b[35m\u{e0a0} master\x1b[39m   Markdown   \x1b[2mTop\x1b[22m ");
-    ui.push(format!("panel,0,{last},{cols},1,role=surface-container,r=0,pad=0"));
-    ui.push(format!("pill,1,{last},3,1,role=primary,text=N,font=ui,weight=700,pad=0.2"));
-    if !plain {
-        s.push_str(&format!("\x1b]7733;ui;{}\x07", ui.join(";")));
-    }
-    at(&mut s, 4, x, "");
-    s
+    let explorer = section("zash", [tree([
+        folder("scripts", false, [file("visual.sh")]),
+        folder("src", true, [
+            folder("ui", true, [file("kit.rs").selected(), file("layout.rs"), file("tokens.rs")]),
+            file("main.rs"), file("render.rs"), file("ui.rs"),
+        ]),
+        file("Cargo.toml"), file("README.md"),
+    ])]);
+    let outline = section("outline", [list(None, [item("\u{f1b2}", "Screen"), item("\u{f1b2}", "Ui"), item("\u{0192}", "render"), item("\u{0192}", "highlight")])]);
+    let code = [
+        "/// The tree on a cols x rows screen.",
+        "pub fn render(&self, cols: usize, rows: usize) -> Screen {",
+        "    let rects = self.node().layout(Rect::new(0, 0, cols, rows));",
+        "    let mut out = Screen::default();",
+        "    for plain in [true, false] {",
+        "        let mut c = Canvas::new(cols, rows);",
+        "        self.draw(&rects, &mut 0, &mut c, plain);",
+        "        out.text = c.emit(); // \"cells\"",
+        "    }",
+        "    out",
+        "}",
+    ];
+    let term = [
+        mono("$ cargo test ui::", St::default()),
+        mono("test ui::layout::tests::row_fixed_fill_fit ... ok", St { dim: true, ..St::default() }),
+        spans(vec![span("test result: ", None), span("ok", Some(GREEN)), span(". 9 passed; 0 failed", None)]),
+    ];
+    let editor_area = column([
+        tabs(&[("kit.rs", true, true), ("layout.rs", false, false), ("README.md", false, false)]),
+        breadcrumb(&["src", "ui", "kit.rs", "render"]),
+        editor(code.iter().map(|l| highlight(l)).collect(), 6),
+        divider(true),
+        panel(&["terminal", "problems"], 0, term).h(Size::Part(0.28)),
+    ]).h(Size::Fill(1)).gap(tokens::Gap::None);
+    let status = status_bar(
+        [badge("N"), spans(vec![span("\u{f48a} ", Some(BLUE)), Span("kit.rs".into(), St { bold: true, ..St::default() })]), mono("7:9", St { dim: true, ..St::default() })],
+        [mono("\u{e0a0} ui-panels", St { fg: Some(MAGENTA), ..St::default() }), mono("Rust", St::default()), mono("42%", St { dim: true, ..St::default() })],
+    );
+    let ui = column([
+        row([
+            activity_bar(&["\u{f0c5}", "\u{f002}", "\u{e725}", "\u{f0ae}"], 0, &["\u{f013}"]),
+            sidebar(24, [explorer, outline]),
+            divider(false),
+            editor_area,
+        ]).h(Size::Fill(1)),
+        status,
+    ]).h(Size::Fill(1));
+    let s = ui.render(cols, rows);
+    if plain { s.plain } else { s.zash() }
 }
