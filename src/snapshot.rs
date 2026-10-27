@@ -175,12 +175,18 @@ pub fn render_png(frame: &Frame, cfg: &Config, path: &str) -> Result<(u32, u32),
         r.render(&device, &queue, &view, width, height, &[crate::render::PaneView { id: 0, x: 0.0, y: 0.0, w: width as f32, h: height as f32, frame, focused: true }]);
     }
     // ZASH_BENCH=SECONDS: keep drawing as the window would (only when an effect or shader asks for a
-    // frame, at its rate), then report the frame times: what effects cost on this machine
+    // frame, at its rate), then report the frame times: what effects cost on this machine;
+    // ZASH_BENCH_FPS=N: every frame drawn again at N/s (a program redrawing its screen)
     if let Some(secs) = std::env::var("ZASH_BENCH").ok().and_then(|s| s.parse::<f32>().ok()) {
         let end = Instant::now() + Duration::from_secs_f32(secs);
         let mut times: Vec<f32> = Vec::new();
+        let fps = std::env::var("ZASH_BENCH_FPS").ok().and_then(|s| s.parse::<f32>().ok()).filter(|f| *f > 0.0);
+        let mut next = Instant::now();
         while Instant::now() < end {
-            let Some(due) = r.fx.due else { break };
+            let due = match fps {
+                Some(f) => { next += Duration::from_secs_f32(1.0 / f); next }
+                None => match r.fx.due { Some(d) => d, None => break },
+            };
             std::thread::sleep(due.saturating_duration_since(Instant::now()));
             let t = Instant::now();
             r.render(&device, &queue, &view, width, height, &[crate::render::PaneView { id: 0, x: 0.0, y: 0.0, w: width as f32, h: height as f32, frame, focused: true }]);

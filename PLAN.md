@@ -162,6 +162,14 @@ it), in the theme's colours, and plain text in every other terminal.
      (role=primary-container, text= centred in on-ROLE); font=mono|ui|family (ui_font in zash.toml,
      Google Sans Flex; names fontdb lacks go through fc-match once), weight=100..900; text scale 1
      (1.6 when taller). Demo is a zett-like screen at the terminal's size, held until Enter
+   - [x] UI kit (2026-10-28, `src/ui/`: tokens.rs, layout.rs, kit.rs; std only, ready to split into a
+     crate): column/row with gap, padding, fixed/fill/fit/part sizes, alignment; components render
+     once to both the hints (+ their cells) and a plain screen (box lines, reverse video). `zash ui
+     demo` is zett's workbench built with it. No Lua front: zash embeds no Lua runtime yet.
+     Cost (110x32, headless, ZASH_BENCH=5 ZASH_BENCH_FPS=30, a cargo build running alongside): at rest
+     0 ms CPU/s (nothing drawn); the escape re-sent 30/s through the pty ~5 ms CPU/s with or without
+     hints; drawing every frame at 30/s: hints median 1.03-1.09 ms/frame (2.5-3 % CPU), plain
+     0.97-1.22 ms (2-3 %): no measurable extra (words are shaped once, kept by content)
    - [ ] button, list, input kinds (with the interaction of 3); zeit translating the regions of its panes
 5. **Shaders and type** — custom GPU effects within a cost limit, variable fonts, animated weight,
    fonts for titles.
