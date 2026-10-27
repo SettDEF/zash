@@ -86,7 +86,7 @@ impl Escape {
 /// wait) and knows what it may send. Over SSH too, where TERM_PROGRAM does not arrive.
 pub fn capabilities() -> String {
     format!(
-        "\x1b]7733;zash;v={};fx=shimmer,pulse,fade,rainbow,typewriter,glow;marks=scribble,underline,strike,box,check,arrow,bracket;sound=1;images=kitty\x1b\\",
+        "\x1b]7733;zash;v={};fx=shimmer,pulse,fade,rainbow,typewriter,glow;marks=scribble,underline,strike,box,check,arrow,bracket;sound=1;images=kitty;ui=panel,text\x1b\\",
         env!("CARGO_PKG_VERSION")
     )
 }

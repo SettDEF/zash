@@ -68,6 +68,7 @@ The terminal of zett: GPU-drawn, themed by the wallpaper, with images and web pa
   `open` <address>        Open a web page in a window of its own
   `snapshot` [<out.png>]  Draw without a window and print the screen (for tests)
   `anim` check|play <file>  A Lottie animation: what plays of it, or play it here (`--rows`, `--loop`, `--color ff0000=accent`)
+  `ui demo` [`--plain`]       A mock app screen in UI hints (panels, big text); `--plain` as other terminals show it
   `--desktop`             A terminal on the wallpaper (`zash --desktop --help`)
 
 **Options:**
