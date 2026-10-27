@@ -17,6 +17,8 @@
 #   zstyle ':zash:popup' sort alpha         alpha (default), length, or none (zsh's order)
 #   zstyle ':zash:popup' trigger typing     typing (default) or tab (opens only on Tab)
 #   zstyle ':zash:popup' history-items 5    earlier commands that start with the line (0 = none)
+#   zstyle ':zash:popup' claude-items 5     commands Claude Code ran that start with the line, a second column (0 = none)
+#   zstyle ':zash:popup' slow-ms 150        a command whose completion takes longer: Tab only (kept in ~/.cache/zash/popup-slow)
 #   zstyle ':zash:popup' opacity 0.85       the look, for zash (see [popup] in zash.toml):
 #   zstyle ':zash:popup' radius 14          opacity radius blur shadow border rows
 #   zstyle ':zash:popup' blur yes
@@ -149,6 +151,8 @@ _zash_redraw() {
   esac
   [[ $KEYMAP == menuselect || $KEYMAP == listscroll ]] && return
   [[ $BUFFER == "$_zash_last" ]] && return
+  # more keys already waiting (fast typing, a paste): no lookup now, the last key's redraw does it
+  (( PENDING || KEYS_QUEUED_COUNT )) && return
   _zash_last=$BUFFER
   # typing only opens it with trigger=typing, and after min-chars letters of the word
   if [[ $_zash_trigger == tab && $_zash_open == 0 ]]; then return; fi
@@ -156,9 +160,21 @@ _zash_redraw() {
   if (( ${#word} < ${_zash_min:-1} )) && (( ! _zash_open )); then return; fi
   # only while typing a word at the end of the line, in insert mode
   if [[ $KEYMAP == vicmd || -n $RBUFFER || -z $LBUFFER || $LBUFFER == *[[:space:]] || $#BUFFER -gt 400 ]]; then _zash_close; return; fi
+  # a command whose completion was slow (a package database, many git refs): not while typing,
+  # Tab still completes it
+  local cmd=${${(z)LBUFFER}[1]}
+  [[ $cmd == (sudo|doas|command|builtin|nice|env) ]] && cmd=${${(z)LBUFFER}[2]}
+  if (( ${+_zash_slow[$cmd]} )); then _zash_close; return; fi
+  local t0=$EPOCHREALTIME
   _zash_busy=1
   _zash_cap_quiet
   _zash_busy=0
+  # slower than slow-ms (150 by default): that command waits for Tab from now on, this shell
+  if (( (EPOCHREALTIME - t0) * 1000 > ${_zash_slow_ms:-150} )) && [[ -n $cmd ]]; then
+    _zash_slow[$cmd]=1
+    # remembered for every shell after this one (delete the file to measure again)
+    command mkdir -p ${_zash_slow_file:h} 2>/dev/null && print -r -- $cmd >>$_zash_slow_file
+  fi
   _zash_history
   if (( $#_zash_ins == 0 )) || { (( $#_zash_ins == 1 )) && [[ ${_zash_ins[1]} == "${LBUFFER[_zash_wstart+1,-1]}" ]] }; then _zash_close; return; fi
   _zash_sel=0
@@ -195,6 +211,7 @@ _zash_finish() { _zash_close; _zash_last='' }
 # installed at the first prompt, after .zshrc has made its own bindings (bindkey -v resets them)
 _zash_popup_install() {
   add-zsh-hook -d precmd _zash_popup_install
+  _zash_cc_refresh
   _zash_pick_style
   _zash_read_styles
   zle -C _zash_cap complete-word _zash_capture
@@ -239,6 +256,8 @@ _zash_read_styles() {
   zstyle -s ':zash:popup' sort v && typeset -g _zash_sortby=$v
   zstyle -s ':zash:popup' trigger v && typeset -g _zash_trigger=$v
   zstyle -s ':zash:popup' history-items v && typeset -g _zash_hist_n=$v
+  zstyle -s ':zash:popup' claude-items v && typeset -g _zash_claude_n=$v
+  zstyle -s ':zash:popup' slow-ms v && typeset -g _zash_slow_ms=$v
   local -a look
   local k
   for k in opacity radius blur shadow border rows; do
@@ -249,6 +268,11 @@ _zash_read_styles() {
 
 # earlier commands that start with the line typed so far, newest first, after the completions
 zmodload -F zsh/parameter p:history 2>/dev/null
+zmodload -F zsh/datetime p:EPOCHREALTIME p:EPOCHSECONDS 2>/dev/null
+# commands whose completion took longer than slow-ms while typing (see _zash_redraw)
+typeset -gA _zash_slow
+typeset -g _zash_slow_file=${XDG_CACHE_HOME:-$HOME/.cache}/zash/popup-slow
+() { local c; [[ -r $_zash_slow_file ]] && for c in ${(f)"$(<$_zash_slow_file)"}; do _zash_slow[$c]=1; done }
 _zash_history() {
   local n=${_zash_hist_n:-5}
   (( n > 0 && ${#LBUFFER} >= 2 )) || return
@@ -265,4 +289,34 @@ _zash_history() {
     _zash_ins+=("$h") _zash_show+=("↺ $h") _zash_kind+=(h)
     (( ++found >= n )) && break
   done
+  _zash_claude_history
+}
+
+# the commands Claude Code ran, all sessions (claude-history.zsh keeps the list): the popup's second
+# column. \x02 in front tells zash which column; the list is read again when the file changes.
+typeset -g _zash_cc_file=${XDG_CACHE_HOME:-$HOME/.cache}/zash/claude-cmds _zash_cc_mtime=0
+typeset -ga _zash_cc
+zmodload -F zsh/stat b:zstat 2>/dev/null
+_zash_claude_history() {
+  local n=${_zash_claude_n:-5}
+  (( n > 0 && ${#LBUFFER} >= 2 )) && [[ -r $_zash_cc_file ]] || return
+  local -a st; zstat -A st +mtime -- $_zash_cc_file 2>/dev/null
+  if (( st[1] != _zash_cc_mtime )); then _zash_cc=("${(@f)$(<$_zash_cc_file)}"); _zash_cc_mtime=$st[1]; fi
+  local line=${(b)LBUFFER} h found=0
+  local -a hit=(${(M)_zash_cc:#${~line}*})
+  for h in $hit; do
+    [[ $h != "$BUFFER" ]] || continue
+    # already offered from your own history
+    (( ${_zash_ins[(Ie)$h]} )) && continue
+    _zash_ins+=("$h") _zash_show+=($'\x02'"$h") _zash_kind+=(h)
+    (( ++found >= n )) && break
+  done
+}
+# the list kept fresh: rebuilt in the background at most every 10 minutes
+_zash_cc_refresh() {
+  local s=${${(%):-%x}:A:h}/claude-history.zsh
+  [[ -x $s ]] || s=$HOME/.local/share/zash/shell/zsh/claude-history.zsh
+  [[ -x $s ]] || return
+  local -a st; zstat -A st +mtime -- $_zash_cc_file 2>/dev/null
+  (( EPOCHSECONDS - ${st[1]:-0} > 600 )) && { nice -n 19 $s &>/dev/null &! }
 }

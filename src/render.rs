@@ -390,6 +390,8 @@ pub struct Renderer {
     /// text drawn above the overlay (the search bar)
     text2: TextRenderer,
     bars: Vec<(Buffer, f32, f32)>,
+    /// the completion popup as last drawn: its rect, the chosen item, and each shown item's row (wheel and clicks, app.rs)
+    pub popup_hit: Option<([f32; 4], Option<usize>, Vec<(usize, [f32; 4])>)>,
     /// letters under a dragged zfloat, in the strip it uncovers (buffer, x, y, clip l t r b)
     unders: Vec<(Buffer, f32, f32, [f32; 4])>,
     /// height of the tab bar above the rows (0 with one tab)
@@ -485,6 +487,7 @@ impl Renderer {
             text,
             text2,
             bars: Vec::new(),
+            popup_hit: None,
             unders: Vec::new(),
             top: 0.0,
             rows: std::collections::HashMap::new(),
@@ -1192,6 +1195,7 @@ impl Renderer {
         }
         let mut backdrop: Option<([f32; 4], f32, f32)> = None;
         // (a popup with nothing in it is not drawn: it showed as an empty bar over other panes)
+        self.popup_hit = None;
         if let (Some(pp), Some((cr, cc, _))) = (frame.popup.as_ref().filter(|p| !p.items.is_empty()), frame.cursor) {
             let cr = pp.row.unwrap_or(cr);
             // the completion popup: under the word being completed, above it when there is no room
@@ -1204,18 +1208,62 @@ impl Renderer {
             let above_px = line_y - self.top;
             let below_px = bottom - line_y - self.cell_h;
             let room = above_px.max(below_px) - self.cell_h;
+            // items with \x02 in front are the second column (the commands Claude Code ran): beside
+            // the first when both fit in the pane, else in the one list, marked
+            let second: Vec<usize> = (0..n).filter(|i| pp.items[*i].starts_with('\u{2}')).collect();
+            let first_col: Vec<usize> = (0..n).filter(|i| !pp.items[*i].starts_with('\u{2}')).collect();
+            let text = |i: usize| -> String { pp.items[i].strip_prefix('\u{2}').unwrap_or(&pp.items[i]).to_string() };
+            let wide_of = |ix: &[usize]| ix.iter().map(|i| text(*i).chars().count()).max().unwrap_or(0);
+            let pane_cells = ((right - left) / self.cell_w) as usize;
+            let _ = wide_of;
+            // two columns from 60 cells on, each at most half the pane (long commands end in …)
+            let two = !second.is_empty() && !first_col.is_empty() && pane_cells >= 60;
+            let cap = if two { (pane_cells.saturating_sub(8) / 2).max(20) } else { pane_cells.saturating_sub(4).max(20) };
+            // the columns: (title, items); one column holds everything when there is no room for two
+            let cols: Vec<(Option<&str>, Vec<usize>)> = if two { vec![(None, first_col.clone()), (Some("✦ Claude"), second.clone())] } else { vec![(None, (0..n).collect())] };
+            let label_of = |i: usize| -> String {
+                let s = if !two && pp.items[i].starts_with('\u{2}') { format!("✦ {}", text(i)) } else { text(i) };
+                if s.chars().count() > cap { format!("{}…", s.chars().take(cap - 1).collect::<String>()) } else { s }
+            };
             let mut show: usize = ((room / row_h) as usize).clamp(1, look.rows.max(1));
-            if n > show {
+            let longest = cols.iter().map(|c| c.1.len()).max().unwrap_or(0);
+            let heads = if two { 1 } else { 0 };
+            show = show.saturating_sub(heads).max(1);
+            if longest > show {
                 // the footer ("3 of 40 · Tab next") takes a row too
                 show = show.saturating_sub(1).max(1);
             }
-            let first = match pp.sel { Some(s) if s >= show => s + 1 - show, _ => 0 };
-            let rows: Vec<usize> = (first..n.min(first + show)).collect();
-            let widest = rows.iter().map(|i| pp.items[*i].chars().count()).max().unwrap_or(0);
-            let more = n > show;
-            let footer_w = if more { 34 } else { 0 };
-            let pw = ((widest.max(12).max(footer_w) + 3) as f32 * self.cell_w).min(width as f32 - 2.0 * self.pad);
-            let ph = rows.len() as f32 * row_h + self.cell_h * 0.5 + if more { row_h } else { 0.0 };
+            // each column scrolls so its chosen item is in view
+            let visible: Vec<Vec<usize>> = cols.iter().map(|(_, ix)| {
+                let at = pp.sel.and_then(|s| ix.iter().position(|i| *i == s));
+                let first = match at { Some(s) if s >= show => s + 1 - show, _ => 0 };
+                ix.iter().skip(first).take(show).copied().collect()
+            }).collect();
+            let col_w: Vec<f32> = visible.iter().zip(&cols).map(|(v, (t, _))| {
+                let w = v.iter().map(|i| label_of(*i).chars().count()).max().unwrap_or(0).max(t.map(|t| t.chars().count()).unwrap_or(0));
+                (w.max(12) + 3) as f32 * self.cell_w
+            }).collect();
+            let more = longest > show;
+            let footer_w = if more { 34.0 * self.cell_w } else { 0.0 };
+            let gap = self.cell_w;
+            let pw = (col_w.iter().sum::<f32>() + gap * (col_w.len() as f32 - 1.0)).max(footer_w + 3.0 * self.cell_w).min(width as f32 - 2.0 * self.pad);
+            let rows_n = visible.iter().map(|v| v.len()).max().unwrap_or(0);
+            // the chosen item whole when its row cuts it (long commands): wrapped under the list
+            let full_lines: Vec<String> = match pp.sel {
+                Some(s) if s < n && label_of(s).ends_with('…') => {
+                    let per = ((pw / self.cell_w) as usize).saturating_sub(3).max(10);
+                    let chars: Vec<char> = text(s).chars().collect();
+                    let mut v: Vec<String> = chars.chunks(per).map(|c| c.iter().collect()).collect();
+                    if v.len() > 4 {
+                        v.truncate(4);
+                        v[3].push('…');
+                    }
+                    v
+                }
+                _ => Vec::new(),
+            };
+            let full_h = if full_lines.is_empty() { 0.0 } else { full_lines.len() as f32 * self.cell_h + self.cell_h * 0.6 };
+            let ph = (rows_n + heads) as f32 * row_h + self.cell_h * 0.5 + if more { row_h } else { 0.0 } + full_h;
             let wx = fox + pp.col.unwrap_or_else(|| cc.saturating_sub(pp.word)) as f32 * self.cell_w - self.cell_w;
             let x = wx.clamp(left.min(width as f32 - pw - self.pad).max(self.pad), (right.max(left + pw) - pw).min(width as f32 - pw - self.pad).max(self.pad));
             let below = line_y + self.cell_h + 2.0;
@@ -1237,22 +1285,49 @@ impl Renderer {
             bg[3] = look.opacity;
             over.push(Rect { xywh: [x, y, pw, ph], color: bg, p: [r, 0.0], hole: NO_HOLE });
             let dim = dim6(frame.fg);
-            for (k, i) in rows.iter().enumerate() {
-                let ry = y + self.cell_h * 0.25 + k as f32 * row_h;
-                let chosen = pp.sel == Some(*i);
-                if chosen {
-                    let c = frame.cursor_color.f32();
-                    over.push(Rect { xywh: [x + 4.0, ry, pw - 8.0, row_h], color: [c[0], c[1], c[2], 0.30], p: [(r * 0.6).max(2.0), 0.0], hole: NO_HOLE });
+            let mut hits: Vec<(usize, [f32; 4])> = Vec::new();
+            let mut cx = x;
+            for (c, ((title, _), vis)) in cols.iter().zip(&visible).enumerate() {
+                let cw = col_w[c];
+                if c > 0 {
+                    // a hairline between the columns
+                    let e = frame.fg.f32();
+                    over.push(Rect { xywh: [cx - gap / 2.0, y + 6.0, 1.0, ph - full_h - 12.0], color: [e[0], e[1], e[2], 0.12], p: [0.0, 0.0], hole: NO_HOLE });
                 }
-                let (b, _) = label(&mut self.font_system, &self.family, &pp.items[*i], if chosen || pp.sel.is_none() { frame.fg } else { dim }, self.font_px, self.cell_h);
-                labels.push((b, x + self.cell_w, ry + (row_h - self.cell_h) / 2.0));
+                if let Some(t) = title {
+                    let (b, _) = label(&mut self.font_system, &self.family, t, dim, self.font_px * 0.85, self.cell_h);
+                    labels.push((b, cx + self.cell_w, y + self.cell_h * 0.25 + (row_h - self.cell_h) / 2.0));
+                }
+                for (k, i) in vis.iter().enumerate() {
+                    let ry = y + self.cell_h * 0.25 + (k + heads) as f32 * row_h;
+                    hits.push((*i, [cx, ry, cw, row_h]));
+                    let chosen = pp.sel == Some(*i);
+                    if chosen {
+                        let cl = frame.cursor_color.f32();
+                        over.push(Rect { xywh: [cx + 4.0, ry, cw - 8.0, row_h], color: [cl[0], cl[1], cl[2], 0.30], p: [(r * 0.6).max(2.0), 0.0], hole: NO_HOLE });
+                    }
+                    let (b, _) = label(&mut self.font_system, &self.family, &label_of(*i), if chosen || pp.sel.is_none() { frame.fg } else { dim }, self.font_px, self.cell_h);
+                    labels.push((b, cx + self.cell_w, ry + (row_h - self.cell_h) / 2.0));
+                }
+                cx += cw + gap;
             }
             if more {
-                let ry = y + self.cell_h * 0.25 + rows.len() as f32 * row_h;
+                let ry = y + self.cell_h * 0.25 + (rows_n + heads) as f32 * row_h;
                 let t = format!("{} of {n}  ·  Tab next, Shift+Tab back", pp.sel.map(|s| s + 1).unwrap_or(0));
                 let (b, _) = label(&mut self.font_system, &self.family, &t, dim, self.font_px * 0.85, self.cell_h);
                 labels.push((b, x + self.cell_w, ry + (row_h - self.cell_h) / 2.0));
             }
+            if !full_lines.is_empty() {
+                // a hairline, then the chosen command whole
+                let top = y + ph - full_h;
+                let e = frame.fg.f32();
+                over.push(Rect { xywh: [x + 8.0, top, pw - 16.0, 1.0], color: [e[0], e[1], e[2], 0.12], p: [0.0, 0.0], hole: NO_HOLE });
+                for (k, l) in full_lines.iter().enumerate() {
+                    let (b, _) = label(&mut self.font_system, &self.family, l, frame.fg, self.font_px, self.cell_h);
+                    labels.push((b, x + self.cell_w, top + self.cell_h * 0.3 + k as f32 * self.cell_h));
+                }
+            }
+            self.popup_hit = Some(([x, y, pw, ph], pp.sel, hits));
         }
         if let Some(txt) = &frame.bar {
             let (b, w) = label(&mut self.font_system, &self.family, txt, frame.fg, self.font_px, self.cell_h);
