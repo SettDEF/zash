@@ -165,6 +165,10 @@ _zash_redraw() {
   local cmd=${${(z)LBUFFER}[1]}
   [[ $cmd == (sudo|doas|command|builtin|nice|env) ]] && cmd=${${(z)LBUFFER}[2]}
   if (( ${+_zash_slow[$cmd]} )); then _zash_close; return; fi
+  # a path at the root with nothing to narrow it ("/", "//", "x//"): with a substring matcher
+  # (l:|=* r:|=*) zsh walks the whole filesystem for it; that froze the shell. Tab still completes it
+  local word=${${(z)LBUFFER}[-1]}
+  if [[ $word == / || $word == *//* ]]; then _zash_close; return; fi
   local t0=$EPOCHREALTIME
   _zash_busy=1
   _zash_cap_quiet
