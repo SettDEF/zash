@@ -147,6 +147,17 @@ it), in the theme's colours, and plain text in every other terminal.
 3. **Interaction** — hover and click on what is drawn, named states (idle, hover, active, done) with
    smooth changes, events back to the program, Tab and Enter reach everything.
 4. **Widgets** — button, progress, table, list, input on the same layer; `zash ui …` for scripts.
+   - [x] UI hints, stage 1 (2026-10-27, `src/ui.rs`): OSC 7733;ui;KIND,X,Y,W,H[,key=value]…;… BEL, the
+     whole set for the screen on each redraw (OSC 7733;ui alone clears), in the pane's cells, values
+     percent-encoded. `panel` (role=surface-container…, r=PX, border=ROLE): a rounded rect under the
+     cells' backgrounds; `text` (text=…, scale=2, weight=bold, role=on-surface): the words drawn that big
+     over the rect, its cells hidden (the program prints them too, for other terminals). Roles are
+     Material names derived from the palette (surface steps lift bg toward fg; primary = the accent),
+     or the anim escape's names/hex. Anchored to the line at the screen's top when sent: scrolls with
+     the text, only on the screen it was sent on, dropped when the alternate screen is left; nothing
+     done without regions, big text shaped once per content. Advertised as ui=panel,text in 7733;q;
+     `zash ui demo [--plain]`; visual tests ui-demo, ui-plain, ui-scroll (proven to fail on a colour change)
+   - [ ] button, list, input kinds (with the interaction of 3); zeit translating the regions of its panes
 5. **Shaders and type** — custom GPU effects within a cost limit, variable fonts, animated weight,
    fonts for titles.
 6. **Recording, pen, sound** — **Drawings that move with the terminal (done 2026-10-23, ink.rs ZPane; not yet: a re-wrap moving a stroke with its text):** inside zeit a stroke belongs to
