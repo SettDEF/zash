@@ -34,6 +34,8 @@ pub struct Graphics {
     pub webs: HashMap<u32, Arc<crate::web::View>>,
     /// Lottie animations (OSC 7733;anim, anim.rs), by the id their placement carries
     pub anims: HashMap<u32, Arc<crate::anim::Anim>>,
+    /// animations given a name (name=X): a later one of that name replaces it in place
+    pub named: HashMap<String, u32>,
     /// a web area that asked for the keyboard (zash --web)
     pub autofocus: Option<u32>,
     /// a program asked for another font size (OSC 7733;zoom;+N|-N|0): points more, or 0 for the set size
@@ -405,6 +407,20 @@ impl Graphics {
     }
 
     /// An animation at the cursor: `cols`×`rows` cells showing its frames.
+    /// The id of a named animation still shown.
+    pub fn named_anim(&self, name: &str) -> Option<u32> {
+        self.named.get(name).copied().filter(|id| self.anims.contains_key(id) && self.places.iter().any(|p| p.img == *id))
+    }
+
+    /// A named animation's new content, in its old place (its id kept; a newer generation so it is redrawn).
+    pub fn replace_anim(&mut self, a: Arc<crate::anim::Anim>) {
+        use std::sync::atomic::Ordering;
+        let old = self.anims.get(&a.id).map(|o| o.generation.load(Ordering::Relaxed)).unwrap_or(0);
+        a.generation.fetch_add(old + 1, Ordering::Relaxed);
+        self.anims.insert(a.id, a);
+        self.generation += 1;
+    }
+
     pub fn add_anim(&mut self, a: Arc<crate::anim::Anim>, at: (usize, usize), cols: usize, rows: usize) {
         self.places.push(Placement { img: a.id, line: at.0, col: at.1, cols, rows });
         self.anims.insert(a.id, a);

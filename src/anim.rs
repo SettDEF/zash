@@ -35,6 +35,10 @@ pub struct Ask {
     pub speed: f64,
     /// colour (rgb) → its replacement
     pub swaps: Vec<([u8; 3], [u8; 3])>,
+    /// `at=SECONDS`: that one frame, held (a scrubber, a still from an animation)
+    pub at: Option<f64>,
+    /// `name=X`: a later escape with the same name replaces this one where it is
+    pub name: Option<String>,
 }
 
 fn rgb(s: &str) -> Option<[u8; 3]> {
@@ -61,7 +65,7 @@ pub fn theme_color(name: &str, p: &crate::config::Palette) -> Option<[u8; 3]> {
 
 /// `file=…;rows=4;…` → what to play, theme names resolved with `p`.
 pub fn parse(body: &str, p: &crate::config::Palette) -> Option<Ask> {
-    let mut a = Ask { file: String::new(), rows: 3, cols: None, loops: 0, speed: 1.0, swaps: vec![] };
+    let mut a = Ask { file: String::new(), rows: 3, cols: None, loops: 0, speed: 1.0, swaps: vec![], at: None, name: None };
     for kv in body.split(';') {
         let Some((k, v)) = kv.split_once('=') else { continue };
         match k {
@@ -70,6 +74,8 @@ pub fn parse(body: &str, p: &crate::config::Palette) -> Option<Ask> {
             "cols" => a.cols = v.parse().ok(),
             "loop" => a.loops = v.parse().unwrap_or(0),
             "speed" => a.speed = v.parse::<f64>().unwrap_or(1.0).clamp(0.05, 20.0),
+            "at" => a.at = v.parse::<f64>().ok().filter(|t| t.is_finite()).map(|t| t.max(0.0)),
+            "name" => a.name = Some(v.chars().take(64).collect()),
             k => {
                 if let (Some(from), Some(to)) = (k.strip_prefix("color.").and_then(rgb), theme_color(v, p)) {
                     a.swaps.push((from, to));
@@ -185,6 +191,14 @@ impl Anim {
         let len = (c.frames.end - c.frames.start).max(1.0);
         let fps = c.frame_rate.max(1.0);
         let (loops, speed, swaps) = (ask.loops, ask.speed, ask.swaps.clone());
+        // a held frame: drawn once, no thread
+        if let Some(t) = ask.at {
+            let f = (c.frames.start + (t * speed * fps).min(len - 0.001)).min(c.frames.end - 0.001);
+            *a.frame.lock().unwrap() = Some(render(&c, f, w, h, &swaps));
+            a.generation.fetch_add(1, Ordering::Relaxed);
+            a.done.store(true, Ordering::Relaxed);
+            return a;
+        }
         // the clock: frozen captures (ZASH_FX_AT) show the frame at that time, from 0
         let start = if crate::fx::frozen().is_some() { 0.0 } else { crate::fx::now() };
         let at = move || {
@@ -259,5 +273,50 @@ mod tests {
         let c = check(&j);
         assert_eq!(c.len(), 1);
         assert!(c[0].contains("Title"));
+    }
+}
+
+// ── SVG (VectorCraft): a still picture on the same escape, drawn once ──
+
+/// An SVG file's size (its own width/height) and its source with the theme colours swapped in.
+pub fn load_svg(path: &str, swaps: &[([u8; 3], [u8; 3])]) -> Result<(String, f32, f32), String> {
+    let mut src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    for (from, to) in swaps {
+        let hex = |c: &[u8; 3]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+        for f in [hex(from), hex(from).to_uppercase().replacen("#", "#", 1)] {
+            src = src.replace(&f, &hex(to));
+        }
+    }
+    let tree = resvg::usvg::Tree::from_str(&src, &resvg::usvg::Options::default()).map_err(|e| format!("{path}: {e}"))?;
+    let s = tree.size();
+    Ok((src, s.width(), s.height()))
+}
+
+/// The SVG in a `w`×`h` picture: its shape kept, centred.
+pub fn render_svg(src: &str, w: u32, h: u32) -> Option<Image> {
+    let tree = resvg::usvg::Tree::from_str(src, &resvg::usvg::Options::default()).ok()?;
+    let (w, h) = (w.clamp(1, 4096), h.clamp(1, 4096));
+    let mut px = resvg::tiny_skia::Pixmap::new(w, h)?;
+    let s = tree.size();
+    let k = (w as f32 / s.width()).min(h as f32 / s.height());
+    let t = resvg::tiny_skia::Transform::from_translate((w as f32 - s.width() * k) / 2.0, (h as f32 - s.height() * k) / 2.0).pre_scale(k, k);
+    resvg::render(&tree, t, &mut px.as_mut());
+    // tiny-skia keeps premultiplied alpha; the image layer takes straight
+    let mut rgba = px.take();
+    for p in rgba.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        if a > 0 && a < 255 {
+            for c in &mut p[..3] {
+                *c = ((*c as u32 * 255) / a).min(255) as u8;
+            }
+        }
+    }
+    Some(Image { w, h, rgba: Arc::new(rgba) })
+}
+
+impl Anim {
+    /// A still picture (an SVG) shown like an animation's frame.
+    pub fn still(id: u32, img: Image) -> Arc<Anim> {
+        Arc::new(Anim { id, frame: Mutex::new(Some(img)), generation: AtomicU64::new(1), done: AtomicBool::new(true) })
     }
 }

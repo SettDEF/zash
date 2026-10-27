@@ -528,6 +528,43 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                     }
                     Found::Anim(body) => {
                         let Some(ask) = crate::anim::parse(&body, &crate::config::Palette::load()) else { continue };
+                        // an SVG: a still picture, drawn once at its place
+                        // a name already shown: the new content goes in its place (a scrubber, a live still)
+                        if let Some(id) = ask.name.as_deref().and_then(|n| graphics.lock().unwrap().named_anim(n)) {
+                            let (w, h) = graphics.lock().unwrap().places.iter().find(|p| p.img == id).map(|p| (p.cols, p.rows)).unwrap_or((1, 1));
+                            let (cw, ch) = *cell_px.lock().unwrap();
+                            let (pw, ph) = ((w as f32 * cw) as u32, (h as f32 * ch) as u32);
+                            let a = if ask.file.to_lowercase().ends_with(".svg") {
+                                crate::anim::load_svg(&ask.file, &ask.swaps).ok().and_then(|(src, _, _)| crate::anim::render_svg(&src, pw, ph)).map(|img| crate::anim::Anim::still(id, img))
+                            } else {
+                                let wl = listener.clone();
+                                let wake: Box<dyn Fn() + Send + Sync> = Box::new(move || { use alacritty_terminal::event::EventListener; wl.send_event(alacritty_terminal::event::Event::Wakeup); });
+                                crate::anim::load(&ask.file).ok().map(|c| crate::anim::Anim::start(id, c, pw, ph, &ask, wake))
+                            };
+                            if let Some(a) = a {
+                                graphics.lock().unwrap().replace_anim(a);
+                            }
+                            continue;
+                        }
+                        if ask.file.to_lowercase().ends_with(".svg") {
+                            let (src, sw, sh) = match crate::anim::load_svg(&ask.file, &ask.swaps) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    eprintln!("zash: svg: {e}");
+                                    continue;
+                                }
+                            };
+                            let at = (t.grid().history_size() + t.grid().cursor.point.line.0.max(0) as usize, t.grid().cursor.point.column.0);
+                            let (cw, ch) = *cell_px.lock().unwrap();
+                            let fit = ((ask.rows as f32 * ch) * (sw / sh.max(1.0)) / cw.max(1.0)).ceil() as usize;
+                            let cols = ask.cols.unwrap_or(fit).clamp(1, t.grid().columns().saturating_sub(at.1).max(1));
+                            let Some(img) = crate::anim::render_svg(&src, (cols as f32 * cw) as u32, (ask.rows as f32 * ch) as u32) else { continue };
+                            let id = graphics.lock().unwrap().next_web_id();
+                            graphics.lock().unwrap().add_anim(crate::anim::Anim::still(id, img), at, cols, ask.rows);
+                            if let Some(n) = &ask.name { graphics.lock().unwrap().named.insert(n.clone(), id); }
+                            parser.advance(&mut *t, "\n".repeat(ask.rows).as_bytes());
+                            continue;
+                        }
                         let c = match crate::anim::load(&ask.file) {
                             Ok(c) => c,
                             Err(e) => {
@@ -548,6 +585,7 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                         });
                         let a = crate::anim::Anim::start(id, c, (cols as f32 * cw) as u32, (ask.rows as f32 * ch) as u32, &ask, wake);
                         graphics.lock().unwrap().add_anim(a, at, cols, ask.rows);
+                        if let Some(n) = &ask.name { graphics.lock().unwrap().named.insert(n.clone(), id); }
                         // below it, as after an image
                         parser.advance(&mut *t, "\n".repeat(ask.rows).as_bytes());
                         continue;

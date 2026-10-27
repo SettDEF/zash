@@ -169,6 +169,8 @@ fn main() {
                 }
             }
             (Some("play"), Some(f)) => {
+                let scrub = args[3..].iter().any(|a| a == "--scrub");
+                let args: Vec<String> = args.iter().filter(|a| *a != "--scrub").cloned().collect();
                 // the escape for this terminal: zash draws it; elsewhere it is simply skipped
                 let path = std::fs::canonicalize(f).map(|p| p.display().to_string()).unwrap_or(f.clone());
                 let mut body = format!("file={path}");
@@ -185,8 +187,15 @@ fn main() {
                     }
                 }
                 if !body.contains(";rows=") { body.push_str(";rows=4"); }
-                print!("\x1b]7733;anim;{body}\x1b\\");
-                0
+                if scrub {
+                    match anim::load(f) {
+                        Ok(c) => anim_scrub(&body, c.frame_rate.max(1.0), (c.frames.end - c.frames.start).max(1.0)),
+                        Err(e) => { eprintln!("zash: {e}"); 1 }
+                    }
+                } else {
+                    print!("\x1b]7733;anim;{body}\x07");
+                    0
+                }
             }
             _ => { eprintln!("zash anim check FILE · zash anim play FILE [--rows N] [--cols N] [--loop N] [--speed X] [--color RRGGBB=accent]"); 2 }
         };
@@ -328,4 +337,39 @@ fn main() {
         eprintln!("zash: {e}");
         std::process::exit(1);
     }
+}
+
+/// `zash anim play FILE --scrub`: one held frame, moved with the keys (← → a frame, PgUp PgDn a
+/// second, Home End, q). Each step is the same named escape again, so it replaces itself in place.
+fn anim_scrub(body: &str, fps: f64, frames: f64) -> i32 {
+    use std::io::{Read, Write};
+    let name = format!("scrub{}", std::process::id());
+    let raw = |on: bool| { let _ = std::process::Command::new("stty").arg(if on { "raw" } else { "sane" }).args(if on { &["-echo"][..] } else { &[][..] }).stdin(std::process::Stdio::inherit()).status(); };
+    let mut n: f64 = 0.0;
+    let mut out = std::io::stdout();
+    let show = |n: f64, out: &mut std::io::Stdout| {
+        let _ = write!(out, "\x1b]7733;anim;{body};name={name};at={:.4}\x07\r\x1b[K frame {}/{}  {:.2} s   ← → frame · PgUp PgDn second · Home End · q", n / fps, n as i64, frames as i64 - 1, n / fps);
+        let _ = out.flush();
+    };
+    raw(true);
+    show(n, &mut out);
+    let mut buf = [0u8; 8];
+    let mut stdin = std::io::stdin();
+    while let Ok(k) = stdin.read(&mut buf) {
+        let last = frames - 1.0;
+        n = match &buf[..k] {
+            b"q" | b"\x03" | b"\x1b" => break,
+            b"\x1b[C" => (n + 1.0).min(last),
+            b"\x1b[D" => (n - 1.0).max(0.0),
+            b"\x1b[5~" => (n + fps).min(last),
+            b"\x1b[6~" => (n - fps).max(0.0),
+            b"\x1b[H" | b"\x1b[1~" => 0.0,
+            b"\x1b[F" | b"\x1b[4~" => last,
+            _ => continue,
+        };
+        show(n, &mut out);
+    }
+    raw(false);
+    println!();
+    0
 }

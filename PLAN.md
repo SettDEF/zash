@@ -137,14 +137,19 @@ it), in the theme's colours, and plain text in every other terminal.
      second, stopping when done or gone; `zash anim check` (size, length, what will not play: text
      layers, pictures, effects, expressions), `zash anim play file --rows 4 --color ff0000=accent`;
      visual tests anim-0/anim-1 (the frozen clock drives it too)
-   - [ ] text slots (the program's text drawn in the animation), SVG (VectorCraft), a scrubber in
-     `zash anim play`, EffectCraft exports with `effectcraft-cli`; vello on the GPU once velato moves on
+   - [x] SVG (VectorCraft, 2026-10-27): the same escape with an .svg file, a still picture drawn once by
+     resvg, the same colour swaps (color.ff0000=accent), as wide as its shape at that height
+   - [x] held frames and replacing in place (2026-10-27): at=SECONDS draws that one frame (no thread),
+     name=X makes a later escape of that name replace the picture where it is (no new rows);
+     `zash anim play FILE --scrub`: ← → a frame, PgUp PgDn a second, Home End, q
+   - [ ] text slots (the program's text drawn in the animation),
+     EffectCraft exports with `effectcraft-cli`; vello on the GPU once velato moves on
 3. **Interaction** — hover and click on what is drawn, named states (idle, hover, active, done) with
    smooth changes, events back to the program, Tab and Enter reach everything.
 4. **Widgets** — button, progress, table, list, input on the same layer; `zash ui …` for scripts.
 5. **Shaders and type** — custom GPU effects within a cost limit, variable fonts, animated weight,
    fonts for titles.
-6. **Recording, pen, made by the agent, sound** — **Drawings that move with the terminal (done 2026-10-23, ink.rs ZPane; not yet: a re-wrap moving a stroke with its text):** inside zeit a stroke belongs to
+6. **Recording, pen, sound** — **Drawings that move with the terminal (done 2026-10-23, ink.rs ZPane; not yet: a re-wrap moving a stroke with its text):** inside zeit a stroke belongs to
    the zeit pane it was drawn on and moves, resizes, hides and scrolls with it (zeit reports pane
    rects and scroll over OSC 7733); a resize that re-wraps text keeps strokes on their text (see
    ink.rs). — **Pen brushes from PhotoCraft (planned 2026-10-21, not built):** drawing mode draws with
@@ -156,7 +161,7 @@ it), in the theme's colours, and plain text in every other terminal.
    brush picker in drawing mode, and the same preset names Knurl uses, so a pen tested there draws the
    same here. Its Wayland pen reading (pen.rs) is what photocraft-tablet says it lacks: worth offering
    back. — video/GIF of what is drawn (tinct-cast), the Z13 pen
-   as vector strokes, effects written by the agent from a sentence, optional small sounds.
+   as vector strokes, optional small sounds. (AI-made effects: dropped, user 2026-10-27.)
    **The pen** (2026-10-21): winit 0.30 has no pen events, so zash binds the Wayland tablet protocol
    (zwp_tablet_manager_v2, already in wayland-protocols' unstable set) on its own connection, as the
    desktop mode does; strokes (points with pressure, tilt, rotation) are drawn with fx.rs's pen and kept
