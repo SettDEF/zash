@@ -157,6 +157,11 @@ it), in the theme's colours, and plain text in every other terminal.
      the text, only on the screen it was sent on, dropped when the alternate screen is left; nothing
      done without regions, big text shaped once per content. Advertised as ui=panel,text in 7733;q;
      `zash ui demo [--plain]`; visual tests ui-demo, ui-plain, ui-scroll (proven to fail on a colour change)
+   - [x] UI hints design pass (2026-10-28): surfaces tinted by the accent; panel pad=0.5 (edge outside
+     the cells), radius from the cell height, border at 50%, shadow=1 (the floats' shadow); `pill`
+     (role=primary-container, text= centred in on-ROLE); font=mono|ui|family (ui_font in zash.toml,
+     Google Sans Flex; names fontdb lacks go through fc-match once), weight=100..900; text scale 1
+     (1.6 when taller). Demo is a zett-like screen at the terminal's size, held until Enter
    - [ ] button, list, input kinds (with the interaction of 3); zeit translating the regions of its panes
 5. **Shaders and type** — custom GPU effects within a cost limit, variable fonts, animated weight,
    fonts for titles.

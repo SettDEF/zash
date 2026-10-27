@@ -415,6 +415,10 @@ pub struct Renderer {
     /// per pane: the content key of each drawn row, top to bottom (above the screen first)
     order: std::collections::HashMap<u64, Vec<u64>>,
     family: String,
+    /// UI hints' font=ui
+    ui_family: String,
+    /// a font= name to the family fontdb has (fc-match for generics and aliases), found once per name
+    ui_fonts: std::collections::HashMap<String, Option<String>>,
     features: glyphon::cosmic_text::FontFeatures,
     pub font_px: f32,
     pub cell_w: f32,
@@ -502,6 +506,8 @@ impl Renderer {
             rows: std::collections::HashMap::new(),
             order: std::collections::HashMap::new(),
             family: cfg.font_family.clone(),
+            ui_family: cfg.ui_font.clone(),
+            ui_fonts: std::collections::HashMap::new(),
             features,
             font_px: 0.0,
             cell_w: 0.0,
@@ -790,46 +796,86 @@ impl Renderer {
         clipped(out, clip)
     }
 
-    /// A pane's UI hints (ui.rs): panels into `rects` (under the cells' backgrounds), big text placed for the text pass.
+    /// A pane's UI hints (ui.rs): panels and pills into `rects` (under the cells' backgrounds), words placed for the text pass.
     fn ui_regions(&mut self, frame: &Frame, ox: f32, oy: f32, clip: [f32; 4], rects: &mut Vec<Rect>) {
+        use crate::ui::Kind;
         let (cw, ch) = (self.cell_w, self.cell_h);
-        let (c0, c1) = ([clip[0], clip[1]], [clip[0] + clip[2], clip[1] + clip[3]]);
         for (r, y) in &frame.ui {
             let px = [ox + r.rect[0] as f32 * cw, oy + *y as f32 * ch + frame.scroll_px, r.rect[2] as f32 * cw, r.rect[3] as f32 * ch];
             let Some(col) = crate::ui::role(&r.role, &frame.pal) else { continue };
+            // out by `pad` cells (as wide across as up and down: an even margin round the text)
+            let grow = |p: f32, py: f32| [px[0] - p, px[1] - py, px[2] + 2.0 * p, px[3] + 2.0 * py];
             match &r.kind {
-                crate::ui::Kind::Panel { radius, border } => {
-                    let mut out = Vec::new();
-                    if let Some(b) = border.as_deref().and_then(|b| crate::ui::role(b, &frame.pal)) {
-                        out.push(Rect { xywh: [px[0] - 1.0, px[1] - 1.0, px[2] + 2.0, px[3] + 2.0], color: b.f32(), p: [radius + 1.0, 0.0], hole: NO_HOLE });
+                Kind::Panel { radius, border, shadow, pad } => {
+                    let b = grow(pad * cw, (pad * cw).min(ch * 0.5));
+                    let rad = radius.unwrap_or((ch * 0.55).round()).min(b[3] / 2.0);
+                    let mut out = if *shadow > 0.0 { layer_frame(b, ch, frame.fg.f32(), 1.0, shadow * 0.6) } else { Vec::new() };
+                    if let Some(e) = border.as_deref().and_then(|e| crate::ui::role(e, &frame.pal)) {
+                        let mut c = e.f32();
+                        c[3] = 0.5;
+                        out.push(Rect { xywh: [b[0] - 1.0, b[1] - 1.0, b[2] + 2.0, b[3] + 2.0], color: c, p: [rad + 1.0, 0.0], hole: NO_HOLE });
                     }
-                    out.push(Rect { xywh: px, color: col.f32(), p: [*radius, 0.0], hole: NO_HOLE });
+                    out.push(Rect { xywh: b, color: col.f32(), p: [rad, 0.0], hole: NO_HOLE });
                     rects.extend(clipped(out, clip));
                 }
-                crate::ui::Kind::Text { text, scale, bold } => {
-                    let size = self.font_px * scale;
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    (text, scale.to_bits(), bold, col.0, col.1, col.2, size.to_bits(), &self.family).hash(&mut h);
-                    let key = h.finish();
-                    if !self.ui_text.contains_key(&key) {
-                        let mut b = Buffer::new(&mut self.font_system, Metrics::new(size, size * 1.2));
-                        b.set_size(None, Some(size * 1.2));
-                        let mut a = Attrs::new().family(Family::Name(&self.family)).color(Color::rgb(col.0, col.1, col.2)).font_features(self.features.clone());
-                        if *bold {
-                            a = a.weight(Weight::BOLD);
-                        }
-                        b.set_text(text, &a, Shaping::Advanced, None);
-                        b.shape_until_scroll(&mut self.font_system, false);
-                        self.ui_text.insert(key, b);
-                    }
-                    // centred in the rect's height, cut at the rect and the pane
-                    let top = px[1] + (px[3] - size * 1.2) / 2.0;
-                    let cut = [px[0].max(c0[0]), px[1].max(c0[1]), (px[0] + px[2]).min(c1[0]), (px[1] + px[3]).min(c1[1])];
-                    if cut[2] > cut[0] && cut[3] > cut[1] {
-                        self.ui_placed.push((key, px[0], top, cut));
+                Kind::Pill { label, fg, pad } => {
+                    let b = grow(pad * cw, (ch * 0.08).round());
+                    rects.extend(clipped(vec![Rect { xywh: b, color: col.f32(), p: [b[3] / 2.0, 0.0], hole: NO_HOLE }], clip));
+                    if let Some(l) = label {
+                        let on = fg.as_deref().and_then(|f| crate::ui::role(f, &frame.pal)).unwrap_or_else(|| crate::ui::on_role(&r.role, &frame.pal));
+                        self.ui_label(l, on, px, clip, true);
                     }
                 }
+                Kind::Text(l) => self.ui_label(l, col, px, clip, false),
             }
+        }
+    }
+
+    /// A UI hint's words, shaped once (kept by what they are) and placed: left, centred in the rect's height, cut at it and the pane.
+    fn ui_label(&mut self, l: &crate::ui::Label, col: Rgb, px: [f32; 4], clip: [f32; 4], centre: bool) {
+        let size = (self.font_px * l.scale).round();
+        // the family a name means: the cell font, the UI font (a sans when it is not installed), a generic, or a family
+        let mono = matches!(l.font.as_str(), "mono" | "cell");
+        let name = match l.font.as_str() {
+            "mono" | "cell" => self.family.clone(),
+            "ui" => self.ui_family.clone(),
+            n => n.to_string(),
+        };
+        if !mono && !self.ui_fonts.contains_key(&name) {
+            let have = |n: &str| self.font_system.db().faces().any(|f| f.families.iter().any(|(fam, _)| fam.eq_ignore_ascii_case(n)));
+            let found = if have(&name) { Some(name.clone()) } else {
+                std::process::Command::new("fc-match").args(["-f", "%{family[0]}", &name]).output().ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|f| !f.is_empty() && have(f))
+            };
+            self.ui_fonts.insert(name.clone(), found);
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (&l.text, l.scale.to_bits(), l.weight, &name, col.0, col.1, col.2, size.to_bits()).hash(&mut h);
+        let key = h.finish();
+        if !self.ui_text.contains_key(&key) {
+            let found = if mono { Some(name.clone()) } else { self.ui_fonts.get(&name).cloned().flatten() };
+            let fam = match found.as_deref() {
+                Some(n) => Family::Name(n),
+                None if name == "serif" => Family::Serif,
+                None => Family::SansSerif,
+            };
+            let mut b = Buffer::new(&mut self.font_system, Metrics::new(size, size * 1.2));
+            b.set_size(None, Some(size * 1.2));
+            let mut a = Attrs::new().family(fam).color(Color::rgb(col.0, col.1, col.2)).weight(Weight(l.weight));
+            if mono {
+                a = a.font_features(self.features.clone());
+            }
+            b.set_text(&l.text, &a, Shaping::Advanced, None);
+            b.shape_until_scroll(&mut self.font_system, false);
+            self.ui_text.insert(key, b);
+        }
+        let top = (px[1] + (px[3] - size * 1.2) / 2.0).round();
+        let wide = self.ui_text.get(&key).map_or(0.0, |b| b.layout_runs().map(|r| r.line_w).fold(0.0, f32::max));
+        let left = if centre { (px[0] + (px[2] - wide) / 2.0).round() } else { px[0] };
+        let (c0, c1) = ([clip[0], clip[1]], [clip[0] + clip[2], clip[1] + clip[3]]);
+        let cut = [px[0].max(c0[0]), (px[1] - size * 0.3).max(c0[1]), (px[0] + px[2]).min(c1[0]), (px[1] + px[3] + size * 0.3).min(c1[1])];
+        if cut[2] > cut[0] && cut[3] > cut[1] {
+            self.ui_placed.push((key, left, top, cut));
         }
     }
 
@@ -2059,7 +2105,7 @@ impl Frame {
                 if y + r.rect[3] as isize <= 0 || y >= rows {
                     continue;
                 }
-                if matches!(r.kind, crate::ui::Kind::Text { .. }) {
+                if matches!(r.kind, crate::ui::Kind::Text(_) | crate::ui::Kind::Pill { label: Some(_), .. }) {
                     for row in self.rows.iter_mut().skip(y.max(0) as usize).take((y + r.rect[3] as isize - y.max(0)) as usize) {
                         for c in row.iter_mut().skip(r.rect[0]).take(r.rect[2]) {
                             c.ch = ' ';

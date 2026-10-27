@@ -153,7 +153,16 @@ fn main() {
     if matches!(args.first().map(String::as_str), Some("ui")) {
         match args.get(1).map(String::as_str) {
             Some("demo") => {
-                print!("{}", ui::demo(args.iter().any(|a| a == "--plain")));
+                // the screen's size; on a terminal it stays until Enter, then the cursor comes back
+                let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+                let (c, r) = if unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 { (ws.ws_col as usize, ws.ws_row as usize) } else { (80, 24) };
+                print!("{}", ui::demo(args.iter().any(|a| a == "--plain"), c, r));
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                if unsafe { libc::isatty(0) } == 1 {
+                    let _ = std::io::stdin().read_line(&mut String::new());
+                    print!("\x1b[H\x1b[2J\x1b[?25h");
+                }
                 std::process::exit(0);
             }
             _ => { eprintln!("zash ui demo [--plain]"); std::process::exit(2) }

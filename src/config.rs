@@ -141,6 +141,8 @@ pub struct Config {
     /// the shell to start; zash sets SHELL to it, so programs inside agree
     pub shell: Option<String>,
     pub font_family: String,
+    /// for the words of UI hints that ask for it (font=ui)
+    pub ui_font: String,
     /// points, as WezTerm counts them
     pub font_size_pt: f32,
     pub line_height: f32,
@@ -202,6 +204,7 @@ impl Default for Config {
             shell: None,
             command: None,
             font_family: std::env::var("ZASH_FONT").unwrap_or_else(|_| "MonaspiceNe Nerd Font".into()),
+            ui_font: "Google Sans Flex".into(),
             font_size_pt: std::env::var("ZASH_FONT_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(11.5),
             line_height: 1.2,
             features: ["cv06", "cv14", "cv32", "ss04", "ss07", "ss09"].iter().map(|f| (f.to_string(), 1)).collect(),
@@ -275,6 +278,7 @@ struct File {
     /// what a plain `zash` runs instead of the shell (e.g. "zeit new")
     command: Option<String>,
     font: Option<String>,
+    ui_font: Option<String>,
     /// the shell to start (else $SHELL)
     shell: Option<String>,
     size: Option<f32>,
@@ -638,6 +642,8 @@ pub const DEFAULT_FILE: &str = r#"# zash — settings. Every line is optional; d
 # The font and its size in points (as WezTerm counts them).
 font = "MonaspiceNe Nerd Font"
 size = 11.5
+# The font of programs' UI text that asks for it (OSC 7733;ui font=ui); missing: a sans.
+ui_font = "Google Sans Flex"
 # Line height as a multiple of the font size.
 line_height = 1.2
 # OpenType features of the font (stylistic sets, character variants).
@@ -811,6 +817,7 @@ impl Config {
         if let Some(v) = f.command { c.command = Some(v).filter(|s| !s.trim().is_empty()); }
         if let Some(v) = f.shell.filter(|s| !s.is_empty()) { c.shell = Some(v); }
         if let Some(v) = f.font { c.font_family = v; }
+        if let Some(v) = f.ui_font { c.ui_font = v; }
         if let Some(v) = f.size { c.font_size_pt = v; }
         if let Some(v) = f.line_height { c.line_height = v; }
         if let Some(v) = f.features { c.features = v.into_iter().map(|t| (t, 1)).collect(); }
