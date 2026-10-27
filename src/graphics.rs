@@ -51,6 +51,8 @@ pub struct Graphics {
     pub zpanes: Vec<crate::ink::ZPane>,
     /// the program's floats (OSC 7733;layers;x,y,w,h;…, in cells): drawn raised (render.rs)
     pub layers: Vec<[usize; 4]>,
+    /// the program's UI hints (OSC 7733;ui, ui.rs): panels and big text, None when cleared
+    pub ui: Option<crate::ui::UiSet>,
     /// while the zfloat is dragged (OSC 7733;zunder): the cells under its edge, so a pixel-smooth
     /// drag shows what is really there in the strip it uncovers
     pub under: Option<ZUnder>,

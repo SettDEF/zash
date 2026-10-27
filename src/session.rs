@@ -147,6 +147,8 @@ pub enum Found {
     Fx(String),
     /// DECSCNM: the whole screen in reverse video (light background), on or off
     Reverse(bool),
+    /// UI hints: OSC 7733;ui;REGION;… (ui.rs), empty to clear
+    Ui(String),
     /// OSC 7733;q: a program asks what this zash can do (works over SSH, unlike TERM_PROGRAM)
     Query,
     Popup(Option<Popup>),
@@ -273,6 +275,8 @@ impl MarkScanner {
                 out.push((at, Found::PopupStyle(look.to_string())));
             } else if let Some(k) = body.strip_prefix("7733;keys;") {
                 out.push((at, Found::Keys(k.to_string())));
+            } else if let Some(u) = body.strip_prefix("7733;ui;").or_else(|| (body == "7733;ui").then_some("")) {
+                out.push((at, Found::Ui(u.to_string())));
             } else if body == "7733;q" {
                 out.push((at, Found::Query));
             } else if let Some(f) = body.strip_prefix("7733;fx;").or_else(|| (body == "7733;fx").then_some("")) {
@@ -417,6 +421,8 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
     let mut parser: alacritty_terminal::vte::ansi::Processor = alacritty_terminal::vte::ansi::Processor::new();
     let mut scanner = MarkScanner::default();
     let mut buf = vec![0u8; 1 << 16];
+    // UI hints are up on the alternate screen (cleared when it is left)
+    let mut ui_alt = false;
     let fd = std::os::fd::AsRawFd::as_raw_fd(&reader);
     loop {
         // wait for output (the fd is non-blocking)
@@ -590,6 +596,19 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                         parser.advance(&mut *t, "\n".repeat(ask.rows).as_bytes());
                         continue;
                     }
+                    Found::Ui(body) => {
+                        // anchored to the line at the screen's top now, so it scrolls with the text
+                        let regions = crate::ui::parse(&body);
+                        let alt = t.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
+                        let set = (!regions.is_empty()).then(|| crate::ui::UiSet { regions, top: t.grid().history_size(), alt });
+                        ui_alt = set.as_ref().is_some_and(|s| s.alt);
+                        let mut g = graphics.lock().unwrap();
+                        if g.ui != set {
+                            g.ui = set;
+                            g.generation += 1;
+                        }
+                        continue;
+                    }
                     Found::Query => {
                         use alacritty_terminal::event::EventListener;
                         listener.send_event(alacritty_terminal::event::Event::PtyWrite(crate::fx::capabilities()));
@@ -628,6 +647,13 @@ fn read_loop(mut reader: File, term: Arc<FairMutex<Term<Listener>>>, marks: Arc<
                 }
             }
             parser.advance(&mut *t, &chunk[at..]);
+            // the program left its alternate screen: its UI hints go with it
+            if ui_alt && !t.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN) {
+                ui_alt = false;
+                let mut g = graphics.lock().unwrap();
+                g.ui = None;
+                g.generation += 1;
+            }
             processed += n;
             if processed >= 1 << 20 {
                 break;

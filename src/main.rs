@@ -22,6 +22,7 @@ mod copy;
 mod anim;
 mod ink;
 mod layers;
+mod ui;
 mod layer_fx;
 mod pen;
 mod desktop;
@@ -148,6 +149,16 @@ fn main() {
     }
 
     // --desktop: on the wallpaper, click-through ([desktop] in the settings); -- CMD runs CMD in it
+    // zash ui demo [--plain]: a mock app screen drawn with the UI hints (ui.rs)
+    if matches!(args.first().map(String::as_str), Some("ui")) {
+        match args.get(1).map(String::as_str) {
+            Some("demo") => {
+                print!("{}", ui::demo(args.iter().any(|a| a == "--plain")));
+                std::process::exit(0);
+            }
+            _ => { eprintln!("zash ui demo [--plain]"); std::process::exit(2) }
+        }
+    }
     // zash anim check FILE · zash anim play FILE [--rows N] [--loop N] [--speed X] [--color RRGGBB=name]…
     if matches!(args.first().map(String::as_str), Some("anim")) {
         let (sub, file) = (args.get(1).map(String::as_str), args.get(2));

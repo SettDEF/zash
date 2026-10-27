@@ -423,6 +423,8 @@ impl State {
             ink: Vec::new(),
             ink_top: 0.0,
             layers: Vec::new(),
+            ui: Vec::new(),
+            pal: p.clone(),
             pen_hover: None,
         }
     }

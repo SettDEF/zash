@@ -98,6 +98,10 @@ pub struct Frame {
     pub ink_top: f64,
     /// the program's floats in cells (OSC 7733;layers): a shadow and an edge under each
     pub layers: Vec<[usize; 4]>,
+    /// the program's UI hints (OSC 7733;ui) on screen, each with the screen row of its top
+    pub ui: Vec<(crate::ui::Region, isize)>,
+    /// the palette the frame was taken in (UI roles resolve against it)
+    pub pal: Palette,
     /// where the pen hovers while drawing: (line, col, radius in cells, the eraser end)
     pub pen_hover: Option<(f64, f32, f32, bool)>,
     /// a multiplexer's app popup: zash draws its frame (the cells under it are blanked)
@@ -168,7 +172,7 @@ impl Frame {
             ((l + offset) as usize, c, content.cursor.shape)
         }).filter(|(r, _, _)| *r < lines);
         let drawn_cursor = if cursor.is_none() { inverted.iter().rposition(|(n, _)| *n == 1).map(|r| (r, inverted[r].1)) } else { None };
-        let f = Frame { drawn_cursor, cursor_drawn: false, cursor_styled: true, float: None, under: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: def_fg, prompts: Vec::new(), cols, rows, cursor, bg: def_bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new(), ink: Vec::new(), ink_top: 0.0, layers: Vec::new(), pen_hover: None };
+        let f = Frame { drawn_cursor, cursor_drawn: false, cursor_styled: true, float: None, under: None, popup_look: crate::config::PopupLook::default(), zfloat_look: Default::default(), region: None, above: Vec::new(), below: Vec::new(), scroll_px: 0.0, popup: None, tabs: Vec::new(), bar: None, bar_bg: p.selection_bg, fg: def_fg, prompts: Vec::new(), cols, rows, cursor, bg: def_bg, cursor_color: p.cursor_bg, fail_color: p.ansi[1], small: Vec::new(), tones: [p.ansi[2], p.ansi[1], p.ansi[3], p.ansi[4]], images: Vec::new(), ink: Vec::new(), ink_top: 0.0, layers: Vec::new(), ui: Vec::new(), pal: p.clone(), pen_hover: None };
         f
     }
 
@@ -394,6 +398,9 @@ pub struct Renderer {
     pub popup_hit: Option<([f32; 4], Option<usize>, Vec<(usize, [f32; 4])>)>,
     /// letters under a dragged zfloat, in the strip it uncovers (buffer, x, y, clip l t r b)
     unders: Vec<(Buffer, f32, f32, [f32; 4])>,
+    /// UI hints' big text (OSC 7733;ui): shaped once per content, and where each goes this frame (key, x, y, clip l t r b)
+    ui_text: std::collections::HashMap<u64, Buffer>,
+    ui_placed: Vec<(u64, f32, f32, [f32; 4])>,
     /// height of the tab bar above the rows (0 with one tab)
     pub top: f32,
     rects: Rects,
@@ -489,6 +496,8 @@ impl Renderer {
             bars: Vec::new(),
             popup_hit: None,
             unders: Vec::new(),
+            ui_text: Default::default(),
+            ui_placed: Vec::new(),
             top: 0.0,
             rows: std::collections::HashMap::new(),
             order: std::collections::HashMap::new(),
@@ -781,6 +790,49 @@ impl Renderer {
         clipped(out, clip)
     }
 
+    /// A pane's UI hints (ui.rs): panels into `rects` (under the cells' backgrounds), big text placed for the text pass.
+    fn ui_regions(&mut self, frame: &Frame, ox: f32, oy: f32, clip: [f32; 4], rects: &mut Vec<Rect>) {
+        let (cw, ch) = (self.cell_w, self.cell_h);
+        let (c0, c1) = ([clip[0], clip[1]], [clip[0] + clip[2], clip[1] + clip[3]]);
+        for (r, y) in &frame.ui {
+            let px = [ox + r.rect[0] as f32 * cw, oy + *y as f32 * ch + frame.scroll_px, r.rect[2] as f32 * cw, r.rect[3] as f32 * ch];
+            let Some(col) = crate::ui::role(&r.role, &frame.pal) else { continue };
+            match &r.kind {
+                crate::ui::Kind::Panel { radius, border } => {
+                    let mut out = Vec::new();
+                    if let Some(b) = border.as_deref().and_then(|b| crate::ui::role(b, &frame.pal)) {
+                        out.push(Rect { xywh: [px[0] - 1.0, px[1] - 1.0, px[2] + 2.0, px[3] + 2.0], color: b.f32(), p: [radius + 1.0, 0.0], hole: NO_HOLE });
+                    }
+                    out.push(Rect { xywh: px, color: col.f32(), p: [*radius, 0.0], hole: NO_HOLE });
+                    rects.extend(clipped(out, clip));
+                }
+                crate::ui::Kind::Text { text, scale, bold } => {
+                    let size = self.font_px * scale;
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    (text, scale.to_bits(), bold, col.0, col.1, col.2, size.to_bits(), &self.family).hash(&mut h);
+                    let key = h.finish();
+                    if !self.ui_text.contains_key(&key) {
+                        let mut b = Buffer::new(&mut self.font_system, Metrics::new(size, size * 1.2));
+                        b.set_size(None, Some(size * 1.2));
+                        let mut a = Attrs::new().family(Family::Name(&self.family)).color(Color::rgb(col.0, col.1, col.2)).font_features(self.features.clone());
+                        if *bold {
+                            a = a.weight(Weight::BOLD);
+                        }
+                        b.set_text(text, &a, Shaping::Advanced, None);
+                        b.shape_until_scroll(&mut self.font_system, false);
+                        self.ui_text.insert(key, b);
+                    }
+                    // centred in the rect's height, cut at the rect and the pane
+                    let top = px[1] + (px[3] - size * 1.2) / 2.0;
+                    let cut = [px[0].max(c0[0]), px[1].max(c0[1]), (px[0] + px[2]).min(c1[0]), (px[1] + px[3]).min(c1[1])];
+                    if cut[2] > cut[0] && cut[3] > cut[1] {
+                        self.ui_placed.push((key, px[0], top, cut));
+                    }
+                }
+            }
+        }
+    }
+
     /// Draws the panes of a tab into `view` (a window surface or an offscreen texture).
     /// The focused pane carries the chrome: tab bar, completion popup, search bar.
     /// Returns true while something still animates (the caller asks for another frame).
@@ -800,6 +852,7 @@ impl Renderer {
         self.panel_shader = None;
         self.shaders.tick();
         self.unders.clear();
+        self.ui_placed.clear();
         let mut rects = Vec::new();
         let mut over = Vec::new();
         let mut veil: Vec<Rect> = Vec::new();
@@ -821,6 +874,9 @@ impl Renderer {
             // where the zfloat is drawn this frame: drawn marks inside it are cut at its edges, the ones
             // under it are cut away where it covers them
             let mut float_rect: Option<[f32; 4]> = None;
+            if !p.frame.ui.is_empty() {
+                self.ui_regions(p.frame, ox, oy, clip, &mut rects);
+            }
             if let Some(z) = &p.frame.float {
                 // under the text: a soft shadow, the edge (the accent when it has the keyboard), the panel
                 let mut r = [ox + z.x as f32 * self.cell_w, oy + z.y as f32 * self.cell_h, z.w as f32 * self.cell_w, z.h as f32 * self.cell_h];
@@ -1338,6 +1394,11 @@ impl Renderer {
             labels.push((b, x + self.cell_w, y + self.cell_h * 0.25));
         }
         self.bars = labels;
+        // big text no longer shown is dropped
+        if !self.ui_text.is_empty() {
+            let used: std::collections::HashSet<u64> = self.ui_placed.iter().map(|u| u.0).collect();
+            self.ui_text.retain(|k, _| used.contains(k));
+        }
         // floats coming, going or moving: frames until they are still (layers.rs)
         {
             let dur = std::time::Duration::from_millis(self.layers_conf.ms as u64);
@@ -1400,6 +1461,16 @@ impl Renderer {
                 })));
             }
         }
+        // UI hints' big text, over the cells it stands for
+        areas.extend(self.ui_placed.iter().filter_map(|(k, x, y, c)| self.ui_text.get(k).map(|b| TextArea {
+            buffer: b,
+            left: *x,
+            top: *y,
+            scale: 1.0,
+            bounds: TextBounds { left: c[0] as i32, top: c[1] as i32, right: c[2].ceil() as i32, bottom: c[3].ceil() as i32 },
+            default_color: Color::rgb(255, 255, 255),
+            custom_glyphs: &[],
+        })));
         let _ = self.text.prepare(device, queue, &mut self.font_system, &mut self.atlas, &self.viewport, areas, &mut self.swash);
         let bar_areas: Vec<TextArea> = self.bars.iter().map(|(b, x, y)| TextArea {
             buffer: b,
@@ -1978,6 +2049,26 @@ impl Frame {
         // floats only on the live screen (scrolled back, the program's screen is not what shows)
         if term.grid().display_offset() == 0 && term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN) {
             self.layers = g.layers.clone();
+        }
+        // UI hints on the screen they were sent on, where their lines are now; big text hides its cells
+        if let Some(u) = g.ui.as_ref().filter(|u| u.alt == term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)) {
+            let shift = term.grid().history_size() as isize - u.top as isize - term.grid().display_offset() as isize;
+            let rows = self.rows.len() as isize;
+            for r in &u.regions {
+                let y = r.rect[1] as isize - shift;
+                if y + r.rect[3] as isize <= 0 || y >= rows {
+                    continue;
+                }
+                if matches!(r.kind, crate::ui::Kind::Text { .. }) {
+                    for row in self.rows.iter_mut().skip(y.max(0) as usize).take((y + r.rect[3] as isize - y.max(0)) as usize) {
+                        for c in row.iter_mut().skip(r.rect[0]).take(r.rect[2]) {
+                            c.ch = ' ';
+                            c.zw = None;
+                        }
+                    }
+                }
+                self.ui.push((r.clone(), y));
+            }
         }
         // pinned to screen cells by a multiplexer: there while the screen is not scrolled back
         if term.grid().display_offset() == 0 {
