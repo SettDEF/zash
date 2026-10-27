@@ -6,6 +6,6 @@ marks-1     marks.bytes      40x14   0.2     every mark part drawn
 marks-2     marks.bytes      40x14   3.0     every mark done
 anim-0      anim.bytes       30x8    0.0     a Lottie square, still, in the accent colour
 anim-1      anim.bytes       30x8    0.5     the square turned (a quarter of its ease)
-ui-demo     ui.bytes         66x18   0.0     UI hints: sidebar and card panels, a big heading, the cells under it hidden
-ui-plain    ui-plain.bytes   66x18   0.0     the same screen without the hints: plain cells, as other terminals show it
-ui-scroll   ui-scroll.bytes  66x18   0.0     the hints scrolled up with their text (6 lines)
+ui-demo     ui.bytes         80x24   0.0     UI hints: a zett-like screen: panels with shadow and border, pills, UI-font words over hidden cells
+ui-plain    ui-plain.bytes   80x24   0.0     the same screen without the hints: plain cells, as other terminals show it
+ui-scroll   ui-scroll.bytes  80x24   0.0     the hints scrolled up with their text (6 lines)
