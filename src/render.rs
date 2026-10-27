@@ -827,6 +827,17 @@ impl Renderer {
                     }
                 }
                 Kind::Text(l) => self.ui_label(l, col, px, clip, false),
+                Kind::Line(e) => {
+                    use crate::ui::Edge;
+                    let t = (ch / 18.0).round().max(1.0);
+                    let xywh = match e {
+                        Edge::Top => [px[0], px[1], px[2], t],
+                        Edge::Bottom => [px[0], px[1] + px[3] - t, px[2], t],
+                        Edge::Left => [px[0], px[1], t, px[3]],
+                        Edge::Right => [px[0] + px[2] - t, px[1], t, px[3]],
+                    };
+                    rects.extend(clipped(vec![Rect { xywh, color: col.f32(), p: [0.0, 0.0], hole: NO_HOLE }], clip));
+                }
             }
         }
     }

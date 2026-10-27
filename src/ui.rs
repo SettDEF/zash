@@ -15,6 +15,8 @@
 //!   text and pill: font=mono (the cell font, default) | ui (the UI font, ui_font in zash.toml) | a family;
 //!     a name fontdb lacks (sans-serif, serif, an alias of ~/.config/fontconfig) is what fc-match picks
 //!     (asked once per name), else a sans
+//!   line,…   a 1px line along one edge of the rect: edge=top|bottom|left|right (default bottom),
+//!     role=outline-variant
 //! Unknown kinds and keys are skipped (button, list, input come later).
 
 use crate::config::{Palette, Rgb};
@@ -38,6 +40,16 @@ pub enum Kind {
     Panel { radius: Option<f32>, border: Option<String>, shadow: f32, pad: f32 },
     Pill { label: Option<Label>, fg: Option<String>, pad: f32 },
     Text(Label),
+    /// a 1px line on this edge of the rect
+    Line(Edge),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    Top,
+    Bottom,
+    Left,
+    Right,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,6 +104,7 @@ pub fn parse(body: &str) -> Vec<Region> {
         let (kind, role) = match kind {
             "panel" => (Kind::Panel { radius: get("r").and_then(|v| v.parse().ok()).map(|r: f32| r.clamp(0.0, 64.0)), border: get("border"), shadow: num("shadow", 0.0, 0.0, 3.0), pad: num("pad", 0.5, 0.0, 4.0) }, get("role").unwrap_or("surface-container".into())),
             "pill" => (Kind::Pill { label: label(1.0), fg: get("fg"), pad: num("pad", 0.6, 0.0, 4.0) }, get("role").unwrap_or("primary-container".into())),
+            "line" => (Kind::Line(match get("edge").as_deref() { Some("top") => Edge::Top, Some("left") => Edge::Left, Some("right") => Edge::Right, _ => Edge::Bottom }), get("role").unwrap_or("outline-variant".into())),
             "text" => (Kind::Text(label(if n[3] > 1 { 1.6 } else { 1.0 })?), get("role").unwrap_or("on-surface".into())),
             _ => return None,
         };
@@ -171,6 +184,9 @@ mod tests {
         // a pill: its words in the UI font, weight by number; without words the cells stay
         assert_eq!(parse("pill,1,1,6,1,text=Open,font=ui,weight=550,role=primary")[0].kind, Kind::Pill { label: Some(Label { text: "Open".into(), scale: 1.0, weight: 550, font: "ui".into() }), fg: None, pad: 0.6 });
         assert_eq!(parse("pill,1,1,6,1")[0].kind, Kind::Pill { label: None, fg: None, pad: 0.6 });
+        // a line: its edge, outline-variant by default
+        assert_eq!(parse("line,0,0,4,1,edge=top")[0], Region { kind: Kind::Line(Edge::Top), rect: [0, 0, 4, 1], role: "outline-variant".into() });
+        assert_eq!(parse("line,0,0,4,1")[0].kind, Kind::Line(Edge::Bottom));
     }
 
     #[test]
@@ -201,7 +217,7 @@ pub fn demo(plain: bool, cols: usize, rows: usize) -> String {
         ]),
         file("Cargo.toml"), file("README.md"),
     ])]);
-    let outline = section("outline", [list(None, [item("\u{f1b2}", "Screen"), item("\u{f1b2}", "Ui"), item("\u{0192}", "render"), item("\u{0192}", "highlight")])]);
+    let outline = section("outline", [list(None, [item("\u{eb5b}", "Screen"), item("\u{eb5b}", "Ui"), item("\u{ea8c}", "render"), item("\u{ea8c}", "draw"), item("\u{ea8c}", "highlight")])]);
     let code = [
         "/// The tree on a cols x rows screen.",
         "pub fn render(&self, cols: usize, rows: usize) -> Screen {",
@@ -214,6 +230,12 @@ pub fn demo(plain: bool, cols: usize, rows: usize) -> String {
         "    }",
         "    out",
         "}",
+        "",
+        "/// A tree and its last render.",
+        "pub struct Ui {",
+        "    root: El,",
+        "    last: Option<((usize, usize), Screen)>,",
+        "}",
     ];
     let term = [
         mono("$ cargo test ui::", St::default()),
@@ -224,18 +246,16 @@ pub fn demo(plain: bool, cols: usize, rows: usize) -> String {
         tabs(&[("kit.rs", true, true), ("layout.rs", false, false), ("README.md", false, false)]),
         breadcrumb(&["src", "ui", "kit.rs", "render"]),
         editor(code.iter().map(|l| highlight(l)).collect(), 6),
-        divider(true),
         panel(&["terminal", "problems"], 0, term).h(Size::Part(0.28)),
     ]).h(Size::Fill(1)).gap(tokens::Gap::None);
     let status = status_bar(
-        [badge("N"), spans(vec![span("\u{f48a} ", Some(BLUE)), Span("kit.rs".into(), St { bold: true, ..St::default() })]), mono("7:9", St { dim: true, ..St::default() })],
+        [badge("N"), spans(vec![span("\u{e7a8} ", None), Span("kit.rs".into(), St { bold: true, ..St::default() })]), mono("7:9", St { dim: true, ..St::default() })],
         [mono("\u{e0a0} ui-panels", St { fg: Some(MAGENTA), ..St::default() }), mono("Rust", St::default()), mono("42%", St { dim: true, ..St::default() })],
     );
     let ui = column([
         row([
             activity_bar(&["\u{f0c5}", "\u{f002}", "\u{e725}", "\u{f0ae}"], 0, &["\u{f013}"]),
             sidebar(24, [explorer, outline]),
-            divider(false),
             editor_area,
         ]).h(Size::Fill(1)),
         status,

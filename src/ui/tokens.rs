@@ -108,10 +108,14 @@ pub mod role {
     pub const LAYER3: &str = "surface-container-highest";
     /// the current line: barely lifted
     pub const HIGHLIGHT: &str = "surface-container";
+    /// a step under layer 1: the activity bar
+    pub const SUNK: &str = "surface-container";
     pub const ON: &str = "on-surface";
     pub const SUBTEXT: &str = "on-surface-variant";
     pub const PRIMARY: &str = "primary";
     pub const PRIMARY_CONTAINER: &str = "primary-container";
     pub const ON_PRIMARY_CONTAINER: &str = "on-primary-container";
     pub const BORDER: &str = "outline-variant";
+    /// lines between parts
+    pub const LINE: &str = "outline";
 }

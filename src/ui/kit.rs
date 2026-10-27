@@ -84,11 +84,22 @@ pub struct El {
     align: Align,
     max: (usize, usize),
     surface: Option<Surface>,
+    /// lines on the left, top, right, bottom edge
+    edges: [bool; 4],
     kids: Vec<El>,
 }
 
 fn el(k: K, w: Size, h: Size) -> El {
-    El { k, dir: Dir::Column, w, h, gap: Gap::None, pad: [0; 4], align: Align::Start, max: (0, 0), surface: None, kids: Vec::new() }
+    El { k, dir: Dir::Column, w, h, gap: Gap::None, pad: [0; 4], align: Align::Start, max: (0, 0), surface: None, edges: [false; 4], kids: Vec::new() }
+}
+
+/// Which edge of an element a line goes on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    Left,
+    Top,
+    Right,
+    Bottom,
 }
 
 impl El {
@@ -99,6 +110,8 @@ impl El {
     pub fn align(mut self, a: Align) -> El { self.align = a; self }
     pub fn max_w(mut self, n: usize) -> El { self.max.0 = n; self }
     pub fn surface(mut self, s: Surface) -> El { self.surface = Some(s); self }
+    /// A thin line on that edge (outline-variant); plain draws it when that side has padding.
+    pub fn line(mut self, e: Edge) -> El { self.edges[e as usize] = true; self }
     /// A plain background in a layer role (r=0).
     pub fn bg(self, role: &'static str) -> El { self.surface(Surface { role, r: 0.0, border: false, shadow: false, boxed: false }) }
 }
@@ -129,7 +142,7 @@ pub fn card(kids: impl IntoIterator<Item = El>) -> El {
 
 /// The sidebar: a fixed width, layer 1, sections a section gap apart.
 pub fn sidebar(width: usize, kids: impl IntoIterator<Item = El>) -> El {
-    column(kids).w(Size::Fixed(width)).h(Size::Fill(1)).pad(tokens::SIDEBAR_PAD).gap(Gap::Section).bg(role::LAYER1)
+    column(kids).w(Size::Fixed(width)).h(Size::Fill(1)).pad(tokens::SIDEBAR_PAD).gap(Gap::Section).bg(role::LAYER1).line(Edge::Right)
 }
 
 // words
@@ -151,9 +164,9 @@ pub fn spans(s: Vec<Span>) -> El {
     el(K::Spans(s), Size::Fit, Size::Fixed(1))
 }
 
-/// A section's header: caption words, indented to sit between a row's icon and label.
+/// A section's header: dim capitals in the cell font, indented to sit between a row's icon and label.
 pub fn section_header(t: &str) -> El {
-    caption(&t.to_uppercase()).pad([tokens::SECTION_INDENT, 0, 0, 0])
+    mono(&t.to_uppercase(), St { dim: true, bold: true, ..St::default() }).pad([tokens::SECTION_INDENT, 0, 0, 0])
 }
 
 /// A sidebar section: a header and its rows, no gap.
@@ -193,15 +206,15 @@ pub fn list(selected: Option<usize>, items: impl IntoIterator<Item = El>) -> El 
     column(items.into_iter().enumerate().map(|(i, e)| e.selected(Some(i) == selected)))
 }
 
-/// A file's icon and colour by its extension.
+/// A file's icon by its extension (one Nerd Font set, muted: no colour).
 pub fn file_icon(name: &str) -> (&'static str, Option<u8>) {
     match name.rsplit_once('.').map(|(_, e)| e) {
-        Some("rs") => ("\u{e7a8}", Some(YELLOW)),
-        Some("md") => ("\u{f48a}", Some(BLUE)),
-        Some("toml") => ("\u{e615}", Some(MAGENTA)),
-        Some("lua") => ("\u{e620}", Some(BLUE)),
-        Some("sh") => ("\u{f489}", Some(GREEN)),
-        Some("json") => ("\u{e60b}", Some(YELLOW)),
+        Some("rs") => ("\u{e7a8}", None),
+        Some("md") => ("\u{f48a}", None),
+        Some("toml") => ("\u{e615}", None),
+        Some("lua") => ("\u{e620}", None),
+        Some("sh") => ("\u{f489}", None),
+        Some("json") => ("\u{e60b}", None),
         Some("lock") => ("\u{f023}", None),
         _ => ("\u{f15b}", None),
     }
@@ -214,7 +227,7 @@ pub fn file(name: &str) -> TreeItem {
 
 pub fn folder(name: &str, open: bool, children: impl IntoIterator<Item = TreeItem>) -> TreeItem {
     let icon = if open { "\u{f07c}" } else { "\u{f07b}" };
-    TreeItem { icon: icon.into(), fg: Some(BLUE), label: name.into(), open: Some(open), selected: false, children: children.into_iter().collect() }
+    TreeItem { icon: icon.into(), fg: None, label: name.into(), open: Some(open), selected: false, children: children.into_iter().collect() }
 }
 
 impl TreeItem {
@@ -256,7 +269,7 @@ pub fn activity_bar(icons: &[&str], active: usize, bottom: &[&str]) -> El {
     let mut k: Vec<El> = icons.iter().enumerate().map(|(n, i)| ico(i, n == active)).collect();
     k.push(spacer());
     k.extend(bottom.iter().map(|i| ico(i, false)));
-    column(k).w(Size::Fixed(4)).h(Size::Fill(1)).pad([0, 1, 0, 1]).gap(Gap::Section).bg(role::LAYER1)
+    column(k).w(Size::Fixed(4)).h(Size::Fill(1)).pad([0, 1, 1, 1]).gap(Gap::Section).bg(role::SUNK).line(Edge::Right)
 }
 
 /// Editor tabs: (name, active, dirty); the active one raised to the editor's surface.
@@ -264,7 +277,7 @@ pub fn tabs(t: &[(&str, bool, bool)]) -> El {
     row(t.iter().map(|(n, a, d)| {
         let (icon, fg) = file_icon(n);
         el(K::Tab { icon: icon.into(), fg, name: n.to_string(), active: *a, dirty: *d }, Size::Fit, Size::Fixed(1))
-    })).h(Size::Fixed(1)).bg(role::LAYER1)
+    })).h(Size::Fixed(2)).pad([1, 1, 0, 0]).bg(role::LAYER1).line(Edge::Bottom)
 }
 
 /// Where the file is: parts joined by ›.
@@ -279,7 +292,7 @@ pub fn breadcrumb(parts: &[&str]) -> El {
 
 /// Code with line numbers; `current` (0-based) marked.
 pub fn editor(lines: Vec<Vec<Span>>, current: usize) -> El {
-    el(K::Editor { lines, current }, Size::Fill(1), Size::Fill(1))
+    el(K::Editor { lines, current }, Size::Fill(1), Size::Fill(1)).pad([1, 0, 0, 0])
 }
 
 /// A bottom panel: its tabs (the first `active`), then its body.
@@ -287,7 +300,7 @@ pub fn panel(tab_names: &[&str], active: usize, body: impl IntoIterator<Item = E
     let head = row(tab_names.iter().enumerate().map(|(i, n)| el(K::PanelTab { label: n.to_uppercase(), active: i == active }, Size::Fit, Size::Fixed(1)))).gap(Gap::Section).pad([0, 0, 0, 1]);
     let mut k = vec![head];
     k.extend(body);
-    column(k).pad([2, 1, 2, 0]).h(Size::Fill(1)).bg(role::HIGHLIGHT)
+    column(k).pad([2, 1, 2, 0]).h(Size::Fill(1)).bg(role::LAYER1).line(Edge::Top)
 }
 
 /// The status line: segments on the left, then on the right, full width.
@@ -491,6 +504,19 @@ impl El {
                 h.push(p);
             }
         }
+        // edges: a 1px line in zash; in plain a box line, on the padding of that side only
+        for (n, name) in ["left", "top", "right", "bottom"].iter().enumerate() {
+            if !self.edges[n] || r.w == 0 || r.h == 0 { continue }
+            if !plain {
+                h.push(format!("line,{},{},{},{},edge={name},role={}", r.x, r.y, r.w, r.h, role::LINE));
+            } else if self.pad[n] > 0 {
+                let d = St { dim: true, ..St::default() };
+                match n {
+                    0 | 2 => { let x = if n == 0 { r.x } else { r.x + r.w - 1 }; for y in r.y..r.y + r.h { c.put(x, y, "│", d, 1); } }
+                    _ => { c.put(r.x, if n == 1 { r.y } else { r.y + r.h - 1 }, &"─".repeat(r.w), d, r.w); }
+                }
+            }
+        }
         for k in &self.kids {
             k.draw(rects, at, c, h, plain);
         }
@@ -512,17 +538,15 @@ impl El {
                     c.put(i.x + ind - 1, i.y, if *open { "\u{f078}" } else { "\u{f054}" }, dim, 1);
                 }
                 let (ix, lx) = (i.x + ind + tokens::ITEM_ICON, i.x + ind + tokens::ITEM_LABEL);
-                c.put(ix, i.y, icon, St { fg: *fg, ..St::default() }, 1);
+                c.put(ix, i.y, icon, St { fg: *fg, dim: fg.is_none() && !selected, ..St::default() }, 1);
                 let bx = i.x + i.w - 1 - badge.chars().count();
                 let lw = if badge.is_empty() { i.w } else { bx.saturating_sub(1) } .saturating_sub(lx - i.x);
                 c.put(lx, i.y, label, St::default(), lw);
                 if !badge.is_empty() { c.put(bx, i.y, badge, if *selected { St::default() } else { dim }, badge.len()); }
-                if plain && *selected { c.style(i, |s| { s.rev = true; s.dim = false; s.fg = None }) }
-                if !plain {
-                    if *selected { h.push(format!("pill,{},{},{},1,role={},pad={}", i.x, i.y, i.w, role::PRIMARY_CONTAINER, tokens::PILL_INSET)) }
-                    let ro = if *selected { role::ON_PRIMARY_CONTAINER } else { role::ON };
-                    h.push(words(label, Rect::new(lx, i.y, lw, 1), Type::Body, ro, if *selected { 600 } else { 450 }));
-                }
+                // the selection from the row's indent (one cell before the icon) to its end
+                let p = Rect { x: ix - 1, w: i.w - (ix - 1 - i.x), ..i };
+                if plain && *selected { c.style(p, |s| { s.rev = true; s.dim = false; s.fg = None }) }
+                if !plain && *selected { h.push(format!("pill,{},{},{},1,role={},pad={}", p.x, p.y, p.w, role::PRIMARY_CONTAINER, tokens::PILL_INSET)) }
             }
             K::Button { label, primary } => {
                 let w = label.chars().count() + 4;
@@ -536,29 +560,27 @@ impl El {
             }
             K::Badge { label } => {
                 c.put(i.x, i.y, &format!(" {label} "), St { rev: plain, bold: true, ..St::default() }, i.w);
-                if !plain { h.push(format!("pill,{},{},{},1,role={},text={},font=mono,weight=700,pad=0.1", i.x, i.y, i.w, role::PRIMARY, enc(label))) }
+                if !plain { h.push(format!("panel,{},{},{},1,role={},r={},pad=0", i.x, i.y, i.w, role::PRIMARY_CONTAINER, tokens::radius::VERYSMALL)) }
             }
             K::Divider { across } => if plain {
                 if *across { c.put(i.x, i.y, &"─".repeat(i.w), dim, i.w); } else { for y in i.y..i.y + i.h { c.put(i.x, y, "│", dim, 1); } }
             }
             K::Activity { icon, active } => {
-                c.put(i.x + 1, i.y, icon, St { dim: !active, bold: *active, ..St::default() }, 1);
+                c.put(i.x + 1, i.y, icon, St { dim: !active, fg: active.then_some(CYAN), ..St::default() }, 1);
                 if *active {
-                    if plain { c.put(i.x, i.y, "▌", St { fg: Some(CYAN), ..St::default() }, 1); } else { h.push(format!("pill,{},{},2,1,role={},pad=0.4", i.x + 1, i.y, role::PRIMARY_CONTAINER)) }
+                    if plain { c.put(i.x, i.y, "▌", St { fg: Some(CYAN), ..St::default() }, 1); } else { h.push(format!("line,{},{},1,1,edge=left,role={}", i.x, i.y, role::PRIMARY)) }
                 }
             }
             K::Tab { icon, fg, name, active, dirty } => {
-                if !plain && *active { h.push(format!("panel,{},{},{},1,role={},r={},pad=0", i.x, i.y, i.w, role::LAYER0, tokens::radius::VERYSMALL)) }
-                c.put(i.x + 2, i.y, icon, St { fg: *fg, ..St::default() }, 1);
-                let st = St { bold: *active && plain, dim: !active, ..St::default() };
+                if !plain && *active { h.push(format!("panel,{},{},{},1,role={},r={},pad=0", i.x, i.y, i.w, role::LAYER0, 0)) }
+                c.put(i.x + 2, i.y, icon, St { fg: *fg, dim: !active, ..St::default() }, 1);
+                let st = St { bold: *active, dim: !active, ..St::default() };
                 let n = c.put(i.x + 4, i.y, name, st, i.w.saturating_sub(6));
                 c.put(i.x + 5 + n, i.y, if *dirty { "●" } else { "×" }, if *dirty { St::default() } else { dim }, 1);
                 if plain { c.put(i.x + i.w - 1, i.y, "│", dim, 1); }
-                if !plain { h.push(words(name, Rect::new(i.x + 4, i.y, n, 1), Type::Body, if *active { role::ON } else { role::SUBTEXT }, if *active { 500 } else { 400 })) }
             }
             K::PanelTab { label, active } => {
-                c.put(i.x, i.y, label, St { ul: *active && plain, dim: !active, bold: *active, ..St::default() }, i.w);
-                if !plain { h.push(words(label, i, Type::Caption, if *active { role::ON } else { role::SUBTEXT }, if *active { 650 } else { 500 })) }
+                c.put(i.x, i.y, label, St { ul: *active, dim: !active, bold: *active, ..St::default() }, i.w);
             }
             K::Spans(s) => {
                 let mut x = i.x;
@@ -576,7 +598,7 @@ impl El {
                     for Span(t, st) in l {
                         x += c.put(x, y, t, *st, (i.x + i.w).saturating_sub(x));
                     }
-                    if cur && !plain { h.push(format!("panel,{},{y},{},1,role={},r=0,pad=0", i.x, i.w, role::HIGHLIGHT)) }
+                    if cur && !plain { h.push(format!("panel,{},{y},{},1,role={},r=0,pad=0", r.x, r.w, role::HIGHLIGHT)) }
                 }
             }
         }
@@ -610,16 +632,18 @@ mod tests {
 
     #[test]
     fn sidebar_plain_and_hints() {
-        let ui = row([sidebar(16, [title("zett"), list(Some(0), [item("I", "Inbox").badge("12"), item("T", "Today")])]), divider(false), column([heading("Hi")]).pad([2, 1, 0, 0])]);
+        let ui = row([sidebar(16, [title("zett"), list(Some(0), [item("I", "Inbox").badge("12"), item("T", "Today")])]), column([heading("Hi")]).pad([2, 1, 0, 0])]);
         let s = ui.render(40, 8);
         let l = lines(&s.plain);
-        assert_eq!(l[1], " zett           │  Hi");
-        assert_eq!(l[3], "  I  Inbox  12  │");
-        assert_eq!(l[4], "  T  Today      │");
+        assert_eq!(l[1], " zett          │  Hi");
+        assert_eq!(l[3], "  I  Inbox  12 │");
+        assert_eq!(l[4], "  T  Today     │");
         // hints: the sidebar's surface, the pill on the chosen row, the heading over two rows
         assert!(s.osc.starts_with("\x1b]7733;ui;panel,0,0,16,8,role=surface-container-high,r=0,pad=0;"));
         assert!(s.osc.contains("pill,1,3,14,1,role=primary-container,pad=0.3"));
-        assert!(s.osc.contains("text,19,1,4,2,text=Hi,font=ui,weight=600,scale=1.6"));
+        // the sidebar's edge: a line hint, not a blank cell
+        assert!(s.osc.contains("line,0,0,16,8,edge=right,role=outline"));
+        assert!(s.osc.contains("text,18,1,4,2,text=Hi,font=ui,weight=600,scale=1.6"));
         // zash's cells have no reverse video; the plain ones do
         assert!(s.plain.contains(";7m") && !s.text.contains(";7m"));
     }
@@ -635,8 +659,9 @@ mod tests {
         let l = lines(&t.plain);
         assert_eq!(l.len(), 4, "a closed folder hides its children");
         assert!(!t.plain.contains("x.md"));
-        assert!(l[1].starts_with("     \u{e7a8}   main.rs") || l[1].contains("main.rs"));
-        assert!(t.osc.contains("pill,0,1,20,1"));
+        assert_eq!(l[1], "     \u{e7a8}  main.rs");
+        // the pill from the row's indent, not the left edge
+        assert!(t.osc.contains("pill,4,1,16,1"));
     }
 
     #[test]
