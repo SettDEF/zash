@@ -145,6 +145,13 @@ _zash_redraw() {
   # never inside another completion (Tab's own menu, a listing): zsh cannot nest them, and
   # trying once crashed the shell. Nor while our own capture runs.
   (( _zash_busy )) && return
+  # zsh's own Tab completion ran (through _zash_tab: $LASTWIDGET is then ours, not "…complete…") and its
+  # menu can still be live: a completion inside it crashes zsh (do_menucmp, SIGSEGV, 2026-10-28).
+  # Wait for a key that is not Tab / Shift+Tab, and let that one pass too.
+  if (( _zash_native )); then
+    [[ $LASTWIDGET == _zash_(tab|btab) ]] && return
+    _zash_native=0; _zash_last=$BUFFER; return
+  fi
   # (inside this hook $WIDGET is the hook itself; the widget that just ran is $LASTWIDGET)
   case $LASTWIDGET in
     *complete*|*expand*|menu-*|*-menu*|list-choices) return ;;
@@ -208,8 +215,9 @@ _zash_tab() { if (( _zash_open )); then _zash_step 1; else
     _zash_history
     if (( $#_zash_ins > 1 )); then _zash_sel=0; _zash_popup; _zash_step 1; return; fi
   fi
+  _zash_native=1
   zle "${_zash_tab_was:-expand-or-complete}"; fi }
-_zash_btab() { if (( _zash_open )); then _zash_step -1; elif [[ -n $_zash_btab_was ]]; then zle "$_zash_btab_was"; fi }
+_zash_btab() { if (( _zash_open )); then _zash_step -1; elif [[ -n $_zash_btab_was ]]; then _zash_native=1; zle "$_zash_btab_was"; fi }
 _zash_finish() { _zash_close; _zash_last='' }
 
 # installed at the first prompt, after .zshrc has made its own bindings (bindkey -v resets them)
