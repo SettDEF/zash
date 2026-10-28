@@ -118,7 +118,14 @@ pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::Pat
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
     let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, popup_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, btn_down: false, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None, paste_guard: None, pen: None, drawing: false, pen_last: Default::default(), pen_hover: None, float };
-    event_loop.run_app(&mut app).map_err(|e| e.to_string())
+    let r = event_loop.run_app(&mut app).map_err(|e| e.to_string());
+    // the pen listener borrows winit's display (from_foreign_display) and run_app has closed it: dropping
+    // it now destroys its proxies on a freed display (SIGSEGV at every exit, 2026-10-27/28). The
+    // process ends anyway.
+    if let Some(p) = app.pen.take() {
+        std::mem::forget(p);
+    }
+    r
 }
 
 fn clipboard_get(primary: bool) -> String {
