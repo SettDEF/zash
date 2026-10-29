@@ -64,6 +64,14 @@ pub enum Kind {
     Table { cols: Vec<usize>, header: bool, head: Vec<String>, sel: Option<usize> },
 }
 
+/// Weight in motion (variable fonts take any weight): `weight=200>700,dur=0.6` grows in, `hover-weight=650` under the pointer.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Motion {
+    pub from: Option<u16>,
+    pub dur: f32,
+    pub hover: Option<u16>,
+}
+
 /// What the program says a region is in (state=); hover and press zash knows itself.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum State {
@@ -93,6 +101,8 @@ pub struct Region {
     /// interactive under this name (id=)
     pub id: Option<String>,
     pub state: State,
+    /// its words' weight in motion: grown in when it first shows, or toward another under the pointer
+    pub motion: Motion,
 }
 
 /// A set as sent: its regions, the absolute line of the screen's top then, and which screen.
@@ -134,7 +144,7 @@ pub fn parse(body: &str) -> Vec<Region> {
         let get = |k: &str| kv.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
         let num = |k: &str, d: f32, lo: f32, hi: f32| get(k).and_then(|v| v.parse::<f32>().ok()).unwrap_or(d).clamp(lo, hi);
         // words default to the cell size, a taller rect's to a heading's
-        let label = |d: f32| get("text").filter(|t| !t.is_empty()).map(|text| Label { text, scale: num("scale", d, 0.5, 6.0), weight: weight(get("weight").as_deref()), font: get("font").unwrap_or("mono".into()) });
+        let label = |d: f32| get("text").filter(|t| !t.is_empty()).map(|text| Label { text, scale: num("scale", d, 0.5, 6.0), weight: weight(get("weight").as_deref().map(|w| w.rsplit('>').next().unwrap_or(w))), font: get("font").unwrap_or("mono".into()) });
         let (kind, role) = match kind {
             "panel" => (Kind::Panel { radius: get("r").and_then(|v| v.parse().ok()).map(|r: f32| r.clamp(0.0, 64.0)), border: get("border"), shadow: num("shadow", 0.0, 0.0, 3.0), pad: num("pad", 0.5, 0.0, 4.0) }, get("role").unwrap_or("surface-container".into())),
             "pill" => (Kind::Pill { label: label(1.0), fg: get("fg"), pad: num("pad", 0.6, 0.0, 4.0) }, get("role").unwrap_or("primary-container".into())),
@@ -151,7 +161,9 @@ pub fn parse(body: &str) -> Vec<Region> {
             _ => return None,
         };
         let state = match get("state").as_deref() { Some("focus") => State::Focus, Some("active") => State::Active, Some("done") => State::Done, Some("disabled") => State::Disabled, _ => State::Idle };
-        Some(Region { kind, rect: [n[0], n[1], n[2], n[3]], role, id: get("id").filter(|i| !i.is_empty() && i.len() <= 64), state })
+        let from = get("weight").and_then(|w| w.split_once('>').map(|(a, _)| weight(Some(a))));
+        let motion = Motion { from, dur: if from.is_some() { num("dur", 0.6, 0.05, 5.0) } else { 0.0 }, hover: get("hover-weight").map(|w| weight(Some(&w))) };
+        Some(Region { kind, rect: [n[0], n[1], n[2], n[3]], role, id: get("id").filter(|i| !i.is_empty() && i.len() <= 64), state, motion })
     }).take(256).collect()
 }
 
@@ -215,7 +227,7 @@ mod tests {
     fn regions_parse() {
         let r = parse("panel,0,0,20,24,role=surface-container-high,r=12,border=outline;text,22,1,30,2,scale=2.5,weight=bold,text=Hello%2C%20world%3B");
         assert_eq!(r.len(), 2);
-        assert_eq!(r[0], Region { kind: Kind::Panel { radius: Some(12.0), border: Some("outline".into()), shadow: 0.0, pad: 0.5 }, rect: [0, 0, 20, 24], role: "surface-container-high".into(), id: None, state: State::Idle });
+        assert_eq!(r[0], Region { kind: Kind::Panel { radius: Some(12.0), border: Some("outline".into()), shadow: 0.0, pad: 0.5 }, rect: [0, 0, 20, 24], role: "surface-container-high".into(), id: None, state: State::Idle, motion: Motion::default() });
         assert_eq!(r[1].kind, Kind::Text(Label { text: "Hello, world;".into(), scale: 2.5, weight: 700, font: "mono".into() }));
         assert_eq!(r[1].role, "on-surface");
         // defaults; empty, zero-size, unknown and text without words skipped
@@ -228,7 +240,7 @@ mod tests {
         assert_eq!(parse("pill,1,1,6,1,text=Open,font=ui,weight=550,role=primary")[0].kind, Kind::Pill { label: Some(Label { text: "Open".into(), scale: 1.0, weight: 550, font: "ui".into() }), fg: None, pad: 0.6 });
         assert_eq!(parse("pill,1,1,6,1")[0].kind, Kind::Pill { label: None, fg: None, pad: 0.6 });
         // a line: its edge, outline-variant by default
-        assert_eq!(parse("line,0,0,4,1,edge=top")[0], Region { kind: Kind::Line(Edge::Top), rect: [0, 0, 4, 1], role: "outline-variant".into(), id: None, state: State::Idle });
+        assert_eq!(parse("line,0,0,4,1,edge=top")[0], Region { kind: Kind::Line(Edge::Top), rect: [0, 0, 4, 1], role: "outline-variant".into(), id: None, state: State::Idle, motion: Motion::default() });
         assert_eq!(parse("line,0,0,4,1")[0].kind, Kind::Line(Edge::Bottom));
     }
 
@@ -335,5 +347,19 @@ mod list_table_tests {
         assert_eq!(r[0].id.as_deref(), Some("nav"));
         assert_eq!(r[1].kind, Kind::Table { cols: vec![8, 6, 6], header: false, head: vec![], sel: None });
         assert_eq!(parse("table,0,0,4,2")[0].kind, Kind::Table { cols: vec![], header: true, head: vec![], sel: None });
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::*;
+
+    #[test]
+    fn weight_in_motion_parses() {
+        let r = &parse("text,0,0,9,1,text=Hi,weight=200>700,dur=0.3;button,0,2,6,1,text=Go,hover-weight=650")[..];
+        assert!(matches!(&r[0].kind, Kind::Text(l) if l.weight == 700), "the weight it ends at");
+        assert_eq!(r[0].motion, Motion { from: Some(200), dur: 0.3, hover: None });
+        assert_eq!(r[1].motion.hover, Some(650));
+        assert_eq!(r[1].motion.from, None);
     }
 }

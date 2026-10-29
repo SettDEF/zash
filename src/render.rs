@@ -441,6 +441,8 @@ pub struct Renderer {
     ui_level: std::collections::HashMap<String, [f32; 2]>,
     ui_dt: f32,
     ui_tick: Option<std::time::Instant>,
+    /// when each hint whose weight grows in (weight=A>B) was first shown (the effects clock)
+    ui_seen: std::collections::HashMap<String, f32>,
     /// a zfloat dragged by its title: where the press was (pixels), its id, cell x, y, w, h then. It is
     /// drawn where the pointer puts it, to the pixel, while zeit moves it in cells
     pub float_drag: Option<(f32, f32, u64, usize, usize, usize, usize)>,
@@ -531,6 +533,7 @@ impl Renderer {
             ui_level: std::collections::HashMap::new(),
             ui_dt: 0.0,
             ui_tick: None,
+            ui_seen: std::collections::HashMap::new(),
             float_drag: None,
             float_drag_seen: false,
             anim: None,
@@ -821,6 +824,7 @@ impl Renderer {
             let px = [ox + r.rect[0] as f32 * cw, oy + *y as f32 * ch + frame.scroll_px, r.rect[2] as f32 * cw, r.rect[3] as f32 * ch];
             let Some(mut col) = crate::ui::role(&r.role, &frame.pal) else { continue };
             let disabled = r.state == State::Disabled;
+            let mut hov = 0.0f32;
             if let Some(id) = r.id.as_deref().filter(|_| !matches!(r.kind, Kind::List { .. })) {
                 let inside = self.pointer.is_some_and(|(mx, my)| mx >= px[0] && mx < px[0] + px[2] && my >= px[1] && my < px[1] + px[3] && mx >= clip[0] && my >= clip[1] && mx < clip[0] + clip[2] && my < clip[1] + clip[3]);
                 if !disabled { self.ui_hits.push((id.to_string(), px)) }
@@ -831,6 +835,7 @@ impl Renderer {
                     lv[k] = if lv[k] < want[k] { (lv[k] + step).min(want[k]) } else { (lv[k] - step).max(want[k]) };
                     moving |= lv[k] != want[k];
                 }
+                hov = lv[0];
                 let on = crate::ui::on_role(&r.role, &frame.pal);
                 col = crate::ui::mix(col, on, 0.08 * lv[0] + 0.10 * lv[1]);
             }
@@ -838,6 +843,31 @@ impl Renderer {
                 col = crate::ui::role("primary-container", &frame.pal).unwrap_or(col);
             }
             let fill = |c: Rgb| { let mut f = c.f32(); if disabled { f[3] *= 0.38 } f };
+            // the words' weight now: grown in from `from` since first shown, then toward `hover` under the pointer
+            let base_w = match &r.kind {
+                Kind::Text(l) => Some(l.weight),
+                Kind::Pill { label: Some(l), .. } | Kind::Button { label: Some(l), .. } | Kind::Input { label: Some(l), .. } => Some(l.weight),
+                _ => None,
+            };
+            let weight_now = base_w.map(|w| {
+                let mut w = w as f32;
+                if let Some(from) = r.motion.from {
+                    let key = format!("{:?}{:?}", r.rect, r.kind);
+                    let now = crate::fx::now();
+                    // a frozen clock (captures) counts from 0, as animations do
+                    let t0 = if crate::fx::frozen().is_some() { 0.0 } else { *self.ui_seen.entry(key).or_insert(now) };
+                    let u = ((now - t0) / r.motion.dur).clamp(0.0, 1.0);
+                    let ease = 1.0 - (1.0 - u).powi(3);
+                    w = from as f32 + (w - from as f32) * ease;
+                    moving |= u < 1.0;
+                }
+                if let Some(hw) = r.motion.hover {
+                    w += (hw as f32 - w) * hov;
+                }
+                // in steps of 10: the shaped words are kept per weight
+                ((w / 10.0).round() * 10.0).clamp(100.0, 900.0) as u16
+            });
+            let weighted = |l: &crate::ui::Label| crate::ui::Label { weight: weight_now.unwrap_or(l.weight), ..l.clone() };
             // the keyboard is here (the program says so): an accent ring, 2px out
             let ring = |b: [f32; 4], rad: f32| (r.state == State::Focus).then(|| Rect { xywh: [b[0] - 2.0, b[1] - 2.0, b[2] + 4.0, b[3] + 4.0], color: frame.pal.cursor_bg.f32(), p: [rad + 2.0, 0.0], hole: NO_HOLE });
             // out by `pad` cells (as wide across as up and down: an even margin round the text)
@@ -864,7 +894,7 @@ impl Renderer {
                     rects.extend(clipped(out, clip));
                     if let Some(l) = label {
                         let on = crate::ui::on_role(&r.role, &frame.pal);
-                        self.ui_label(l, if disabled { crate::ui::mix(on, col, 0.62) } else { on }, px, clip, true);
+                        self.ui_label(&weighted(l), if disabled { crate::ui::mix(on, col, 0.62) } else { on }, px, clip, true);
                     }
                 }
                 Kind::Input { label, placeholder } => {
@@ -980,10 +1010,10 @@ impl Renderer {
                     rects.extend(clipped(out, clip));
                     if let Some(l) = label {
                         let on = fg.as_deref().and_then(|f| crate::ui::role(f, &frame.pal)).unwrap_or_else(|| crate::ui::on_role(&r.role, &frame.pal));
-                        self.ui_label(l, on, px, clip, true);
+                        self.ui_label(&weighted(l), on, px, clip, true);
                     }
                 }
-                Kind::Text(l) => self.ui_label(l, col, px, clip, false),
+                Kind::Text(l) => self.ui_label(&weighted(l), col, px, clip, false),
                 Kind::Line(e) => {
                     use crate::ui::Edge;
                     let t = (ch / 18.0).round().max(1.0);

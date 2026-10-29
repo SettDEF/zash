@@ -183,6 +183,11 @@ it), in the theme's colours, and plain text in every other terminal.
      checked headless: the widgets screen in the right pane of a split, drawn where that pane is)
 5. **Shaders and type** — custom GPU effects within a cost limit, variable fonts, animated weight,
    fonts for titles.
+   - [x] (before: panel shaders, packs, presets that morph, a budget guard that turns them off, fx_draw.rs)
+   - [x] animated weight (2026-10-29): any weight 100..900 on variable fonts (cosmic-text sets wght); weight=A>B with
+     dur= grows the words in when first shown (ease-out, the frozen clock counts from 0), hover-weight=N follows the
+     pointer's fade on buttons and pills; shaped per 10 steps of weight; visual cases weight-0, weight-1 (the
+     isolated HOME has no Google Sans Flex: they show the fallback face)
 6. **Recording, pen, sound** — **Drawings that move with the terminal (done 2026-10-23, ink.rs ZPane; not yet: a re-wrap moving a stroke with its text):** inside zeit a stroke belongs to
    the zeit pane it was drawn on and moves, resizes, hides and scrolls with it (zeit reports pane
    rects and scroll over OSC 7733); a resize that re-wraps text keeps strokes on their text (see
