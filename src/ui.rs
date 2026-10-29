@@ -23,8 +23,9 @@
 //!   progress,… a bar across the rect: value=0..1, role=primary (the fill) over surface-container-highest
 //!   list,… items=Inbox|Today|Done (one a row), sel=N (drawn chosen, role=primary-container), font=; with id=NAME each
 //!     row reports as NAME:N
-//!   table,… cols=12|8|6 (widths in cells), header=1 (default): a header band (role=surface-container-highest), striped
-//!     rows and faint column lines under the program's own cells
+//!   table,… a card (role=surface-container-low) under the program's rows, a hairline between them; header=1 (default):
+//!     the first row is the header, a line under it; head=Name|Size|Kind draws its words (UI font, semibold, muted) at
+//!     cols=12|8|6 (widths in cells) over the program's header cells; sel=N a chosen row; with id=NAME rows report NAME:N
 //!   any kind: id=NAME makes it interactive: zash draws hover and press itself (a short fade) and tells the
 //!     program: ESC ] 7733;ev;enter|leave|press|click;NAME BEL on its input (clicks on it are not text selection);
 //!     state=idle|focus|active|done|disabled is the program's own (Tab and Enter stay its keys: it moves focus)
@@ -60,7 +61,7 @@ pub enum Kind {
     /// rows of words, one a row; `sel` drawn chosen; with id=, each row is ID:N for its events
     List { items: Vec<String>, sel: Option<usize>, font: String },
     /// a header band, striped rows and faint lines between columns of these widths (cells), under the text
-    Table { cols: Vec<usize>, header: bool },
+    Table { cols: Vec<usize>, header: bool, head: Vec<String>, sel: Option<usize> },
 }
 
 /// What the program says a region is in (state=); hover and press zash knows itself.
@@ -146,7 +147,7 @@ pub fn parse(body: &str) -> Vec<Region> {
             }
             "progress" => (Kind::Progress { value: num("value", 0.0, 0.0, 1.0) }, get("role").unwrap_or("primary".into())),
             "list" => (Kind::List { items: get("items").map(|s| s.split('|').map(str::to_string).take(200).collect()).unwrap_or_default(), sel: get("sel").and_then(|v| v.parse().ok()), font: get("font").unwrap_or("mono".into()) }, get("role").unwrap_or("primary-container".into())),
-            "table" => (Kind::Table { cols: get("cols").map(|s| s.split('|').filter_map(|c| c.parse().ok()).take(64).collect()).unwrap_or_default(), header: get("header").as_deref() != Some("0") }, get("role").unwrap_or("surface-container-highest".into())),
+            "table" => (Kind::Table { cols: get("cols").map(|s| s.split('|').filter_map(|c| c.parse().ok()).take(64).collect()).unwrap_or_default(), header: get("header").as_deref() != Some("0"), head: get("head").map(|s| s.split('|').map(str::to_string).take(64).collect()).unwrap_or_default(), sel: get("sel").and_then(|v| v.parse().ok()) }, get("role").unwrap_or("surface-container-low".into())),
             _ => return None,
         };
         let state = match get("state").as_deref() { Some("focus") => State::Focus, Some("active") => State::Active, Some("done") => State::Done, Some("disabled") => State::Disabled, _ => State::Idle };
@@ -332,7 +333,7 @@ mod list_table_tests {
         let r = parse("list,0,0,8,3,items=Inbox|Today|Done,sel=1,id=nav;table,10,0,20,4,cols=8|6|6,header=0");
         assert_eq!(r[0].kind, Kind::List { items: vec!["Inbox".into(), "Today".into(), "Done".into()], sel: Some(1), font: "mono".into() });
         assert_eq!(r[0].id.as_deref(), Some("nav"));
-        assert_eq!(r[1].kind, Kind::Table { cols: vec![8, 6, 6], header: false });
-        assert_eq!(parse("table,0,0,4,2")[0].kind, Kind::Table { cols: vec![], header: true });
+        assert_eq!(r[1].kind, Kind::Table { cols: vec![8, 6, 6], header: false, head: vec![], sel: None });
+        assert_eq!(parse("table,0,0,4,2")[0].kind, Kind::Table { cols: vec![], header: true, head: vec![], sel: None });
     }
 }

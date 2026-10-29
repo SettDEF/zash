@@ -4,4 +4,4 @@
   Done        ui.rs       9 KB   Rust
   Later       PLAN.md    12 KB   Markdown
               cases       1 KB   Text
-[?25l]7733;ui;panel,1,0,10,6,role=surface-container-low;list,2,1,8,4,items=Inbox|Today|Done|Later,sel=1,id=nav,font=ui;table,14,1,32,5,cols=12|7|13
+[?25l]7733;ui;panel,1,0,10,6,role=surface-container-low;list,2,1,8,4,items=Inbox|Today|Done|Later,sel=1,id=nav,font=ui;table,14,1,32,5,cols=12|7|13,head=Name|Size|Kind,sel=1,id=files

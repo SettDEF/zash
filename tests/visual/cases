@@ -11,4 +11,4 @@ ui-plain    ui-plain.bytes   80x24   0.0     the same screen without the hints: 
 ui-scroll   ui-scroll.bytes  80x24   0.0     the hints scrolled up with their text (6 lines)
 widgets     widgets.bytes    38x10   0.0     button (focus ring, disabled), input with placeholder, progress at 40%, in a panel
 anim-text   anim-text.bytes  42x6    0.0     a Lottie text layer named title with the program's words (text.title=), a ✓ in its own font, the bar in the accent
-list-table  list-table.bytes 48x7    0.0     a list (Today chosen, UI font, cells hidden) in a panel, a table: header band, stripes, column lines
+list-table  list-table.bytes 48x7    0.0     a list (Today chosen: pill + accent mark) in a panel; a table card: muted header words (head=), a line under it, hairlines, ui.rs chosen

@@ -914,33 +914,64 @@ impl Renderer {
                             if !is_sel { c[3] = lift; }
                             let b = [row[0] - 0.5 * cw, row[1] + (ch * 0.06).round(), row[2] + cw, ch - 2.0 * (ch * 0.06).round()];
                             rects.extend(clipped(vec![Rect { xywh: b, color: c, p: [(ch * 0.3).round(), 0.0], hole: NO_HOLE }], clip));
+                            // the chosen one: a short accent mark at its left edge (a sidebar's)
+                            if is_sel {
+                                let mw = (cw * 0.3).round().max(3.0);
+                                let mh = (ch * 0.5).round();
+                                let mark = [b[0] - mw - (cw * 0.15).round(), row[1] + (ch - mh) / 2.0, mw, mh];
+                                rects.extend(clipped(vec![Rect { xywh: mark, color: fill(frame.pal.cursor_bg), p: [mw / 2.0, 0.0], hole: NO_HOLE }], clip));
+                            }
                         }
                         let l = crate::ui::Label { text: it.clone(), scale: 1.0, weight: if is_sel { 600 } else { 400 }, font: font.clone() };
                         self.ui_label(&l, if is_sel { on } else { base }, row, clip, false);
                     }
                 }
-                Kind::Table { cols, header } => {
-                    let mut out = Vec::new();
-                    let stripe = crate::ui::role("surface-container", &frame.pal).unwrap_or(frame.bg);
-                    let line = crate::ui::role("outline", &frame.pal).unwrap_or(frame.fg);
+                Kind::Table { cols, header, head, sel } => {
+                    // a card under the rows (out by a cell across, a quarter up and down), hairlines between rows
+                    let b = grow(cw, (ch * 0.25).round());
+                    let rad = (ch * 0.55).round();
+                    let line = crate::ui::role("outline-variant", &frame.pal).unwrap_or(frame.fg);
                     let t = (ch / 18.0).round().max(1.0);
+                    let mut out = vec![Rect { xywh: b, color: fill(col), p: [rad, 0.0], hole: NO_HOLE }];
+                    let first = usize::from(*header);
                     for row in 0..r.rect[3] {
                         let y0 = px[1] + row as f32 * ch;
-                        if *header && row == 0 {
-                            out.push(Rect { xywh: [px[0], y0, px[2], ch], color: fill(col), p: [(ch * 0.3).round(), 0.0], hole: NO_HOLE });
-                        } else if (row + usize::from(!*header)) % 2 == 0 {
-                            out.push(Rect { xywh: [px[0], y0, px[2], ch], color: fill(stripe), p: [0.0, 0.0], hole: NO_HOLE });
+                        // a chosen row, or one under the pointer (with id=): a soft band across the card
+                        let mut lift = 0.0;
+                        if row >= first {
+                            if let Some(id) = r.id.as_deref().filter(|_| !disabled) {
+                                let (h, p, m) = self.ui_lift(&format!("{id}:{}", row - first), [b[0], y0, b[2], ch], clip);
+                                lift = 0.06 * h + 0.08 * p;
+                                moving |= m;
+                            }
+                        }
+                        let chosen = row >= first && *sel == Some(row - first);
+                        if chosen || lift > 0.0 {
+                            let c = if chosen { crate::ui::role("primary-container", &frame.pal).unwrap_or(col) } else { frame.fg };
+                            let mut f = fill(c);
+                            if !chosen { f[3] = lift }
+                            out.push(Rect { xywh: [b[0] + 0.5 * cw, y0, b[2] - cw, ch], color: f, p: [(ch * 0.3).round(), 0.0], hole: NO_HOLE });
+                        }
+                        // the line under the header is full strength, the ones between rows half
+                        if row + 1 < r.rect[3] && (row >= first || *header) {
+                            let mut c = fill(crate::ui::role("outline", &frame.pal).unwrap_or(line));
+                            c[3] *= 0.28;
+                            if *header && row == 0 { c = fill(crate::ui::role("outline", &frame.pal).unwrap_or(frame.fg)); c[3] *= 0.6 }
+                            out.push(Rect { xywh: [b[0] + 0.5 * cw, y0 + ch - t / 2.0, b[2] - cw, t], color: c, p: [0.0, 0.0], hole: NO_HOLE });
                         }
                     }
-                    // between the columns: a faint line at each boundary (not after the last)
-                    let mut x = px[0];
-                    for w in cols.iter().take(cols.len().saturating_sub(1)) {
-                        x += *w as f32 * cw;
-                        let mut c = fill(line);
-                        c[3] *= 0.5;
-                        out.push(Rect { xywh: [x - t / 2.0, px[1], t, px[3]], color: c, p: [0.0, 0.0], hole: NO_HOLE });
-                    }
                     rects.extend(clipped(out, clip));
+                    // the header's words, quieter than the rows
+                    if *header && !head.is_empty() {
+                        let muted = crate::ui::role("on-surface-variant", &frame.pal).unwrap_or(frame.fg);
+                        let mut x = px[0];
+                        for (i, h) in head.iter().enumerate() {
+                            let w = cols.get(i).copied().unwrap_or(r.rect[2] / head.len().max(1)) as f32 * cw;
+                            let l = crate::ui::Label { text: h.clone(), scale: 1.0, weight: 600, font: "ui".into() };
+                            self.ui_label(&l, muted, [x, px[1], w, ch], clip, false);
+                            x += w;
+                        }
+                    }
                 }
                 Kind::Pill { label, fg, pad } => {
                     let b = grow(pad * cw, (ch * 0.08).round());
@@ -2269,6 +2300,17 @@ impl Frame {
                         for c in row.iter_mut().skip(r.rect[0]).take(r.rect[2]) {
                             c.ch = ' ';
                             c.zw = None;
+                        }
+                    }
+                }
+                // a table whose header zash draws (head=): the program's header cells give way
+                if let crate::ui::Kind::Table { header: true, head, .. } = &r.kind {
+                    if !head.is_empty() && y >= 0 {
+                        if let Some(row) = self.rows.get_mut(y as usize) {
+                            for c in row.iter_mut().skip(r.rect[0]).take(r.rect[2]) {
+                                c.ch = ' ';
+                                c.zw = None;
+                            }
                         }
                     }
                 }
