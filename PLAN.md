@@ -179,7 +179,8 @@ it), in the theme's colours, and plain text in every other terminal.
    - [x] button, input (placeholder, focus edge), progress kinds (2026-10-29, visual case widgets)
    - [x] list (items, sel, each row its own hover and events as ID:N) and table (header band, stripes, column
      lines under the program's cells) kinds (2026-10-29, visual case list-table)
-   - [ ] zeit translating the regions (and their events) of its panes
+   - [x] zeit translating the regions (and their events) of its panes (2026-10-29, zeit server.rs place_ui / ui_event;
+     checked headless: the widgets screen in the right pane of a split, drawn where that pane is)
 5. **Shaders and type** — custom GPU effects within a cost limit, variable fonts, animated weight,
    fonts for titles.
 6. **Recording, pen, sound** — **Drawings that move with the terminal (done 2026-10-23, ink.rs ZPane; not yet: a re-wrap moving a stroke with its text):** inside zeit a stroke belongs to
