@@ -14,6 +14,8 @@ pub struct Image {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placement {
     pub img: u32,
+    /// the image it was placed from (img differs for a cut part: x,y,w,h); deleting that id removes it too
+    pub src: u32,
     /// the line (counted from the oldest kept), and the column
     pub line: usize,
     pub col: usize,
@@ -250,7 +252,7 @@ impl Graphics {
             "d" => {
                 match keys.get("d").map(String::as_str).unwrap_or("a") {
                     "i" | "I" => {
-                        self.places.retain(|p| p.img != id);
+                        self.places.retain(|p| p.img != id && p.src != id);
                         if keys.get("d").map(String::as_str) == Some("I") {
                             self.images.remove(&id);
                         }
@@ -287,10 +289,38 @@ impl Graphics {
         }
         // display (a=T, or a=p for an image sent before)
         let Some(img) = self.images.get(&id) else { return Outcome { reply: reply(id, "ENOENT:no such image", true), advance: None } };
+        // x,y,w,h: only that part of the picture (Kitty's source rectangle, in pixels), cut once and kept under an
+        // id of its own (a view scrolling a picture shows its visible slice)
+        let (sx, sy) = (num("x").unwrap_or(0).min(img.w.saturating_sub(1)), num("y").unwrap_or(0).min(img.h.saturating_sub(1)));
+        let (sw, sh) = (num("w").filter(|w| *w > 0).unwrap_or(img.w - sx).min(img.w - sx), num("h").filter(|h| *h > 0).unwrap_or(img.h - sy).min(img.h - sy));
+        let (img, id) = if (sx, sy, sw, sh) == (0, 0, img.w, img.h) {
+            (img.clone(), id)
+        } else {
+            let mut h: u32 = 2166136261;
+            for v in [id, sx, sy, sw, sh] {
+                h = (h ^ v).wrapping_mul(16777619);
+            }
+            let cid = 0x6000_0000 | (h & 0x0fff_ffff);
+            if !self.images.contains_key(&cid) {
+                let mut px = Vec::with_capacity((sw * sh * 4) as usize);
+                for row in sy..sy + sh {
+                    let a = ((row * img.w + sx) * 4) as usize;
+                    px.extend_from_slice(&img.rgba[a..a + (sw * 4) as usize]);
+                }
+                let cut = Image { w: sw, h: sh, rgba: Arc::new(px) };
+                // cut pictures are kept a while: the oldest go when there are many
+                if self.images.len() > 256 {
+                    let old: Vec<u32> = self.images.keys().copied().filter(|k| k & 0xf000_0000 == 0x6000_0000).take(64).collect();
+                    for k in old { self.images.remove(&k); }
+                }
+                self.images.insert(cid, cut);
+            }
+            (self.images[&cid].clone(), cid)
+        };
         let (cw, ch) = (cell.0.max(1.0), cell.1.max(1.0));
         let cols = num("c").map(|c| c as usize).unwrap_or_else(|| (img.w as f32 / cw).ceil() as usize).max(1);
         let rows = num("r").map(|r| r as usize).unwrap_or_else(|| (img.h as f32 / ch).ceil() as usize).max(1);
-        self.places.push(Placement { img: id, line: at.0, col: at.1, cols, rows });
+        self.places.push(Placement { img: id, src: num("i").unwrap_or(id), line: at.0, col: at.1, cols, rows });
         // a few hundred at most: the oldest go
         if self.places.len() > 400 {
             self.places.remove(0);
@@ -403,7 +433,7 @@ impl Graphics {
 
     /// A web area at the cursor: `cols`×`rows` cells showing the view's frames.
     pub fn add_web(&mut self, view: Arc<crate::web::View>, at: (usize, usize), cols: usize, rows: usize) {
-        self.places.push(Placement { img: view.id, line: at.0, col: at.1, cols, rows });
+        self.places.push(Placement { img: view.id, src: view.id, line: at.0, col: at.1, cols, rows });
         self.webs.insert(view.id, view);
         self.generation += 1;
     }
@@ -424,7 +454,7 @@ impl Graphics {
     }
 
     pub fn add_anim(&mut self, a: Arc<crate::anim::Anim>, at: (usize, usize), cols: usize, rows: usize) {
-        self.places.push(Placement { img: a.id, line: at.0, col: at.1, cols, rows });
+        self.places.push(Placement { img: a.id, src: a.id, line: at.0, col: at.1, cols, rows });
         self.anims.insert(a.id, a);
         self.generation += 1;
     }
@@ -482,7 +512,7 @@ mod tests {
         let o = g.command(&rgba_cmd(7, 20, 30, ""), (10.0, 20.0), (5, 2));
         assert_eq!(o.reply.as_deref(), Some("\x1b_Gi=7;OK\x1b\\"));
         assert_eq!(o.advance, Some((1, 2)), "two rows tall, two columns wide");
-        assert_eq!(g.places, vec![Placement { img: 7, line: 5, col: 2, cols: 2, rows: 2 }]);
+        assert_eq!(g.places, vec![Placement { img: 7, src: 7, line: 5, col: 2, cols: 2, rows: 2 }]);
         assert_eq!(g.images[&7].rgba.len(), 20 * 30 * 4);
         // C=1: the cursor stays; q=2: no reply
         let o = g.command(&rgba_cmd(8, 10, 10, ",C=1,q=2"), (10.0, 20.0), (9, 0));
@@ -516,5 +546,37 @@ mod under_tests {
         assert_eq!(u.cells.len(), 2);
         assert_eq!((u.cells[0].2.as_str(), u.cells[0].5), ("A", 1));
         assert_eq!((u.cells[1].2.as_str(), u.cells[1].5), ("b", 0));
+    }
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+
+    // a=p with x,y,w,h: only that part of the picture, kept under its own id; deleting the picture's placements takes it too
+    #[test]
+    fn a_source_rectangle_shows_part_of_the_picture() {
+        let mut g = Graphics::default();
+        // a 4x4 picture whose pixel (x, y) has red = x*10 + y
+        let px: Vec<u8> = (0..16).flat_map(|i| [((i % 4) * 10 + i / 4) as u8, 0, 0, 255]).collect();
+        let t = base64_encode(&px);
+        g.command(&format!("a=t,f=32,s=4,v=4,i=9,q=2;{t}"), (1.0, 1.0), (0, 0));
+        g.command("a=p,i=9,x=1,y=2,w=2,h=1,C=1,q=2;", (1.0, 1.0), (3, 0));
+        assert_eq!(g.places.len(), 1);
+        let p = &g.places[0];
+        assert_eq!((p.src, p.cols, p.rows), (9, 2, 1));
+        let cut = &g.images[&p.img];
+        assert_eq!((cut.w, cut.h), (2, 1));
+        assert_eq!((cut.rgba[0], cut.rgba[4]), (12, 22), "pixels (1,2) and (2,2)");
+        g.command("a=d,d=i,i=9,q=2;", (1.0, 1.0), (0, 0));
+        assert!(g.places.is_empty(), "the cut's placement went with its picture");
+    }
+
+    fn base64_encode(d: &[u8]) -> String {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        d.chunks(3).flat_map(|c| {
+            let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+            (0..4).map(move |i| if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' })
+        }).collect()
     }
 }
