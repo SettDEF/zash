@@ -821,7 +821,7 @@ impl Renderer {
             let px = [ox + r.rect[0] as f32 * cw, oy + *y as f32 * ch + frame.scroll_px, r.rect[2] as f32 * cw, r.rect[3] as f32 * ch];
             let Some(mut col) = crate::ui::role(&r.role, &frame.pal) else { continue };
             let disabled = r.state == State::Disabled;
-            if let Some(id) = r.id.as_deref() {
+            if let Some(id) = r.id.as_deref().filter(|_| !matches!(r.kind, Kind::List { .. })) {
                 let inside = self.pointer.is_some_and(|(mx, my)| mx >= px[0] && mx < px[0] + px[2] && my >= px[1] && my < px[1] + px[3] && mx >= clip[0] && my >= clip[1] && mx < clip[0] + clip[2] && my < clip[1] + clip[3]);
                 if !disabled { self.ui_hits.push((id.to_string(), px)) }
                 let want = [f32::from(inside && !disabled), f32::from(self.ui_press.as_deref() == Some(id))];
@@ -895,6 +895,53 @@ impl Renderer {
                     }
                     rects.extend(clipped(out, clip));
                 }
+                Kind::List { items, sel, font } => {
+                    let chosen = crate::ui::role(&r.role, &frame.pal).unwrap_or(col);
+                    let on = crate::ui::on_role(&r.role, &frame.pal);
+                    for (i, it) in items.iter().enumerate().take(r.rect[3]) {
+                        let row = [px[0], px[1] + i as f32 * ch, px[2], ch];
+                        let mut lift = 0.0;
+                        if let Some(id) = r.id.as_deref().filter(|_| !disabled) {
+                            let (h, p, m) = self.ui_lift(&format!("{id}:{i}"), row, clip);
+                            lift = 0.08 * h + 0.10 * p;
+                            moving |= m;
+                        }
+                        let is_sel = *sel == Some(i);
+                        let base = crate::ui::role("on-surface", &frame.pal).unwrap_or(frame.fg);
+                        if is_sel || lift > 0.0 {
+                            let bg = if is_sel { crate::ui::mix(chosen, on, lift) } else { Rgb(base.0, base.1, base.2) };
+                            let mut c = fill(bg);
+                            if !is_sel { c[3] = lift; }
+                            let b = [row[0] - 0.5 * cw, row[1] + (ch * 0.06).round(), row[2] + cw, ch - 2.0 * (ch * 0.06).round()];
+                            rects.extend(clipped(vec![Rect { xywh: b, color: c, p: [(ch * 0.3).round(), 0.0], hole: NO_HOLE }], clip));
+                        }
+                        let l = crate::ui::Label { text: it.clone(), scale: 1.0, weight: if is_sel { 600 } else { 400 }, font: font.clone() };
+                        self.ui_label(&l, if is_sel { on } else { base }, row, clip, false);
+                    }
+                }
+                Kind::Table { cols, header } => {
+                    let mut out = Vec::new();
+                    let stripe = crate::ui::role("surface-container", &frame.pal).unwrap_or(frame.bg);
+                    let line = crate::ui::role("outline", &frame.pal).unwrap_or(frame.fg);
+                    let t = (ch / 18.0).round().max(1.0);
+                    for row in 0..r.rect[3] {
+                        let y0 = px[1] + row as f32 * ch;
+                        if *header && row == 0 {
+                            out.push(Rect { xywh: [px[0], y0, px[2], ch], color: fill(col), p: [(ch * 0.3).round(), 0.0], hole: NO_HOLE });
+                        } else if (row + usize::from(!*header)) % 2 == 0 {
+                            out.push(Rect { xywh: [px[0], y0, px[2], ch], color: fill(stripe), p: [0.0, 0.0], hole: NO_HOLE });
+                        }
+                    }
+                    // between the columns: a faint line at each boundary (not after the last)
+                    let mut x = px[0];
+                    for w in cols.iter().take(cols.len().saturating_sub(1)) {
+                        x += *w as f32 * cw;
+                        let mut c = fill(line);
+                        c[3] *= 0.5;
+                        out.push(Rect { xywh: [x - t / 2.0, px[1], t, px[3]], color: c, p: [0.0, 0.0], hole: NO_HOLE });
+                    }
+                    rects.extend(clipped(out, clip));
+                }
                 Kind::Pill { label, fg, pad } => {
                     let b = grow(pad * cw, (ch * 0.08).round());
                     let mut out: Vec<Rect> = ring(b, b[3] / 2.0).into_iter().collect();
@@ -920,6 +967,22 @@ impl Renderer {
             }
         }
         moving
+    }
+
+    /// One interactive part (a hint, a list row): put in ui_hits, its hover and press eased toward the pointer's;
+    /// (hover, press, still moving).
+    fn ui_lift(&mut self, id: &str, px: [f32; 4], clip: [f32; 4]) -> (f32, f32, bool) {
+        let inside = self.pointer.is_some_and(|(mx, my)| mx >= px[0] && mx < px[0] + px[2] && my >= px[1] && my < px[1] + px[3] && mx >= clip[0] && my >= clip[1] && mx < clip[0] + clip[2] && my < clip[1] + clip[3]);
+        self.ui_hits.push((id.to_string(), px));
+        let want = [f32::from(inside), f32::from(self.ui_press.as_deref() == Some(id))];
+        let step = self.ui_dt / 0.12;
+        let lv = self.ui_level.entry(id.to_string()).or_insert([0.0, 0.0]);
+        let mut moving = false;
+        for k in 0..2 {
+            lv[k] = if lv[k] < want[k] { (lv[k] + step).min(want[k]) } else { (lv[k] - step).max(want[k]) };
+            moving |= lv[k] != want[k];
+        }
+        (lv[0], lv[1], moving)
     }
 
     /// A UI hint's words, shaped once (kept by what they are) and placed: left, centred in the rect's height, cut at it and the pane.
@@ -2201,7 +2264,7 @@ impl Frame {
                 if y + r.rect[3] as isize <= 0 || y >= rows {
                     continue;
                 }
-                if matches!(r.kind, crate::ui::Kind::Text(_) | crate::ui::Kind::Pill { label: Some(_), .. } | crate::ui::Kind::Button { label: Some(_), .. } | crate::ui::Kind::Input { label: Some(_), .. } | crate::ui::Kind::Progress { .. }) {
+                if matches!(r.kind, crate::ui::Kind::Text(_) | crate::ui::Kind::Pill { label: Some(_), .. } | crate::ui::Kind::Button { label: Some(_), .. } | crate::ui::Kind::Input { label: Some(_), .. } | crate::ui::Kind::Progress { .. } | crate::ui::Kind::List { .. }) {
                     for row in self.rows.iter_mut().skip(y.max(0) as usize).take((y + r.rect[3] as isize - y.max(0)) as usize) {
                         for c in row.iter_mut().skip(r.rect[0]).take(r.rect[2]) {
                             c.ch = ' ';

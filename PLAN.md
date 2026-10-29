@@ -177,7 +177,9 @@ it), in the theme's colours, and plain text in every other terminal.
      hints; drawing every frame at 30/s: hints median 1.03-1.09 ms/frame (2.5-3 % CPU), plain
      0.97-1.22 ms (2-3 %): no measurable extra (words are shaped once, kept by content)
    - [x] button, input (placeholder, focus edge), progress kinds (2026-10-29, visual case widgets)
-   - [ ] list and table kinds; zeit translating the regions (and their events) of its panes
+   - [x] list (items, sel, each row its own hover and events as ID:N) and table (header band, stripes, column
+     lines under the program's cells) kinds (2026-10-29, visual case list-table)
+   - [ ] zeit translating the regions (and their events) of its panes
 5. **Shaders and type** — custom GPU effects within a cost limit, variable fonts, animated weight,
    fonts for titles.
 6. **Recording, pen, sound** — **Drawings that move with the terminal (done 2026-10-23, ink.rs ZPane; not yet: a re-wrap moving a stroke with its text):** inside zeit a stroke belongs to
