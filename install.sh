@@ -5,8 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 say() { printf '\033[1;34m::\033[0m %s\n' "$*"; }
 
-say "building (release, low priority)"
-nice -n 19 cargo build --release --quiet -j "${JOBS:-4}"
+say "building (release, all cores)"
+cargo build --release --quiet ${JOBS:+-j "$JOBS"}
 target="${CARGO_TARGET_DIR:-target}/release/zash"
 
 install -Dm755 "$target" "$HOME/.local/bin/zash"
