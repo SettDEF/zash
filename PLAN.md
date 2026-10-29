@@ -188,7 +188,7 @@ it), in the theme's colours, and plain text in every other terminal.
      dur= grows the words in when first shown (ease-out, the frozen clock counts from 0), hover-weight=N follows the
      pointer's fade on buttons and pills; shaped per 10 steps of weight; visual cases weight-0, weight-1 (the
      isolated HOME has no Google Sans Flex: they show the fallback face)
-6. **Recording, pen, sound** — **Drawings that move with the terminal (done 2026-10-23, ink.rs ZPane; not yet: a re-wrap moving a stroke with its text):** inside zeit a stroke belongs to
+6. **Recording, pen, sound** — **Done 2026-10-29: `zash record OUT.gif|OUT.mp4 [--size] [--fps] [--seconds] -- CMD`** (headless, one GPU set up, frames piped raw into ffmpeg; a GIF gets its own palette; effects, animations and UI hints recorded as they play) **and `[sound]`** (off by default: click on a UI hint, the bell; pw-play, volume). — **Drawings that move with the terminal (done 2026-10-23, ink.rs ZPane; not yet: a re-wrap moving a stroke with its text):** inside zeit a stroke belongs to
    the zeit pane it was drawn on and moves, resizes, hides and scrolls with it (zeit reports pane
    rects and scroll over OSC 7733); a resize that re-wraps text keeps strokes on their text (see
    ink.rs). — **Pen brushes from PhotoCraft (planned 2026-10-21, not built):** drawing mode draws with

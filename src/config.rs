@@ -172,6 +172,8 @@ pub struct Config {
     pub copy: crate::copy::Settings,
     /// drawing with the pen (`[pen]`, ink.rs)
     pub pen: PenSettings,
+    /// small sounds (`[sound]`, off by default): a click on a UI hint, the bell
+    pub sound: SoundSettings,
     /// the text centred in the space whole cells do not fill (else top-left), and moved by an offset
     pub center: bool,
     pub offset: (f32, f32),
@@ -222,6 +224,7 @@ impl Default for Config {
             fx: crate::fx::Settings::default(),
             copy: crate::copy::Settings::default(),
             pen: PenSettings::default(),
+            sound: SoundSettings::default(),
             center: true,
             offset: (0.0, 0.0),
             palette: Palette::load(),
@@ -305,6 +308,7 @@ struct File {
     fx: Option<FxFile>,
     copy: Option<CopyFile>,
     pen: Option<PenFile>,
+    sound: Option<SoundFile>,
     desktop: Option<DesktopFile>,
     float: Option<FloatFile>,
 }
@@ -373,6 +377,15 @@ impl Default for PenSettings {
     fn default() -> Self {
         PenSettings { width: 0.35, color: None }
     }
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SoundFile {
+    on: Option<bool>,
+    click: Option<String>,
+    bell: Option<String>,
+    volume: Option<f32>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -729,6 +742,14 @@ paste_guard = "auto"
 width = 0.35
 color = ""
 
+# Small sounds, off unless on = true: click when a drawn button or row (a program's UI hint) is
+# clicked, bell when a program rings the bell. Files pw-play can play (.wav, .ogg, .flac); volume 0..1.
+[sound]
+on = false
+click = "/usr/share/sounds/freedesktop/stereo/message.oga"
+bell = "/usr/share/sounds/freedesktop/stereo/bell.oga"
+volume = 0.4
+
 [fx]
 enabled = true
 shaders = true
@@ -857,6 +878,12 @@ impl Config {
             if let Some(v) = x.shaders { c.fx.shaders = v; }
             if let Some(v) = x.fps { c.fx.fps = v.clamp(1.0, 120.0); }
             if let Some(p) = x.presets { c.fx.presets = p; }
+        }
+        if let Some(x) = f.sound {
+            c.sound.on = x.on.unwrap_or(false);
+            c.sound.click = x.click.filter(|s| !s.is_empty());
+            c.sound.bell = x.bell.filter(|s| !s.is_empty());
+            c.sound.volume = x.volume.unwrap_or(0.4).clamp(0.0, 1.0);
         }
         if let Some(x) = f.pen {
             if let Some(w) = x.width { c.pen.width = w.clamp(0.05, 3.0); }
@@ -992,6 +1019,10 @@ mod file_tests {
         let f: super::File = toml::from_str(super::DEFAULT_FILE).unwrap();
         assert_eq!(f.size, Some(11.5));
         assert_eq!(f.features.unwrap().len(), 6);
+        // sounds are there to switch on, off by default
+        let s = f.sound.unwrap();
+        assert_eq!(s.on, Some(false));
+        assert!(s.click.is_some_and(|c| std::path::Path::new(&c).exists() || !std::path::Path::new("/usr/share/sounds/freedesktop").exists()));
     }
 }
 
@@ -1036,5 +1067,25 @@ pub enum LayerOpen {
 impl Default for LayersConf {
     fn default() -> Self {
         LayersConf { animate: true, ms: 140, open: LayerOpen::Fade, shadow: 1.0, shadow_over: false, fade_out: false }
+    }
+}
+
+/// `[sound]`: sound files played (pw-play) on a click on a UI hint and on the bell; off unless `on = true`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SoundSettings {
+    pub on: bool,
+    pub click: Option<String>,
+    pub bell: Option<String>,
+    /// 0..1
+    pub volume: f32,
+}
+
+impl SoundSettings {
+    /// Plays the sound for `what` ("click", "bell") when sounds are on and it has a file; never waits for it.
+    pub fn play(&self, what: &str) {
+        let file = match what { "click" => &self.click, "bell" => &self.bell, _ => &None };
+        let Some(f) = file.as_deref().filter(|_| self.on) else { return };
+        let f = f.strip_prefix("~/").map(|r| format!("{}/{r}", std::env::var("HOME").unwrap_or_default())).unwrap_or_else(|| f.to_string());
+        let _ = std::process::Command::new("pw-play").arg(format!("--volume={}", self.volume)).arg(&f).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
     }
 }

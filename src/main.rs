@@ -287,6 +287,46 @@ fn main() {
         return;
     }
 
+    // zash record OUT.gif|OUT.mp4 [--size CxR] [--fps N] [--seconds N] -- CMD: what zash draws, as a video
+    if args.first().map(String::as_str) == Some("record") {
+        let mut o = snapshot::Opts { png: None, cols: 80, rows: 24, wait: Duration::from_secs(0), cmd: Vec::new(), keys: None, workdir: workdir.clone(), search: None, older: 0, nvim: false };
+        let (mut out, mut fps, mut secs) = (None, 15.0f32, 10.0f32);
+        let mut it = args.into_iter().skip(1);
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--size" => {
+                    if let Some((c, r)) = it.next().and_then(|s| s.split_once('x').map(|(a, b)| (a.to_string(), b.to_string()))) {
+                        o.cols = c.parse().unwrap_or(80);
+                        o.rows = r.parse().unwrap_or(24);
+                    }
+                }
+                "--fps" => fps = it.next().and_then(|s| s.parse().ok()).unwrap_or(15.0),
+                "--seconds" => secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(10.0),
+                "--" => {
+                    o.cmd = it.by_ref().collect();
+                    break;
+                }
+                p if out.is_none() && !p.starts_with('-') => out = Some(p.to_string()),
+                other => {
+                    eprintln!("zash: unknown option {other}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        let Some(out) = out else {
+            eprintln!("usage: zash record OUT.gif|OUT.mp4 [--size 80x24] [--fps 15] [--seconds 10] -- CMD ARGS…");
+            std::process::exit(2);
+        };
+        match snapshot::record(&o, &cfg, &out, fps, secs) {
+            Ok((w, h, n)) => eprintln!("zash: wrote {out} ({w}×{h}, {n} frames at {fps}/s)"),
+            Err(e) => {
+                eprintln!("zash: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if matches!(args.first().map(String::as_str), Some("--snapshot" | "snapshot")) {
         let mut o = snapshot::Opts { png: None, cols: 100, rows: 30, wait: Duration::from_secs(5), cmd: Vec::new(), keys: None, workdir: workdir.clone(), search: None, older: 0, nvim: false };
         let mut it = args.into_iter().skip(1);

@@ -1654,7 +1654,7 @@ impl ApplicationHandler<ZEvent> for App {
                 }
             }
             Event::ChildExit(_) | Event::Exit => self.close_pane(tab, id, el),
-            Event::Bell => {}
+            Event::Bell => self.cfg.sound.play("bell"),
         }
     }
 
@@ -2017,6 +2017,9 @@ impl App {
 
     /// An event for the program that drew the hint: ESC ] 7733;ev;KIND;ID BEL on its input.
     fn ui_event(&self, kind: &str, id: &str) {
+        if kind == "click" {
+            self.cfg.sound.play("click");
+        }
         if let Some(s) = self.sess() {
             s.write(format!("\x1b]7733;ev;{kind};{id}\x07").into_bytes());
         }

@@ -265,3 +265,107 @@ fn capture_nvim(o: &Opts, cfg: &Config) -> std::io::Result<Frame> {
     let _ = std::fs::remove_file(&sock);
     Ok(frame)
 }
+
+/// `zash record OUT.gif|OUT.mp4 [--size CxR] [--fps N] [--seconds N] -- CMD`: the command run headless and its
+/// screen drawn `fps` times a second (effects, animations and UI hints as they play) into ffmpeg, until it
+/// exits or `seconds` pass. A GIF gets a palette made from its own frames.
+pub fn record(o: &Opts, cfg: &Config, out: &str, fps: f32, seconds: f32) -> Result<(u32, u32, usize), String> {
+    let (tx, rx) = mpsc::channel();
+    let grid = Grid { cols: o.cols, rows: o.rows, cell_w: 9.0, cell_h: 18.0 };
+    let cmd = if o.cmd.is_empty() { None } else { Some(o.cmd.clone()) };
+    let session = Session::spawn(cmd, o.workdir.clone(), grid, cfg.scrollback, Sink::Channel(tx)).map_err(|e| e.to_string())?;
+    // one GPU, renderer and target for every frame
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).map_err(|e| format!("no GPU adapter: {e}"))?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).map_err(|e| e.to_string())?;
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let mut r = Renderer::new(&device, &queue, format, cfg, 1.0);
+    r.cursor_ms = 0.0;
+    // even sizes: video encoders want them
+    let width = ((o.cols as f32 * r.cell_w + 2.0 * r.pad).ceil() as u32 + 1) & !1;
+    let height = ((o.rows as f32 * r.cell_h + 2.0 * r.pad).ceil() as u32 + 1) & !1;
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("zash record"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&Default::default());
+    let row = (width * 4).div_ceil(256) * 256;
+    let buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (row * height) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    // ffmpeg reads raw frames; a GIF is made in one go with its own palette (split, palettegen, paletteuse)
+    let size = format!("{width}x{height}");
+    let rate = format!("{fps}");
+    let mut args: Vec<&str> = vec!["-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &size, "-r", &rate, "-i", "-"];
+    let gif = out.to_ascii_lowercase().ends_with(".gif");
+    if gif {
+        args.extend(["-vf", "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=sierra2_4a", "-loop", "0"]);
+    } else {
+        args.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20", "-movflags", "+faststart"]);
+    }
+    args.push(out);
+    let mut ff = std::process::Command::new("ffmpeg").args(&args).stdin(std::process::Stdio::piped()).spawn().map_err(|e| format!("ffmpeg: {e}"))?;
+    let mut pipe = ff.stdin.take().ok_or("ffmpeg has no input")?;
+    let step = Duration::from_secs_f32(1.0 / fps.clamp(1.0, 60.0));
+    let end = Instant::now() + Duration::from_secs_f32(seconds.max(0.1));
+    let mut next = Instant::now();
+    let mut frames = 0usize;
+    let mut done = false;
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    while Instant::now() < end && !done {
+        // the program's output until the next frame is due
+        loop {
+            let left = next.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(Event::ChildExit(_)) | Ok(Event::Exit) => {
+                    std::thread::sleep(Duration::from_millis(60));
+                    done = true;
+                    break;
+                }
+                Ok(Event::PtyWrite(s)) => session.write(s.into_bytes()),
+                Ok(Event::TextAreaSizeRequest(f)) => session.write(f(alacritty_terminal::event::WindowSize { num_lines: o.rows as u16, num_cols: o.cols as u16, cell_width: 9, cell_height: 18 }).into_bytes()),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        next += step;
+        let marks = session.marks.lock().unwrap().clone();
+        let pal = if session.reverse.load(std::sync::atomic::Ordering::Relaxed) { cfg.palette.reversed() } else { cfg.palette.clone() };
+        let mut frame = { let t = session.term.lock(); Frame::extract(&t, &pal).with_prompts(&t, &marks).with_rows(&t, &session.ui_rows.lock().unwrap()).with_images(&t, &session.graphics.lock().unwrap()) };
+        frame.apply_cursor(&cfg.cursor, pal.cursor_fg);
+        r.render(&device, &queue, &view, width, height, &[crate::render::PaneView { id: 0, x: 0.0, y: 0.0, w: width as f32, h: height as f32, frame: &frame, focused: true }]);
+        let mut enc = device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) } },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        queue.submit(Some(enc.finish()));
+        let slice = buf.slice(..);
+        let (mtx, mrx) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| { let _ = mtx.send(res); });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        mrx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+        {
+            let data = slice.get_mapped_range().map_err(|e| format!("{e:?}"))?;
+            pixels.clear();
+            for y in 0..height as usize {
+                pixels.extend_from_slice(&data[y * row as usize..y * row as usize + width as usize * 4]);
+            }
+        }
+        buf.unmap();
+        use std::io::Write;
+        pipe.write_all(&pixels).map_err(|e| format!("ffmpeg stopped: {e}"))?;
+        frames += 1;
+    }
+    drop(pipe);
+    let st = ff.wait().map_err(|e| e.to_string())?;
+    if !st.success() {
+        return Err(format!("ffmpeg failed ({st})"));
+    }
+    Ok((width, height, frames))
+}
