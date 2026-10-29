@@ -142,10 +142,16 @@ it), in the theme's colours, and plain text in every other terminal.
    - [x] held frames and replacing in place (2026-10-27): at=SECONDS draws that one frame (no thread),
      name=X makes a later escape of that name replace the picture where it is (no new rows);
      `zash anim play FILE --scrub`: ← → a frame, PgUp PgDn a second, Home End, q
-   - [ ] text slots (the program's text drawn in the animation),
-     EffectCraft exports with `effectcraft-cli`; vello on the GPU once velato moves on
+   - [x] text slots (2026-10-29): a Lottie's text layers drawn by zash (velato refuses them: taken out before
+     it reads the file); text.NAME=words (percent-encoded) puts the program's words in the layer named NAME; its
+     size, fill, justification, position, anchor, scale, turn and fade per frame (keyframes eased linearly);
+     each run of one font its own text (a symbol the font lacks gets fontconfig's pick); visual case anim-text
+   - [ ] EffectCraft exports with `effectcraft-cli`; vello on the GPU once velato moves on
 3. **Interaction** — hover and click on what is drawn, named states (idle, hover, active, done) with
    smooth changes, events back to the program, Tab and Enter reach everything.
+   - [x] (2026-10-29) id= on any hint: hover and press drawn by zash (120 ms fade), ESC]7733;ev;enter|leave|press|click;ID
+     back on the program's input, clicks on it never select; state=focus|active|done|disabled from the program
+     (Tab and Enter stay its keys: it moves the focus ring); not yet: the events through zeit to the pane inside it
 4. **Widgets** — button, progress, table, list, input on the same layer; `zash ui …` for scripts.
    - [x] UI hints, stage 1 (2026-10-27, `src/ui.rs`): OSC 7733;ui;KIND,X,Y,W,H[,key=value]…;… BEL, the
      whole set for the screen on each redraw (OSC 7733;ui alone clears), in the pane's cells, values
@@ -170,7 +176,8 @@ it), in the theme's colours, and plain text in every other terminal.
      0 ms CPU/s (nothing drawn); the escape re-sent 30/s through the pty ~5 ms CPU/s with or without
      hints; drawing every frame at 30/s: hints median 1.03-1.09 ms/frame (2.5-3 % CPU), plain
      0.97-1.22 ms (2-3 %): no measurable extra (words are shaped once, kept by content)
-   - [ ] button, list, input kinds (with the interaction of 3); zeit translating the regions of its panes
+   - [x] button, input (placeholder, focus edge), progress kinds (2026-10-29, visual case widgets)
+   - [ ] list and table kinds; zeit translating the regions (and their events) of its panes
 5. **Shaders and type** — custom GPU effects within a cost limit, variable fonts, animated weight,
    fonts for titles.
 6. **Recording, pen, sound** — **Drawings that move with the terminal (done 2026-10-23, ink.rs ZPane; not yet: a re-wrap moving a stroke with its text):** inside zeit a stroke belongs to
