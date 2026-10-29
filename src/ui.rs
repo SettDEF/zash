@@ -17,7 +17,14 @@
 //!     (asked once per name), else a sans
 //!   line,…   a 1px line along one edge of the rect: edge=top|bottom|left|right (default bottom),
 //!     role=outline-variant
-//! Unknown kinds and keys are skipped (button, list, input come later).
+//!   button,… a rounded button: text=…, role=secondary-container (on-ROLE words), pad=0.6
+//!   input,…  a text field: text=the value, placeholder=…, role=surface-container-highest; its border is the accent
+//!     while state=focus
+//!   progress,… a bar across the rect: value=0..1, role=primary (the fill) over surface-container-highest
+//!   any kind: id=NAME makes it interactive: zash draws hover and press itself (a short fade) and tells the
+//!     program: ESC ] 7733;ev;enter|leave|press|click;NAME BEL on its input (clicks on it are not text selection);
+//!     state=idle|focus|active|done|disabled is the program's own (Tab and Enter stay its keys: it moves focus)
+//! Unknown kinds and keys are skipped.
 
 use crate::config::{Palette, Rgb};
 
@@ -42,6 +49,21 @@ pub enum Kind {
     Text(Label),
     /// a 1px line on this edge of the rect
     Line(Edge),
+    Button { label: Option<Label>, pad: f32 },
+    Input { label: Option<Label>, placeholder: bool },
+    /// how far along, 0..1
+    Progress { value: f32 },
+}
+
+/// What the program says a region is in (state=); hover and press zash knows itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum State {
+    #[default]
+    Idle,
+    Focus,
+    Active,
+    Done,
+    Disabled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +81,9 @@ pub struct Region {
     pub rect: [usize; 4],
     /// a theme colour name (role), or hex
     pub role: String,
+    /// interactive under this name (id=)
+    pub id: Option<String>,
+    pub state: State,
 }
 
 /// A set as sent: its regions, the absolute line of the screen's top then, and which screen.
@@ -106,9 +131,16 @@ pub fn parse(body: &str) -> Vec<Region> {
             "pill" => (Kind::Pill { label: label(1.0), fg: get("fg"), pad: num("pad", 0.6, 0.0, 4.0) }, get("role").unwrap_or("primary-container".into())),
             "line" => (Kind::Line(match get("edge").as_deref() { Some("top") => Edge::Top, Some("left") => Edge::Left, Some("right") => Edge::Right, _ => Edge::Bottom }), get("role").unwrap_or("outline-variant".into())),
             "text" => (Kind::Text(label(if n[3] > 1 { 1.6 } else { 1.0 })?), get("role").unwrap_or("on-surface".into())),
+            "button" => (Kind::Button { label: label(1.0), pad: num("pad", 0.6, 0.0, 4.0) }, get("role").unwrap_or("secondary-container".into())),
+            "input" => {
+                let (l, ph) = match label(1.0) { Some(l) => (Some(l), false), None => (get("placeholder").filter(|t| !t.is_empty()).map(|text| Label { text, scale: 1.0, weight: 400, font: get("font").unwrap_or("mono".into()) }), true) };
+                (Kind::Input { label: l, placeholder: ph }, get("role").unwrap_or("surface-container-highest".into()))
+            }
+            "progress" => (Kind::Progress { value: num("value", 0.0, 0.0, 1.0) }, get("role").unwrap_or("primary".into())),
             _ => return None,
         };
-        Some(Region { kind, rect: [n[0], n[1], n[2], n[3]], role })
+        let state = match get("state").as_deref() { Some("focus") => State::Focus, Some("active") => State::Active, Some("done") => State::Done, Some("disabled") => State::Disabled, _ => State::Idle };
+        Some(Region { kind, rect: [n[0], n[1], n[2], n[3]], role, id: get("id").filter(|i| !i.is_empty() && i.len() <= 64), state })
     }).take(256).collect()
 }
 
@@ -124,7 +156,7 @@ fn weight(w: Option<&str>) -> u16 {
     }
 }
 
-fn mix(a: Rgb, b: Rgb, k: f32) -> Rgb {
+pub(crate) fn mix(a: Rgb, b: Rgb, k: f32) -> Rgb {
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * k).round() as u8;
     Rgb(m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
@@ -172,21 +204,38 @@ mod tests {
     fn regions_parse() {
         let r = parse("panel,0,0,20,24,role=surface-container-high,r=12,border=outline;text,22,1,30,2,scale=2.5,weight=bold,text=Hello%2C%20world%3B");
         assert_eq!(r.len(), 2);
-        assert_eq!(r[0], Region { kind: Kind::Panel { radius: Some(12.0), border: Some("outline".into()), shadow: 0.0, pad: 0.5 }, rect: [0, 0, 20, 24], role: "surface-container-high".into() });
+        assert_eq!(r[0], Region { kind: Kind::Panel { radius: Some(12.0), border: Some("outline".into()), shadow: 0.0, pad: 0.5 }, rect: [0, 0, 20, 24], role: "surface-container-high".into(), id: None, state: State::Idle });
         assert_eq!(r[1].kind, Kind::Text(Label { text: "Hello, world;".into(), scale: 2.5, weight: 700, font: "mono".into() }));
         assert_eq!(r[1].role, "on-surface");
         // defaults; empty, zero-size, unknown and text without words skipped
         assert_eq!(parse("panel,1,2,3,4")[0].kind, Kind::Panel { radius: None, border: None, shadow: 0.0, pad: 0.5 });
         assert!(parse("").is_empty());
-        assert!(parse("panel,0,0,0,4;button,0,0,4,1;text,0,0,4,1;panel,1,x,3,4").is_empty());
+        assert!(parse("panel,0,0,0,4;widget,0,0,4,1;text,0,0,4,1;panel,1,x,3,4").is_empty());
         // a stray % stays
         assert_eq!(parse("text,0,0,4,1,text=50%")[0].kind, Kind::Text(Label { text: "50%".into(), scale: 1.0, weight: 400, font: "mono".into() }));
         // a pill: its words in the UI font, weight by number; without words the cells stay
         assert_eq!(parse("pill,1,1,6,1,text=Open,font=ui,weight=550,role=primary")[0].kind, Kind::Pill { label: Some(Label { text: "Open".into(), scale: 1.0, weight: 550, font: "ui".into() }), fg: None, pad: 0.6 });
         assert_eq!(parse("pill,1,1,6,1")[0].kind, Kind::Pill { label: None, fg: None, pad: 0.6 });
         // a line: its edge, outline-variant by default
-        assert_eq!(parse("line,0,0,4,1,edge=top")[0], Region { kind: Kind::Line(Edge::Top), rect: [0, 0, 4, 1], role: "outline-variant".into() });
+        assert_eq!(parse("line,0,0,4,1,edge=top")[0], Region { kind: Kind::Line(Edge::Top), rect: [0, 0, 4, 1], role: "outline-variant".into(), id: None, state: State::Idle });
         assert_eq!(parse("line,0,0,4,1")[0].kind, Kind::Line(Edge::Bottom));
+    }
+
+    #[test]
+    fn widgets_parse() {
+        let r = parse("button,2,1,8,1,text=Save,id=save,state=focus;input,2,3,20,1,placeholder=Search,id=q;progress,2,5,20,1,value=0.4;button,0,0,4,1,id=x,state=disabled");
+        assert_eq!(r.len(), 4);
+        assert_eq!((r[0].id.as_deref(), r[0].state, r[0].role.as_str()), (Some("save"), State::Focus, "secondary-container"));
+        assert!(matches!(&r[0].kind, Kind::Button { label: Some(l), .. } if l.text == "Save"));
+        // no value: the placeholder is shown, marked as one
+        assert!(matches!(&r[1].kind, Kind::Input { label: Some(l), placeholder: true } if l.text == "Search"));
+        assert!(matches!(parse("input,0,0,9,1,text=abc,placeholder=x")[0].kind, Kind::Input { placeholder: false, .. }));
+        assert_eq!(r[2].kind, Kind::Progress { value: 0.4 });
+        assert_eq!(parse("progress,0,0,9,1,value=7")[0].kind, Kind::Progress { value: 1.0 }, "clamped");
+        assert_eq!(r[3].state, State::Disabled);
+        // an id too long or empty: not interactive
+        assert_eq!(parse(&format!("button,0,0,4,1,id={}", "a".repeat(65)))[0].id, None);
+        assert_eq!(parse("button,0,0,4,1,id=")[0].id, None);
     }
 
     #[test]

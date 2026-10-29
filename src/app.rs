@@ -79,6 +79,9 @@ struct App {
     /// the web area that has the keyboard (by its view id), and the held button
     web_focus: Option<u32>,
     web_btn: Option<&'static str>,
+    /// the UI hint (OSC 7733;ui, id=) under the pointer, and the one pressed (ui.rs: its events go to the program)
+    ui_hover: Option<String>,
+    ui_press: Option<String>,
     /// Ctrl+L in a web area: the address being typed
     web_addr: Option<String>,
     /// the window title last set from a page
@@ -117,7 +120,7 @@ pub fn run(cfg: Config, cmd: Option<Vec<String>>, workdir: Option<std::path::Pat
     let event_loop = EventLoop::<ZEvent>::with_user_event().build().map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     let font_pt = cfg.font_size_pt;
-    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, popup_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, btn_down: false, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None, paste_guard: None, pen: None, drawing: false, pen_last: Default::default(), pen_hover: None, float };
+    let mut app = App { cfg, cmd, workdir, proxy, gpu: None, tabs: Vec::new(), active: 0, last_active: 0, next_id: 0, keys: Keys::load(), prefix: false, repeat_until: None, mods: ModifiersState::empty(), font_pt, mouse: (0.0, 0.0), web_focus: None, web_btn: None, ui_hover: None, ui_press: None, web_addr: None, web_title: String::new(), selecting: false, scroll_acc: 0.0, popup_acc: 0.0, glide: 0.0, glide_at: std::time::Instant::now(), mouse_btn: None, btn_down: false, nvim_btn: None, last_cell: (0, 0), clicks: (std::time::Instant::now(), 0, (0, 0)), search: None, paste_guard: None, pen: None, drawing: false, pen_last: Default::default(), pen_hover: None, float };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
 
@@ -1713,6 +1716,18 @@ impl ApplicationHandler<ZEvent> for App {
                 if self.sess().is_some_and(|s| s.graphics.lock().unwrap().float.is_some()) {
                     self.redraw();
                 }
+                // UI hints with an id: entering and leaving one is told to the program, and drawn (a fade)
+                let hit = self.ui_hit(position.x, position.y);
+                if hit != self.ui_hover {
+                    if let Some(old) = self.ui_hover.take() {
+                        self.ui_event("leave", &old);
+                    }
+                    if let Some(new) = &hit {
+                        self.ui_event("enter", new);
+                    }
+                    self.ui_hover = hit;
+                    self.redraw();
+                }
                 if self.web_focus.is_some() {
                     if let Some((v, x, y)) = self.web_hit(position.x, position.y) {
                         v.mouse("moved", x, y, self.web_btn.unwrap_or("none"), 0);
@@ -1768,6 +1783,24 @@ impl ApplicationHandler<ZEvent> for App {
                             }
                             return;
                         }
+                    }
+                }
+                // a UI hint with an id: press and click are the program's (no selection, no mouse report)
+                if code == 0 {
+                    if pressed {
+                        if let Some(id) = self.ui_hit(self.mouse.0, self.mouse.1) {
+                            self.ui_event("press", &id);
+                            self.ui_press = Some(id.clone());
+                            if let Some(g) = self.gpu.as_mut() { g.renderer.ui_press = Some(id) }
+                            self.redraw();
+                            return;
+                        }
+                    } else if let Some(id) = self.ui_press.take() {
+                        if let Some(g) = self.gpu.as_mut() { g.renderer.ui_press = None }
+                        // a click only when let go on it (dragged off: no click, as buttons do)
+                        if self.ui_hit(self.mouse.0, self.mouse.1).as_deref() == Some(id.as_str()) { self.ui_event("click", &id) }
+                        self.redraw();
+                        return;
                     }
                 }
                 // a click in another pane gives it the keyboard first
@@ -1971,5 +2004,21 @@ mod quote_tests {
         assert_eq!(super::shell_quote("/tmp/a.txt"), "/tmp/a.txt");
         assert_eq!(super::shell_quote("/tmp/my file.png"), "'/tmp/my file.png'");
         assert_eq!(super::shell_quote("it's"), "'it'\\''s'");
+    }
+}
+
+impl App {
+    /// The UI hint with an id at this pixel, as the last frame drew it.
+    fn ui_hit(&self, x: f64, y: f64) -> Option<String> {
+        let (x, y) = (x as f32, y as f32);
+        let g = self.gpu.as_ref()?;
+        g.renderer.ui_hits.iter().rev().find(|(_, [rx, ry, rw, rh])| x >= *rx && x < rx + rw && y >= *ry && y < ry + rh).map(|(id, _)| id.clone())
+    }
+
+    /// An event for the program that drew the hint: ESC ] 7733;ev;KIND;ID BEL on its input.
+    fn ui_event(&self, kind: &str, id: &str) {
+        if let Some(s) = self.sess() {
+            s.write(format!("\x1b]7733;ev;{kind};{id}\x07").into_bytes());
+        }
     }
 }

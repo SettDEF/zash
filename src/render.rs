@@ -433,6 +433,14 @@ pub struct Renderer {
     pub opacity: f32,
     /// where the mouse is (pixels), for hover on what zash draws itself (zfloat buttons)
     pub pointer: Option<(f32, f32)>,
+    /// UI hints with an id this frame: name and pixel rect (app.rs: hover and click events)
+    pub ui_hits: Vec<(String, [f32; 4])>,
+    /// the UI hint pressed now (its id), drawn pressed
+    pub ui_press: Option<String>,
+    /// each interactive hint's hover and press, eased (0..1), and the time since the last frame for it
+    ui_level: std::collections::HashMap<String, [f32; 2]>,
+    ui_dt: f32,
+    ui_tick: Option<std::time::Instant>,
     /// a zfloat dragged by its title: where the press was (pixels), its id, cell x, y, w, h then. It is
     /// drawn where the pointer puts it, to the pixel, while zeit moves it in cells
     pub float_drag: Option<(f32, f32, u64, usize, usize, usize, usize)>,
@@ -518,6 +526,11 @@ impl Renderer {
             float_at: None,
             opacity: cfg.opacity,
             pointer: None,
+            ui_hits: Vec::new(),
+            ui_press: None,
+            ui_level: std::collections::HashMap::new(),
+            ui_dt: 0.0,
+            ui_tick: None,
             float_drag: None,
             float_drag_seen: false,
             anim: None,
@@ -797,12 +810,36 @@ impl Renderer {
     }
 
     /// A pane's UI hints (ui.rs): panels and pills into `rects` (under the cells' backgrounds), words placed for the text pass.
-    fn ui_regions(&mut self, frame: &Frame, ox: f32, oy: f32, clip: [f32; 4], rects: &mut Vec<Rect>) {
-        use crate::ui::Kind;
+    /// Interactive ones (id=) are put in `ui_hits` and drawn lifted under the pointer, more while pressed
+    /// (eased over ~120 ms); returns true while such a change is still under way.
+    fn ui_regions(&mut self, frame: &Frame, ox: f32, oy: f32, clip: [f32; 4], rects: &mut Vec<Rect>) -> bool {
+        use crate::ui::{Kind, State};
         let (cw, ch) = (self.cell_w, self.cell_h);
+        let dt = self.ui_dt;
+        let mut moving = false;
         for (r, y) in &frame.ui {
             let px = [ox + r.rect[0] as f32 * cw, oy + *y as f32 * ch + frame.scroll_px, r.rect[2] as f32 * cw, r.rect[3] as f32 * ch];
-            let Some(col) = crate::ui::role(&r.role, &frame.pal) else { continue };
+            let Some(mut col) = crate::ui::role(&r.role, &frame.pal) else { continue };
+            let disabled = r.state == State::Disabled;
+            if let Some(id) = r.id.as_deref() {
+                let inside = self.pointer.is_some_and(|(mx, my)| mx >= px[0] && mx < px[0] + px[2] && my >= px[1] && my < px[1] + px[3] && mx >= clip[0] && my >= clip[1] && mx < clip[0] + clip[2] && my < clip[1] + clip[3]);
+                if !disabled { self.ui_hits.push((id.to_string(), px)) }
+                let want = [f32::from(inside && !disabled), f32::from(self.ui_press.as_deref() == Some(id))];
+                let lv = self.ui_level.entry(id.to_string()).or_insert([0.0, 0.0]);
+                for k in 0..2 {
+                    let step = dt / 0.12;
+                    lv[k] = if lv[k] < want[k] { (lv[k] + step).min(want[k]) } else { (lv[k] - step).max(want[k]) };
+                    moving |= lv[k] != want[k];
+                }
+                let on = crate::ui::on_role(&r.role, &frame.pal);
+                col = crate::ui::mix(col, on, 0.08 * lv[0] + 0.10 * lv[1]);
+            }
+            if r.state == State::Done {
+                col = crate::ui::role("primary-container", &frame.pal).unwrap_or(col);
+            }
+            let fill = |c: Rgb| { let mut f = c.f32(); if disabled { f[3] *= 0.38 } f };
+            // the keyboard is here (the program says so): an accent ring, 2px out
+            let ring = |b: [f32; 4], rad: f32| (r.state == State::Focus).then(|| Rect { xywh: [b[0] - 2.0, b[1] - 2.0, b[2] + 4.0, b[3] + 4.0], color: frame.pal.cursor_bg.f32(), p: [rad + 2.0, 0.0], hole: NO_HOLE });
             // out by `pad` cells (as wide across as up and down: an even margin round the text)
             let grow = |p: f32, py: f32| [px[0] - p, px[1] - py, px[2] + 2.0 * p, px[3] + 2.0 * py];
             match &r.kind {
@@ -815,12 +852,54 @@ impl Renderer {
                         c[3] = 0.5;
                         out.push(Rect { xywh: [b[0] - 1.0, b[1] - 1.0, b[2] + 2.0, b[3] + 2.0], color: c, p: [rad + 1.0, 0.0], hole: NO_HOLE });
                     }
-                    out.push(Rect { xywh: b, color: col.f32(), p: [rad, 0.0], hole: NO_HOLE });
+                    out.extend(ring(b, rad));
+                    out.push(Rect { xywh: b, color: fill(col), p: [rad, 0.0], hole: NO_HOLE });
+                    rects.extend(clipped(out, clip));
+                }
+                Kind::Button { label, pad } => {
+                    let b = grow(pad * cw, (ch * 0.08).round());
+                    let rad = (ch * 0.35).round().min(b[3] / 2.0);
+                    let mut out: Vec<Rect> = ring(b, rad).into_iter().collect();
+                    out.push(Rect { xywh: b, color: fill(col), p: [rad, 0.0], hole: NO_HOLE });
+                    rects.extend(clipped(out, clip));
+                    if let Some(l) = label {
+                        let on = crate::ui::on_role(&r.role, &frame.pal);
+                        self.ui_label(l, if disabled { crate::ui::mix(on, col, 0.62) } else { on }, px, clip, true);
+                    }
+                }
+                Kind::Input { label, placeholder } => {
+                    let b = grow(0.5 * cw, (ch * 0.08).round());
+                    let rad = (ch * 0.3).round().min(b[3] / 2.0);
+                    // the edge: the outline, the accent while it has the keyboard
+                    let focus = r.state == State::Focus;
+                    let e = if focus { frame.pal.cursor_bg } else { crate::ui::role("outline", &frame.pal).unwrap_or(frame.fg) };
+                    let w = if focus { 2.0 } else { 1.0 };
+                    let out = vec![
+                        Rect { xywh: [b[0] - w, b[1] - w, b[2] + 2.0 * w, b[3] + 2.0 * w], color: fill(e), p: [rad + w, 0.0], hole: NO_HOLE },
+                        Rect { xywh: b, color: fill(col), p: [rad, 0.0], hole: NO_HOLE },
+                    ];
+                    rects.extend(clipped(out, clip));
+                    if let Some(l) = label {
+                        let t = if *placeholder { crate::ui::role("on-surface-variant", &frame.pal).unwrap_or(frame.fg) } else { crate::ui::on_role("surface", &frame.pal) };
+                        self.ui_label(l, t, px, clip, false);
+                    }
+                }
+                Kind::Progress { value } => {
+                    // a thin rounded track through the middle of the rect, the done part in the role's colour
+                    let t = (ch * 0.28).round().max(3.0);
+                    let ty = px[1] + (px[3] - t) / 2.0;
+                    let track = crate::ui::role("surface-container-highest", &frame.pal).unwrap_or(frame.bg);
+                    let mut out = vec![Rect { xywh: [px[0], ty, px[2], t], color: fill(track), p: [t / 2.0, 0.0], hole: NO_HOLE }];
+                    if *value > 0.0 {
+                        out.push(Rect { xywh: [px[0], ty, (px[2] * value).max(t), t], color: fill(col), p: [t / 2.0, 0.0], hole: NO_HOLE });
+                    }
                     rects.extend(clipped(out, clip));
                 }
                 Kind::Pill { label, fg, pad } => {
                     let b = grow(pad * cw, (ch * 0.08).round());
-                    rects.extend(clipped(vec![Rect { xywh: b, color: col.f32(), p: [b[3] / 2.0, 0.0], hole: NO_HOLE }], clip));
+                    let mut out: Vec<Rect> = ring(b, b[3] / 2.0).into_iter().collect();
+                    out.push(Rect { xywh: b, color: fill(col), p: [b[3] / 2.0, 0.0], hole: NO_HOLE });
+                    rects.extend(clipped(out, clip));
                     if let Some(l) = label {
                         let on = fg.as_deref().and_then(|f| crate::ui::role(f, &frame.pal)).unwrap_or_else(|| crate::ui::on_role(&r.role, &frame.pal));
                         self.ui_label(l, on, px, clip, true);
@@ -836,10 +915,11 @@ impl Renderer {
                         Edge::Left => [px[0], px[1], t, px[3]],
                         Edge::Right => [px[0] + px[2] - t, px[1], t, px[3]],
                     };
-                    rects.extend(clipped(vec![Rect { xywh, color: col.f32(), p: [0.0, 0.0], hole: NO_HOLE }], clip));
+                    rects.extend(clipped(vec![Rect { xywh, color: fill(col), p: [0.0, 0.0], hole: NO_HOLE }], clip));
                 }
             }
         }
+        moving
     }
 
     /// A UI hint's words, shaped once (kept by what they are) and placed: left, centred in the rect's height, cut at it and the pane.
@@ -910,6 +990,11 @@ impl Renderer {
         self.shaders.tick();
         self.unders.clear();
         self.ui_placed.clear();
+        self.ui_hits.clear();
+        // the hints' fades: real time between frames, at most a tenth of a second (a frame after a pause jumps)
+        let now = std::time::Instant::now();
+        self.ui_dt = self.ui_tick.map(|t| now.duration_since(t).as_secs_f32().min(0.1)).unwrap_or(0.0);
+        self.ui_tick = Some(now);
         let mut rects = Vec::new();
         let mut over = Vec::new();
         let mut veil: Vec<Rect> = Vec::new();
@@ -932,7 +1017,7 @@ impl Renderer {
             // under it are cut away where it covers them
             let mut float_rect: Option<[f32; 4]> = None;
             if !p.frame.ui.is_empty() {
-                self.ui_regions(p.frame, ox, oy, clip, &mut rects);
+                animating |= self.ui_regions(p.frame, ox, oy, clip, &mut rects);
             }
             if let Some(z) = &p.frame.float {
                 // under the text: a soft shadow, the edge (the accent when it has the keyboard), the panel
@@ -2116,7 +2201,7 @@ impl Frame {
                 if y + r.rect[3] as isize <= 0 || y >= rows {
                     continue;
                 }
-                if matches!(r.kind, crate::ui::Kind::Text(_) | crate::ui::Kind::Pill { label: Some(_), .. }) {
+                if matches!(r.kind, crate::ui::Kind::Text(_) | crate::ui::Kind::Pill { label: Some(_), .. } | crate::ui::Kind::Button { label: Some(_), .. } | crate::ui::Kind::Input { label: Some(_), .. } | crate::ui::Kind::Progress { .. }) {
                     for row in self.rows.iter_mut().skip(y.max(0) as usize).take((y + r.rect[3] as isize - y.max(0)) as usize) {
                         for c in row.iter_mut().skip(r.rect[0]).take(r.rect[2]) {
                             c.ch = ' ';

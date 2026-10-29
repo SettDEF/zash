@@ -1,0 +1,8 @@
+
+  Export
+
+  [ Search files...          ]
+
+  [=========           ]  40%
+
+  [ Save ]  [ Cancel ]  [ Delete ][?25l]7733;ui;panel,1,0,36,9,role=surface-container,shadow=1;text,2,1,20,1,text=Export,weight=bold,font=ui;input,2,3,28,1,placeholder=Search%20files…,id=q;progress,2,5,22,1,value=0.4;text,26,5,6,1,text=40%25,role=on-surface-variant;button,2,7,8,1,text=Save,id=save,role=primary,state=focus,font=ui;button,12,7,10,1,text=Cancel,id=cancel,font=ui;button,24,7,10,1,text=Delete,id=del,state=disabled,font=ui
