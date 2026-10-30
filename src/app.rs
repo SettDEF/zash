@@ -1453,16 +1453,39 @@ impl ApplicationHandler<ZEvent> for App {
                 return;
             }
         };
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(el.owned_display_handle())));
-        let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            // the integrated GPU is plenty for text and draws less power
+        // WGPU_BACKEND=gl / vulkan is honoured, to try another backend without a rebuild
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(el.owned_display_handle())));
+        let surface = match instance.create_surface(window.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("zash: no drawing surface for the window ({e}). Is the GPU's Vulkan driver installed (vulkan-intel, vulkan-radeon)?");
+                el.exit();
+                return;
+            }
+        };
+        // the integrated GPU is plenty for text and draws less power
+        let preferred = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
             ..Default::default()
         }))
-        .expect("adapter");
+        .ok();
+        // A GPU that cannot draw to this window (a second GPU without the screen, e.g. a Radeon
+        // beside a Haswell whose own Vulkan driver is missing) came back with no formats, and
+        // caps.formats[0] panicked: the first one that can draw here instead, any backend.
+        let usable = |a: &wgpu::Adapter| a.is_surface_supported(&surface) && !surface.get_capabilities(a).formats.is_empty();
+        let adapter = match preferred.filter(|a| usable(a)) {
+            Some(a) => a,
+            None => match pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).into_iter().find(|a| usable(a)) {
+                Some(a) => a,
+                None => {
+                    eprintln!("zash: no GPU can draw to this window. Install the Vulkan driver for the GPU that runs the screen (Intel: vulkan-intel, AMD: vulkan-radeon), or try WGPU_BACKEND=gl");
+                    el.exit();
+                    return;
+                }
+            },
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("device");
         let caps = surface.get_capabilities(&adapter);
         let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
