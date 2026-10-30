@@ -472,6 +472,29 @@ pub struct Renderer {
     format: wgpu::TextureFormat,
 }
 
+/// The cell font: the configured family when it is installed, else a monospaced one (a Nerd
+/// Font first, for the prompt's icons). A missing font came back as a proportional sans, whose
+/// letters drifted off the grid the cursor moves on.
+fn cell_family(fs: &FontSystem, wanted: &str) -> String {
+    let db = fs.db();
+    let has = |name: &str| db.faces().any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)));
+    if has(wanted) {
+        return wanted.to_string();
+    }
+    let mono = |name: &str| db.faces().any(|f| f.monospaced && f.families.iter().any(|(n, _)| n == name));
+    let mut nerd: Vec<String> = db.faces().filter(|f| f.monospaced).filter_map(|f| f.families.first().map(|(n, _)| n.clone())).filter(|n| n.contains("Nerd Font")).collect();
+    nerd.sort();
+    let generic = || {
+        std::process::Command::new("fc-match").args(["-f", "%{family[0]}", "monospace"]).output().ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|n| mono(n))
+    };
+    let any = || db.faces().find(|f| f.monospaced).and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+    let got = nerd.into_iter().next().or_else(generic).or_else(any).unwrap_or_else(|| wanted.to_string());
+    eprintln!("zash: the font \"{wanted}\" is not installed, using \"{got}\"");
+    got
+}
+
 /// The drawn cursor chases its real position: the head quickly, the tail a
 /// little slower (the smear). Exponential, so it is the same at any frame rate.
 struct CursorAnim {
@@ -484,6 +507,7 @@ struct CursorAnim {
 impl Renderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, cfg: &Config, scale: f32) -> Renderer {
         let mut font_system = FontSystem::new();
+        let family = cell_family(&font_system, &cfg.font_family);
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
         let mut atlas = TextAtlas::new(device, queue, &cache, format);
@@ -515,7 +539,7 @@ impl Renderer {
             top: 0.0,
             rows: std::collections::HashMap::new(),
             order: std::collections::HashMap::new(),
-            family: cfg.font_family.clone(),
+            family,
             ui_family: cfg.ui_font.clone(),
             ui_fonts: std::collections::HashMap::new(),
             features,
@@ -644,7 +668,7 @@ impl Renderer {
                     continue;
                 }
                 // (empty cells and powerline shapes are drawn as spaces: plain too)
-                let plain = (c.ch == '\0' || powerline(c.ch).is_some() || (' '..='~').contains(&c.ch)) && c.zw.is_none();
+                let plain = (c.ch == '\0' || powerline(c.ch).is_some() || shape(c.ch).is_some() || (' '..='~').contains(&c.ch)) && c.zw.is_none();
                 if !plain && !spans.is_empty() {
                     segs.push((start, std::mem::take(&mut spans)));
                 }
@@ -656,7 +680,7 @@ impl Renderer {
                 // powerline shapes are drawn as rectangles (rect_list), not as glyphs
                 // an effect drawing this cell's text leaves it blank here
                 let blank = crate::fx_draw::hides(c, hidden);
-                s.push(if blank || c.ch == '\0' || powerline(c.ch).is_some() { ' ' } else { c.ch });
+                s.push(if blank || c.ch == '\0' || powerline(c.ch).is_some() || shape(c.ch).is_some() { ' ' } else { c.ch });
                 if let Some(z) = c.zw.as_ref().filter(|_| !blank) {
                     s.extend(z.iter());
                 }
@@ -690,6 +714,11 @@ impl Renderer {
                 let mut b = Buffer::new(&mut self.font_system, Metrics::new(self.font_px, self.cell_h));
                 b.set_size(Some((width - x).max(self.cell_w)), Some(self.cell_h));
                 b.set_rich_text(spans.iter().map(|(t, st)| (t.as_str(), mk(st))), &default, Shaping::Advanced, None);
+                // the column places a segment: right-to-left text (Arabic, Hebrew) was aligned to the
+                // right end of the row, at the window's edge, far from its cell
+                for l in b.lines.iter_mut() {
+                    l.set_align(Some(glyphon::cosmic_text::Align::Left));
+                }
                 b.shape_until_scroll(&mut self.font_system, false);
                 shaped.push((x, b));
             }
@@ -756,8 +785,17 @@ impl Renderer {
                         Powerline::TriLeft => Rect { xywh: [x, y, cw, ch], color: fg, p: [0.0, -2.0], hole: NO_HOLE },
                     });
                 }
-                let w = if cell.wide { 2.0 * cw } else { cw };
                 let thick = (self.font_px / 14.0).max(1.0).round();
+                // box lines and blocks, likewise: the font's are shorter than a row, so lines did not join
+                if let Some(sh) = shape(cell.ch) {
+                    let x = pad + c as f32 * cw;
+                    for ([fx, fy, fw, fh], a) in sh.parts(cw, ch, thick) {
+                        let mut col = fg;
+                        col[3] *= a;
+                        fore.push(Rect { xywh: [x + fx, y + fy, fw, fh], color: col, p: [0.0, 0.0], hole: NO_HOLE });
+                    }
+                }
+                let w = if cell.wide { 2.0 * cw } else { cw };
                 if cell.underline {
                     fore.push(Rect { xywh: [pad + c as f32 * cw, y + ch - thick * 2.0, w, thick], color: fg, p: [0.0, 0.0], hole: NO_HOLE });
                 }
@@ -2266,6 +2304,150 @@ fn powerline(c: char) -> Option<Powerline> {
         '\u{e0b4}' => Some(Powerline::RoundRight),
         '\u{e0b6}' => Some(Powerline::RoundLeft),
         _ => None,
+    }
+}
+
+/// A box-drawing or block character zash draws as rectangles.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// lines from the middle to the edges: up, right, down, left (1 light, 2 heavy, 3 double)
+    Arms([u8; 4]),
+    /// a part of the cell (x, y, w, h as fractions) at an opacity (the shades)
+    Block([f32; 4], f32),
+    /// quadrants: upper left, upper right, lower left, lower right
+    Quads([bool; 4]),
+}
+
+fn shape(c: char) -> Option<Shape> {
+    let arms = |a: [u8; 4]| Some(Shape::Arms(a));
+    let block = |x: f32, y: f32, w: f32, h: f32| Some(Shape::Block([x, y, w, h], 1.0));
+    let quads = |q: [bool; 4]| Some(Shape::Quads(q));
+    match c {
+        '─' => arms([0, 1, 0, 1]),
+        '│' => arms([1, 0, 1, 0]),
+        '┌' | '╭' => arms([0, 1, 1, 0]),
+        '┐' | '╮' => arms([0, 0, 1, 1]),
+        '└' | '╰' => arms([1, 1, 0, 0]),
+        '┘' | '╯' => arms([1, 0, 0, 1]),
+        '├' => arms([1, 1, 1, 0]),
+        '┤' => arms([1, 0, 1, 1]),
+        '┬' => arms([0, 1, 1, 1]),
+        '┴' => arms([1, 1, 0, 1]),
+        '┼' => arms([1, 1, 1, 1]),
+        '╴' => arms([0, 0, 0, 1]),
+        '╵' => arms([1, 0, 0, 0]),
+        '╶' => arms([0, 1, 0, 0]),
+        '╷' => arms([0, 0, 1, 0]),
+        '━' => arms([0, 2, 0, 2]),
+        '┃' => arms([2, 0, 2, 0]),
+        '┏' => arms([0, 2, 2, 0]),
+        '┓' => arms([0, 0, 2, 2]),
+        '┗' => arms([2, 2, 0, 0]),
+        '┛' => arms([2, 0, 0, 2]),
+        '┣' => arms([2, 2, 2, 0]),
+        '┫' => arms([2, 0, 2, 2]),
+        '┳' => arms([0, 2, 2, 2]),
+        '┻' => arms([2, 2, 0, 2]),
+        '╋' => arms([2, 2, 2, 2]),
+        '═' => arms([0, 3, 0, 3]),
+        '║' => arms([3, 0, 3, 0]),
+        '╔' => arms([0, 3, 3, 0]),
+        '╗' => arms([0, 0, 3, 3]),
+        '╚' => arms([3, 3, 0, 0]),
+        '╝' => arms([3, 0, 0, 3]),
+        '╠' => arms([3, 3, 3, 0]),
+        '╣' => arms([3, 0, 3, 3]),
+        '╦' => arms([0, 3, 3, 3]),
+        '╩' => arms([3, 3, 0, 3]),
+        '╬' => arms([3, 3, 3, 3]),
+        '▀' => block(0.0, 0.0, 1.0, 0.5),
+        '▔' => block(0.0, 0.0, 1.0, 0.125),
+        '▐' => block(0.5, 0.0, 0.5, 1.0),
+        '▕' => block(0.875, 0.0, 0.125, 1.0),
+        // ▁▂▃▄▅▆▇█: the lower eighths
+        '\u{2581}'..='\u{2588}' => {
+            let h = (c as u32 - 0x2580) as f32 / 8.0;
+            block(0.0, 1.0 - h, 1.0, h)
+        }
+        // ▉▊▋▌▍▎▏: the left eighths, 7 to 1
+        '\u{2589}'..='\u{258f}' => block(0.0, 0.0, (0x2590 - c as u32) as f32 / 8.0, 1.0),
+        '░' => Some(Shape::Block([0.0, 0.0, 1.0, 1.0], 0.25)),
+        '▒' => Some(Shape::Block([0.0, 0.0, 1.0, 1.0], 0.5)),
+        '▓' => Some(Shape::Block([0.0, 0.0, 1.0, 1.0], 0.75)),
+        '▖' => quads([false, false, true, false]),
+        '▗' => quads([false, false, false, true]),
+        '▘' => quads([true, false, false, false]),
+        '▝' => quads([false, true, false, false]),
+        '▙' => quads([true, false, true, true]),
+        '▚' => quads([true, false, false, true]),
+        '▛' => quads([true, true, true, false]),
+        '▜' => quads([true, true, false, true]),
+        '▞' => quads([false, true, true, false]),
+        '▟' => quads([false, true, true, true]),
+        _ => None,
+    }
+}
+
+impl Shape {
+    /// Its rectangles in a cell of cw × ch (x, y, w, h from the cell's corner) with their opacity;
+    /// `t` is a light line's width.
+    fn parts(self, cw: f32, ch: f32, t: f32) -> Vec<([f32; 4], f32)> {
+        let mut out = Vec::new();
+        match self {
+            Shape::Block([x, y, w, h], a) => {
+                // on whole pixels, so stacked blocks meet without a seam
+                let (x0, y0) = ((x * cw).round(), (y * ch).round());
+                out.push(([x0, y0, ((x + w) * cw).round() - x0, ((y + h) * ch).round() - y0], a));
+            }
+            Shape::Quads(q) => {
+                let (hw, hh) = ((cw / 2.0).round(), (ch / 2.0).round());
+                let cells = [[0.0, 0.0, hw, hh], [hw, 0.0, cw - hw, hh], [0.0, hh, hw, ch - hh], [hw, hh, cw - hw, ch - hh]];
+                out.extend(cells.iter().zip(q).filter(|(_, on)| *on).map(|(r, _)| (*r, 1.0)));
+            }
+            Shape::Arms([u, r, d, l]) => {
+                let w = |k: u8| if k == 2 { 2.0 * t } else { t };
+                // a line of width lw centred on the middle, on whole pixels
+                let mid = |size: f32, lw: f32| ((size - lw) / 2.0).round();
+                let (cx, cy) = (cw / 2.0, ch / 2.0);
+                let g = t.max((t * 1.5).round()); // half the gap of a double line
+                for (k, vertical, towards_start) in [(u, true, true), (d, true, false), (l, false, true), (r, false, false)] {
+                    if k == 0 {
+                        continue;
+                    }
+                    if k != 3 {
+                        let lw = w(k);
+                        // single lines meet in the middle: each arm covers the crossing
+                        out.push((if vertical {
+                            let x = mid(cw, lw);
+                            let m = mid(ch, lw);
+                            if towards_start { [x, 0.0, lw, m + lw] } else { [x, m, lw, ch - m] }
+                        } else {
+                            let y = mid(ch, lw);
+                            let m = mid(cw, lw);
+                            if towards_start { [0.0, y, m + lw, lw] } else { [m, y, cw - m, lw] }
+                        }, 1.0));
+                        continue;
+                    }
+                    // a double arm: two lines; the one on the side of a crossing arm is the inner line of
+                    // that corner and stops at it, the other runs on to the far line (║ ═ ╔ ╬ meet properly)
+                    let h = t / 2.0;
+                    let (c, len) = if vertical { (cy, ch) } else { (cx, cw) };
+                    let (a, b) = if vertical { (l, r) } else { (u, d) };
+                    for (side, other) in [(-1.0, a), (1.0, b)] {
+                        let inner = other != 0;
+                        let (s0, s1) = if towards_start {
+                            (0.0, if inner { c - g + h } else { c + g + h })
+                        } else {
+                            (if inner { c + g - h } else { c - g - h }, len)
+                        };
+                        let at = ((if vertical { cx } else { cy }) + side * g - h).round();
+                        let (s0, s1) = (s0.round(), s1.round());
+                        out.push((if vertical { [at, s0, t, s1 - s0] } else { [s0, at, s1 - s0, t] }, 1.0));
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
