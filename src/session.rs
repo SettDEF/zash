@@ -736,6 +736,11 @@ pub fn program_env() -> std::collections::HashMap<String, String> {
     env.insert("TERM_PROGRAM".into(), "zash".into());
     env.insert("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").into());
     env.insert("ZASH".into(), "1".into());
+    // zash fell back to software rendering: the programs it runs use the GPU as usual
+    if std::env::var("ZASH_SOFTWARE").is_ok_and(|v| !v.is_empty()) {
+        env.insert("LIBGL_ALWAYS_SOFTWARE".into(), "0".into());
+        env.insert("ZASH_SOFTWARE".into(), String::new());
+    }
     // a launcher can start zash without a locale; programs then fall back to ASCII
     let has_utf8 = ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|k| std::env::var(k).is_ok_and(|v| v.to_uppercase().contains("UTF-8") || v.to_uppercase().contains("UTF8")));
     if !has_utf8 {
