@@ -1480,7 +1480,20 @@ impl ApplicationHandler<ZEvent> for App {
             None => match pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).into_iter().find(|a| usable(a)) {
                 Some(a) => a,
                 None => {
-                    eprintln!("zash: no GPU can draw to this window. Install the Vulkan driver for the GPU that runs the screen (Intel: vulkan-intel, AMD: vulkan-radeon), or try WGPU_BACKEND=gl");
+                    // e.g. a Haswell: its Vulkan driver is not compliant enough for wgpu and its GL one
+                    // offers no framebuffer with alpha. The CPU draws a terminal fast enough.
+                    if std::env::var("ZASH_SOFTWARE").is_ok_and(|v| !v.is_empty()) {
+                        eprintln!("zash: no GPU can draw to this window, and neither can software rendering (llvmpipe). Install the Vulkan driver for the GPU that runs the screen (Intel: vulkan-intel, AMD: vulkan-radeon)");
+                    } else {
+                        eprintln!("zash: no GPU can draw to this window, restarting with software rendering");
+                        use std::os::unix::process::CommandExt;
+                        let e = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "zash".into()))
+                            .args(std::env::args_os().skip(1))
+                            .env("LIBGL_ALWAYS_SOFTWARE", "1")
+                            .env("ZASH_SOFTWARE", "1")
+                            .exec();
+                        eprintln!("zash: restarting failed: {e}");
+                    }
                     el.exit();
                     return;
                 }
