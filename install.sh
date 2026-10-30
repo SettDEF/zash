@@ -25,6 +25,7 @@ if command -v rsvg-convert >/dev/null; then
     done
 fi
 # Exec as an absolute path: a session's PATH may not include ~/.local/bin
+mkdir -p "$HOME/.local/share/applications"
 sed "s|^Exec=zash|Exec=$HOME/.local/bin/zash|" packaging/zash.desktop > "$HOME/.local/share/applications/zash.desktop"
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 gtk-update-icon-cache -f -t "$icons" 2>/dev/null || true
