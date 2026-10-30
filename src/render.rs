@@ -472,6 +472,29 @@ pub struct Renderer {
     format: wgpu::TextureFormat,
 }
 
+/// The cell font: the configured family when it is installed, else a monospaced one (a Nerd
+/// Font first, for the prompt's icons). A missing font came back as a proportional sans, whose
+/// letters drifted off the grid the cursor moves on.
+fn cell_family(fs: &FontSystem, wanted: &str) -> String {
+    let db = fs.db();
+    let has = |name: &str| db.faces().any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)));
+    if has(wanted) {
+        return wanted.to_string();
+    }
+    let mono = |name: &str| db.faces().any(|f| f.monospaced && f.families.iter().any(|(n, _)| n == name));
+    let mut nerd: Vec<String> = db.faces().filter(|f| f.monospaced).filter_map(|f| f.families.first().map(|(n, _)| n.clone())).filter(|n| n.contains("Nerd Font")).collect();
+    nerd.sort();
+    let generic = || {
+        std::process::Command::new("fc-match").args(["-f", "%{family[0]}", "monospace"]).output().ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|n| mono(n))
+    };
+    let any = || db.faces().find(|f| f.monospaced).and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+    let got = nerd.into_iter().next().or_else(generic).or_else(any).unwrap_or_else(|| wanted.to_string());
+    eprintln!("zash: the font \"{wanted}\" is not installed, using \"{got}\"");
+    got
+}
+
 /// The drawn cursor chases its real position: the head quickly, the tail a
 /// little slower (the smear). Exponential, so it is the same at any frame rate.
 struct CursorAnim {
@@ -484,6 +507,7 @@ struct CursorAnim {
 impl Renderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, cfg: &Config, scale: f32) -> Renderer {
         let mut font_system = FontSystem::new();
+        let family = cell_family(&font_system, &cfg.font_family);
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
         let mut atlas = TextAtlas::new(device, queue, &cache, format);
@@ -515,7 +539,7 @@ impl Renderer {
             top: 0.0,
             rows: std::collections::HashMap::new(),
             order: std::collections::HashMap::new(),
-            family: cfg.font_family.clone(),
+            family,
             ui_family: cfg.ui_font.clone(),
             ui_fonts: std::collections::HashMap::new(),
             features,
@@ -690,6 +714,11 @@ impl Renderer {
                 let mut b = Buffer::new(&mut self.font_system, Metrics::new(self.font_px, self.cell_h));
                 b.set_size(Some((width - x).max(self.cell_w)), Some(self.cell_h));
                 b.set_rich_text(spans.iter().map(|(t, st)| (t.as_str(), mk(st))), &default, Shaping::Advanced, None);
+                // the column places a segment: right-to-left text (Arabic, Hebrew) was aligned to the
+                // right end of the row, at the window's edge, far from its cell
+                for l in b.lines.iter_mut() {
+                    l.set_align(Some(glyphon::cosmic_text::Align::Left));
+                }
                 b.shape_until_scroll(&mut self.font_system, false);
                 shaped.push((x, b));
             }
